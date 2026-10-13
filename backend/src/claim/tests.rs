@@ -18,10 +18,39 @@ const DEMO_CLAIM: &str = "## 认领\n\n- agent: DemoAgent\n- 开始时间: 2026-
      - 分支: demo/claim-lease\n\n心跳至少每 30 分钟一次。\n\nAgent: DemoAgent\n";
 
 fn comment(body: &str, posted_at: &str) -> Comment {
+    comment_id(body, posted_at, 0)
+}
+
+/// A comment with GitHub's own id, which orders two comments posted in
+/// the same second.
+fn comment_id(body: &str, posted_at: &str, id: u64) -> Comment {
     Comment {
+        id,
         url: format!("https://github.com/zbtzbtzbt/theFlash/issues/31#issuecomment-{posted_at}"),
         posted_at: at(posted_at),
         body: body.to_string(),
+    }
+}
+
+/// A comment on issue #31, as GitHub returned it. `which` is its id in
+/// `testdata/github/claims/two-claims/comments-31-with-demo-record.json`,
+/// so a test about what agents really write runs on the real bytes.
+fn real_comment(which: u64) -> Comment {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/testdata/github/claims/two-claims/comments-31-with-demo-record.json"
+    );
+    let text = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{path}: {e}"));
+    let list: Vec<serde_json::Value> = serde_json::from_str(&text).unwrap();
+    let found = list
+        .iter()
+        .find(|c| c["id"] == which)
+        .unwrap_or_else(|| panic!("{path} 里没有 id {which} 这条评论"));
+    Comment {
+        id: which,
+        url: found["html_url"].as_str().unwrap().to_string(),
+        posted_at: at(found["created_at"].as_str().unwrap()),
+        body: found["body"].as_str().unwrap().to_string(),
     }
 }
 
@@ -192,7 +221,7 @@ fn a_heartbeat_or_a_push_pushes_expiry_back() {
 
     snapshot.pushes.insert(
         "demo/claim-lease".to_string(),
-        at("2026-10-14T05:00:00+08:00"),
+        Push::At(at("2026-10-14T05:00:00+08:00")),
     );
     let held = board(&snapshot).lease(31).cloned().unwrap();
     assert_eq!(held.status(now), Status::Active, "刚推过分支就是活跃的");
@@ -455,6 +484,244 @@ fn the_comments_the_commands_post_read_back_as_what_they_are() {
         back.contains("DemoAgent") && back.contains("3 小时 4 分钟前"),
         "{back}"
     );
+}
+
+#[test]
+fn a_write_up_that_quotes_the_commands_is_a_report_not_a_claim() {
+    // The demo record posted on #31 after the hand-back, byte for byte.
+    // It quotes a claim, a heartbeat and a hand-back inside fenced code
+    // blocks; reading those quotes as the things they quote would make a
+    // report claim the issue, or revive a lease that was handed back.
+    let record = real_comment(6153344810);
+    assert_eq!(
+        lease::parse_claim(&record.body, &record.url, record.posted_at),
+        None,
+        "代码块里的 ## 认领 是引用，不是一条新认领"
+    );
+    assert!(
+        !lease::is_reclaim(&record.body),
+        "代码块里的 ## 收回认领 也是引用"
+    );
+    let beat = lease::parse_heartbeat(&record.body, &record.url, record.posted_at)
+        .expect("写进度的评论算一次心跳");
+    assert_eq!(
+        beat.agent, "Claude",
+        "心跳属于写这条评论的 agent，不是它引用的那条认领里的 agent"
+    );
+
+    // The same, quoted with `>` and fenced with `~~~`.
+    for quoted in [
+        "转一下它发的：\n\n> ## 认领\n> \n> - agent: DemoAgent\n> - 改动模块: docs/demo\n",
+        "~~~\n## 认领\n\n- agent: DemoAgent\n- 改动模块: docs/demo\n~~~\n",
+    ] {
+        assert_eq!(
+            lease::parse_claim(quoted, "u", at("2026-10-14T03:30:00+08:00")),
+            None,
+            "{quoted:?} 是引用，不是认领"
+        );
+    }
+}
+
+#[test]
+fn the_earliest_claim_in_a_window_holds_the_issue() {
+    // Two agents read "nobody is working on this" at the same moment and
+    // both post a claim. GitHub has no compare-and-set, so both have to
+    // reach the same answer from the comments they can both see: the
+    // earliest claim holds it, and GitHub's comment id settles the same
+    // second.
+    let codex_claim = "## 认领\n\n- agent: Codex\n- 改动模块: docs/demo/claim-lease-demo.md\n";
+    let board = board_of(issue(
+        &[lease::CLAIM_LABEL],
+        vec![
+            comment_id(DEMO_CLAIM, "2026-10-14T03:05:55+08:00", 2),
+            comment_id(codex_claim, "2026-10-14T03:05:55+08:00", 1),
+        ],
+    ));
+    let held = board.lease(31).expect("两条认领里有一条算数");
+    assert_eq!(
+        held.agent(),
+        "Codex",
+        "同一秒里发的两条认领，评论 id 小的那条更早"
+    );
+
+    let board = board_of(issue(
+        &[lease::CLAIM_LABEL],
+        vec![
+            comment_id(DEMO_CLAIM, "2026-10-14T03:05:55+08:00", 1),
+            comment_id(codex_claim, "2026-10-14T03:05:58+08:00", 2),
+        ],
+    ));
+    let held = board.lease(31).expect("两条认领里有一条算数");
+    assert_eq!(held.agent(), "DemoAgent", "晚三秒的那条认领不算");
+    assert_eq!(
+        held.last.at,
+        at("2026-10-14T03:05:55+08:00"),
+        "别人晚到的认领也不算持有者的心跳"
+    );
+
+    // The agent that lost reads the same thing and says so.
+    let issue = issue(
+        &[lease::CLAIM_LABEL],
+        vec![
+            comment_id(DEMO_CLAIM, "2026-10-14T03:05:55+08:00", 1),
+            comment_id(codex_claim, "2026-10-14T03:05:58+08:00", 2),
+        ],
+    );
+    let (mine, theirs) = (issue.comments[1].url.clone(), issue.comments[0].url.clone());
+    assert_eq!(
+        confirm_claim(&issue, &mine, &BTreeMap::new()),
+        Confirmed::Lost {
+            agent: "DemoAgent".to_string(),
+            claim: theirs.clone(),
+        }
+    );
+    assert_eq!(
+        confirm_claim(&issue, &theirs, &BTreeMap::new()),
+        Confirmed::Held
+    );
+}
+
+#[test]
+fn giving_up_a_claim_that_lost_a_race_does_not_end_the_one_that_won() {
+    let codex_claim = "## 认领\n\n- agent: Codex\n- 改动模块: docs/demo/claim-lease-demo.md\n";
+    let mine = comment_id(codex_claim, "2026-10-14T03:05:58+08:00", 2);
+    let given_up = yield_comment(
+        "Codex",
+        &mine.url,
+        "DemoAgent",
+        "https://github.com/zbtzbtzbt/theFlash/issues/31#issuecomment-1",
+    );
+    assert_eq!(
+        lease::yielded_claim(&given_up).as_deref(),
+        Some(mine.url.as_str()),
+        "让出评论要说清让出的是哪一条认领：{given_up}"
+    );
+    assert!(
+        !lease::is_reclaim(&given_up),
+        "让出自己那条认领不是收回别人的认领：{given_up}"
+    );
+    let board = board_of(issue(
+        &[lease::CLAIM_LABEL],
+        vec![
+            comment_id(DEMO_CLAIM, "2026-10-14T03:05:55+08:00", 1),
+            mine,
+            comment_id(&given_up, "2026-10-14T03:05:59+08:00", 3),
+        ],
+    ));
+    assert_eq!(
+        board.lease(31).map(|l| l.agent()),
+        Some("DemoAgent"),
+        "让出之后，赢的那条认领照常有效"
+    );
+    assert!(board.trouble.is_empty(), "{:?}", board.trouble);
+}
+
+#[test]
+fn a_claim_by_the_same_agent_again_updates_what_it_will_change() {
+    let board = board_of(issue(
+        &[lease::CLAIM_LABEL],
+        vec![
+            comment_id(DEMO_CLAIM, "2026-10-14T03:05:55+08:00", 1),
+            comment_id(
+                "## 认领\n\n- agent: DemoAgent\n- 改动模块: docs/demo, scripts/demo\n",
+                "2026-10-14T04:00:00+08:00",
+                2,
+            ),
+        ],
+    ));
+    let held = board.lease(31).expect("持有者自己重发认领还是它的租约");
+    assert_eq!(held.agent(), "DemoAgent");
+    assert_eq!(held.claim.modules, ["docs/demo", "scripts/demo"]);
+    assert_eq!(
+        held.last.at,
+        at("2026-10-14T04:00:00+08:00"),
+        "重发一次认领也是一次活着的证据"
+    );
+}
+
+#[test]
+fn a_claim_whose_label_never_made_it_on_still_holds_the_issue() {
+    // The claim comment goes out first and the label second, so a failed
+    // `gh issue edit` leaves a lease the label-filtered snapshot cannot
+    // see. Every command that acts on one issue reads that issue.
+    let held = issue(&[], vec![comment(DEMO_CLAIM, "2026-10-14T03:05:55+08:00")]);
+    let mut board = Board::default();
+    board.include(&held);
+    let lease = board.lease(31).expect("没有标签的认领评论也是一条租约");
+    assert_eq!(lease.agent(), "DemoAgent");
+    assert!(!lease.labelled, "租约知道自己的标签不在，心跳会补上");
+
+    let Verdict::Refuse(why) = decide_claim(
+        &board,
+        &held,
+        "Codex",
+        &["docs/unrelated".to_string()],
+        None,
+        at("2026-10-14T03:20:00+08:00"),
+    ) else {
+        panic!("已有租约即使标签没加上也不能被覆盖");
+    };
+    assert!(why.contains("DemoAgent"), "{why}");
+    assert!(
+        !decide_reclaim(&board, 31, at("2026-10-14T03:20:00+08:00")).is_ok(),
+        "没过期就不能收回，和有没有标签无关"
+    );
+    assert!(
+        decide_reclaim(&board, 31, at("2026-10-14T06:10:00+08:00")).is_ok(),
+        "过期之后照常可以收回"
+    );
+
+    // An issue nobody ever claimed stays free, label or no label.
+    let mut board = Board::default();
+    board.include(&issue(&[], vec![]));
+    assert!(board.leases.is_empty() && board.trouble.is_empty());
+}
+
+#[test]
+fn a_push_time_nobody_can_read_keeps_the_issue_from_being_taken_over() {
+    // Pushing is a heartbeat, so a push time that cannot be read means
+    // silence cannot be proved. Reading pushes needs push access to the
+    // repository; without it the lease is reported, not expired.
+    let mut pushes = BTreeMap::new();
+    pushes.insert(
+        "demo/claim-lease".to_string(),
+        Push::Unreadable("Must have push access to repository".to_string()),
+    );
+    let board = board(&Snapshot {
+        issues: vec![issue(
+            &[lease::CLAIM_LABEL],
+            vec![comment(DEMO_CLAIM, "2026-10-14T03:05:55+08:00")],
+        )],
+        pushes,
+    });
+    let held = board.lease(31).expect("租约还在，只是证明不了它沉默");
+    let now = at("2026-10-14T06:10:00+08:00");
+    assert_eq!(held.status(now), Status::Expired, "评论上看它确实沉默了");
+    assert!(
+        held.push_unreadable
+            .as_deref()
+            .is_some_and(|w| w.contains("推送时间读不到")),
+        "{:?}",
+        held.push_unreadable
+    );
+    let Verdict::Refuse(why) = decide_reclaim(&board, 31, now) else {
+        panic!("读不到推送时间就不能断定它沉默，不能收回");
+    };
+    assert!(why.contains("推送时间读不到"), "{why}");
+    let Verdict::Refuse(why) = decide_claim(
+        &board,
+        &issue(
+            &[lease::CLAIM_LABEL],
+            vec![comment(DEMO_CLAIM, "2026-10-14T03:05:55+08:00")],
+        ),
+        "Codex",
+        &["docs/demo".to_string()],
+        None,
+        now,
+    ) else {
+        panic!("同样不能直接认领");
+    };
+    assert!(why.contains("推送时间读不到"), "{why}");
 }
 
 #[test]

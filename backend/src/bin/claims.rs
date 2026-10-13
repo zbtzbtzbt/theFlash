@@ -129,6 +129,18 @@ impl Options {
         snapshot.map(|s| claim::board(&s)).map_err(fetch_failed)
     }
 
+    /// The board plus issue `number` read on its own, which is what the
+    /// commands that act on one issue decide on. The snapshot only holds
+    /// issues labelled `认领中`, and the label is added after the claim
+    /// comment, so without this a claim whose label never made it on
+    /// would look like a free issue (#16).
+    fn board_with(&self, number: u64) -> Result<(Board, Issue), ExitCode> {
+        let mut board = self.board()?;
+        let issue = self.issue(number)?;
+        board.include(&issue);
+        Ok((board, issue))
+    }
+
     fn issue(&self, number: u64) -> Result<Issue, ExitCode> {
         match &self.replay {
             Some(dir) => Snapshot::replay_issue(dir, number),
@@ -252,6 +264,15 @@ fn print_lease(l: &Lease, now: DateTime<Utc>) {
     if !l.claim.overlap_note.is_empty() {
         println!("  重叠      {}", l.claim.overlap_note);
     }
+    if let Some(why) = &l.push_unreadable {
+        println!("  推送      {why}（证明不了它沉默，不能收回）");
+    }
+    if !l.labelled {
+        println!(
+            "  标签      没有 {} 标签（发认领评论之后标签没加上），下一次心跳会补上",
+            lease::CLAIM_LABEL
+        );
+    }
     println!("  认领评论  {}", l.claim.url);
 }
 
@@ -280,8 +301,13 @@ fn json(board: &Board, now: DateTime<Utc>) -> String {
                 "last_update_was": l.last.sign.what(),
                 "idle_minutes": l.idle_minutes(now),
                 "status": l.status(now).name(),
-                "expired": l.status(now) == Status::Expired,
+                // A lease nobody can show to be silent is not expired as
+                // far as a dispatcher is concerned, however long ago its
+                // last readable sign of life was.
+                "expired": l.status(now) == Status::Expired && l.push_unreadable.is_none(),
                 "expires_in_minutes": l.expires_in_minutes(now),
+                "push_unreadable": l.push_unreadable,
+                "labelled": l.labelled,
             })
         })
         .collect();
@@ -323,9 +349,9 @@ fn claim_one(options: &Options) -> ExitCode {
         },
         None => None,
     };
-    let (board, issue) = match (options.board(), options.issue(number)) {
-        (Ok(b), Ok(i)) => (b, i),
-        (Err(code), _) | (_, Err(code)) => return code,
+    let (board, issue) = match options.board_with(number) {
+        Ok(both) => both,
+        Err(code) => return code,
     };
     let verdict = claim::decide_claim(
         &board,
@@ -362,7 +388,47 @@ fn claim_one(options: &Options) -> ExitCode {
         println!("没有真的发评论、没有加标签（--dry-run 或 --replay）");
         return ExitCode::SUCCESS;
     }
-    post(options, number, &body, Some(Label::Add(lease::CLAIM_LABEL)))
+    let posted = match comment(options, number, &body) {
+        Ok(url) => url,
+        Err(code) => return code,
+    };
+    // Two agents can post a claim at the same moment, so the claim is
+    // confirmed rather than locked: read the issue back and see whose
+    // claim came first (claim::confirm_claim).
+    match confirm(options, number, &posted, &board) {
+        Ok(()) => {}
+        Err(code) => return code,
+    }
+    label(options, number, Label::Add(lease::CLAIM_LABEL))
+}
+
+/// Checks that the claim just posted is the one that holds the issue, and
+/// gives it up if an earlier claim beat it.
+fn confirm(options: &Options, number: u64, posted: &str, board: &Board) -> Result<(), ExitCode> {
+    let issue = options.issue(number)?;
+    match claim::confirm_claim(&issue, posted, &board.pushes) {
+        claim::Confirmed::Held => Ok(()),
+        claim::Confirmed::Lost { agent, claim } => {
+            let body = claim::yield_comment(options.agent(), posted, &agent, &claim);
+            println!("要发的让出评论：\n{body}");
+            let _ = comment(options, number, &body);
+            eprintln!(
+                "让出 — #{number} 几乎同时被 {agent} 认领了，它那条（{claim}）更早，算它的。\
+                 我这条已经作废（上面那条让出评论），没有加 {} 标签。\
+                 换一个 issue，或者等 {agent} 做完",
+                lease::CLAIM_LABEL
+            );
+            Err(ExitCode::FAILURE)
+        }
+        claim::Confirmed::Unclear(why) => {
+            eprintln!(
+                "评论发出去了，但读回来的时候认领读不出来：{why}\n\
+                 没有加 {} 标签：先去 issue 上看一眼是谁在做",
+                lease::CLAIM_LABEL
+            );
+            Err(ExitCode::from(2))
+        }
+    }
 }
 
 /// Reports progress, which is what keeps a lease from expiring.
@@ -377,11 +443,14 @@ fn heartbeat(options: &Options) -> ExitCode {
         Ok(n) => n,
         Err(code) => return code,
     };
-    let board = match options.board() {
-        Ok(b) => b,
+    let (board, _) = match options.board_with(number) {
+        Ok(both) => both,
         Err(code) => return code,
     };
-    match board.lease(number) {
+    // A lease whose `认领中` label never made it on is still a lease, and
+    // reporting progress is where it gets its label back: the holder does
+    // not have to notice or fix the label by hand (#16).
+    let relabel = match board.lease(number) {
         Some(held) if !lease::same_agent(held.agent(), options.agent()) => {
             eprintln!(
                 "#{number} 是 {} 的认领，不是 {} 的：心跳只刷新自己的租约",
@@ -390,7 +459,7 @@ fn heartbeat(options: &Options) -> ExitCode {
             );
             return ExitCode::FAILURE;
         }
-        Some(_) => {}
+        Some(held) => !held.labelled,
         None => {
             eprintln!(
                 "#{number} 上没有读得出来的认领，心跳不会刷新任何租约。\
@@ -399,14 +468,26 @@ fn heartbeat(options: &Options) -> ExitCode {
             );
             return ExitCode::FAILURE;
         }
-    }
+    };
     let body = claim::heartbeat_comment(options.agent(), note, now);
     println!("要发的心跳评论：\n{body}");
+    if relabel {
+        println!(
+            "#{number} 有租约但没有 {} 标签（发认领评论之后标签没加上），这次心跳把它补上",
+            lease::CLAIM_LABEL
+        );
+    }
     if !options.writes() {
         println!("没有真的发评论（--dry-run 或 --replay）");
         return ExitCode::SUCCESS;
     }
-    post(options, number, &body, None)
+    if let Err(code) = comment(options, number, &body) {
+        return code;
+    }
+    if relabel {
+        return label(options, number, Label::Add(lease::CLAIM_LABEL));
+    }
+    ExitCode::SUCCESS
 }
 
 /// Takes over an expired claim: says what it took over and on what
@@ -422,8 +503,8 @@ fn reclaim(options: &Options) -> ExitCode {
         Ok(n) => n,
         Err(code) => return code,
     };
-    let board = match options.board() {
-        Ok(b) => b,
+    let (board, _) = match options.board_with(number) {
+        Ok(both) => both,
         Err(code) => return code,
     };
     let verdict = claim::decide_reclaim(&board, number, now);
@@ -431,18 +512,43 @@ fn reclaim(options: &Options) -> ExitCode {
         return refused(&verdict);
     }
     let held = board.lease(number).expect("a reclaimable lease exists");
+    let (was, labelled) = (held.claim.posted_at, held.labelled);
     let body = claim::reclaim_comment(held, options.agent(), now);
     println!("要发的收回评论：\n{body}");
     if !options.writes() {
         println!("没有真的发评论、没有去掉标签（--dry-run 或 --replay）");
         return ExitCode::SUCCESS;
     }
-    post(
-        options,
-        number,
-        &body,
-        Some(Label::Remove(lease::CLAIM_LABEL)),
-    )
+    if let Err(code) = comment(options, number, &body) {
+        return code;
+    }
+    // The snapshot this decided on may be minutes old, and the holder or
+    // somebody else may have claimed the issue in between. Taking the
+    // label off then would hide a lease that is seconds old, so the
+    // label comes off only if the claim being handed back is still the
+    // one on the issue.
+    match options.issue(number) {
+        Ok(fresh) => {
+            if let Ok(now_held) = claim::read_lease(&fresh, &board.pushes)
+                && now_held.claim.posted_at > was
+            {
+                println!(
+                    "#{number} 上已经有一条更新的认领（{}，{}），{} 标签留着：\
+                     上面那条收回评论只说明旧租约为什么过期",
+                    now_held.claim.url,
+                    now_held.agent(),
+                    lease::CLAIM_LABEL
+                );
+                return ExitCode::SUCCESS;
+            }
+        }
+        Err(code) => return code,
+    }
+    if !labelled {
+        println!("#{number} 本来就没有 {} 标签，不用去掉", lease::CLAIM_LABEL);
+        return ExitCode::SUCCESS;
+    }
+    label(options, number, Label::Remove(lease::CLAIM_LABEL))
 }
 
 /// The label change a command makes after its comment, if any. A
@@ -452,24 +558,29 @@ enum Label {
     Remove(&'static str),
 }
 
-/// Posts the comment, then changes the label, in that order: the comment
-/// is the lease, and a label without one is the state #16 calls
-/// unreadable.
-fn post(options: &Options, number: u64, body: &str, label: Option<Label>) -> ExitCode {
+/// Posts a comment and returns its link. The comment goes out before any
+/// label changes: the comment is the lease, and the label only decides
+/// what `gh issue list` can filter on.
+fn comment(options: &Options, number: u64, body: &str) -> Result<String, ExitCode> {
     match snapshot::comment(options.repo(), number, body) {
-        Ok(out) => print!("{out}"),
+        Ok(out) => {
+            print!("{out}");
+            Ok(out.trim().to_string())
+        }
         Err(e) => {
             eprintln!("{e}");
-            return ExitCode::from(2);
+            Err(ExitCode::from(2))
         }
     }
-    let (done, result) = match label {
-        None => return ExitCode::SUCCESS,
-        Some(Label::Add(l)) => (
+}
+
+fn label(options: &Options, number: u64, which: Label) -> ExitCode {
+    let (done, result) = match which {
+        Label::Add(l) => (
             format!("#{number} 加上了 {l} 标签"),
             snapshot::add_label(options.repo(), number, l),
         ),
-        Some(Label::Remove(l)) => (
+        Label::Remove(l) => (
             format!("#{number} 去掉了 {l} 标签"),
             snapshot::remove_label(options.repo(), number, l),
         ),
@@ -480,7 +591,12 @@ fn post(options: &Options, number: u64, body: &str, label: Option<Label>) -> Exi
             ExitCode::SUCCESS
         }
         Err(e) => {
-            eprintln!("{e}\n评论已经发出去了，标签没改成：手动改一下标签");
+            eprintln!(
+                "{e}\n评论已经发出去了，标签没改成。评论才是租约，所以它不会丢：\
+                 别的 agent 的 `claims claim` 会读这个 issue 自己的评论，看到这条租约；\
+                 `claims heartbeat --issue {number} --agent {}` 会把标签补上",
+                options.agent()
+            );
             ExitCode::from(2)
         }
     }

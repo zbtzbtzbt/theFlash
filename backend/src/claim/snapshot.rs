@@ -27,9 +27,23 @@ pub struct Issue {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Comment {
+    /// GitHub's id, which rises with every comment. Two comments posted
+    /// in the same second are ordered by it, and the lease protocol rests
+    /// on knowing which of two claims came first (#16).
+    pub id: u64,
     pub url: String,
     pub posted_at: DateTime<Utc>,
     pub body: String,
+}
+
+/// When a branch was last pushed to, or why that cannot be read. Pushing
+/// counts as a heartbeat, so a push time nobody can read is not the same
+/// as a branch that was never pushed: the first means the lease cannot be
+/// judged, the second means the lease lives by its comments.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Push {
+    At(DateTime<Utc>),
+    Unreadable(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -39,7 +53,7 @@ pub struct Snapshot {
     /// When each branch named by a claim was last pushed to. A branch
     /// that does not exist yet is simply absent, which makes its pushes
     /// count for nothing rather than making the claim unreadable.
-    pub pushes: BTreeMap<String, DateTime<Utc>>,
+    pub pushes: BTreeMap<String, Push>,
 }
 
 #[derive(Debug)]
@@ -94,24 +108,29 @@ struct ApiLabel {
 
 #[derive(Deserialize)]
 struct ApiComment {
+    #[serde(default)]
+    id: u64,
     body: Option<String>,
     html_url: Option<String>,
     created_at: Option<String>,
 }
 
+/// One entry of `repos/<仓库>/activity`: what happened to a ref and when.
+/// `timestamp` is when GitHub received it, which is the push time; a
+/// commit's own date is when it was made, possibly hours earlier and
+/// offline.
 #[derive(Deserialize)]
-struct ApiCommit {
-    commit: ApiCommitDetail,
+struct ApiActivity {
+    #[serde(default)]
+    activity_type: String,
+    timestamp: Option<String>,
 }
 
+/// GitHub's error body, which `activity` answers with when the login has
+/// no push access to the repository.
 #[derive(Deserialize)]
-struct ApiCommitDetail {
-    committer: ApiCommitPerson,
-}
-
-#[derive(Deserialize)]
-struct ApiCommitPerson {
-    date: String,
+struct ApiError {
+    message: String,
 }
 
 fn from_json<T: serde::de::DeserializeOwned>(what: &str, text: &str) -> Result<T, Error> {
@@ -160,22 +179,43 @@ fn comments_from_json(what: &str, text: &str) -> Result<Vec<Comment>, Error> {
             continue;
         };
         out.push(Comment {
+            id: c.id,
             url: c.html_url.unwrap_or_default(),
             posted_at: parse_time(what, &created_at)?,
             body: c.body.unwrap_or_default(),
         });
     }
-    out.sort_by_key(|c| c.posted_at);
+    out.sort_by_key(|c| (c.posted_at, c.id));
     Ok(out)
 }
 
-/// The time of the newest commit in a `commits` response.
-fn last_push_from_json(what: &str, text: &str) -> Result<Option<DateTime<Utc>>, Error> {
-    let list: Vec<ApiCommit> = from_json(what, text)?;
-    match list.first() {
-        Some(c) => Ok(Some(parse_time(what, &c.commit.committer.date)?)),
-        None => Ok(None),
+/// The activity types that move a branch's head, so an agent that pushed
+/// is an agent that is still working. A merge of someone else's pull
+/// request into the branch is not the holder reporting in.
+const PUSH_TYPES: [&str; 3] = ["push", "force_push", "branch_creation"];
+
+/// When a branch was last pushed to, from an `activity` response: the
+/// newest entry that is a push. GitHub answers newest first; this does
+/// not rely on that.
+fn last_push_from_json(what: &str, text: &str) -> Result<Option<Push>, Error> {
+    if let Ok(error) = serde_json::from_str::<ApiError>(text) {
+        return Ok(Some(Push::Unreadable(error.message)));
     }
+    let list: Vec<ApiActivity> = from_json(what, text)?;
+    let mut last: Option<DateTime<Utc>> = None;
+    for entry in list
+        .iter()
+        .filter(|e| PUSH_TYPES.contains(&e.activity_type.as_str()))
+    {
+        let Some(stamp) = entry.timestamp.as_deref().filter(|t| !t.is_empty()) else {
+            continue;
+        };
+        let at = parse_time(what, stamp)?;
+        if last.is_none_or(|known| at > known) {
+            last = Some(at);
+        }
+    }
+    Ok(last.map(Push::At))
 }
 
 // ---- replayed responses ----
@@ -202,8 +242,8 @@ impl Snapshot {
             let Some(text) = optional(dir, &format!("branch-{}.json", slug(&branch))) else {
                 continue;
             };
-            if let Some(at) = last_push_from_json("分支的提交", &text)? {
-                snapshot.pushes.insert(branch, at);
+            if let Some(push) = last_push_from_json("分支的推送活动", &text)? {
+                snapshot.pushes.insert(branch, push);
             }
         }
         Ok(snapshot)
@@ -315,8 +355,8 @@ impl Snapshot {
             pushes: BTreeMap::new(),
         };
         for branch in snapshot.claimed_branches() {
-            if let Some(at) = fetch_last_push(repo, &branch)? {
-                snapshot.pushes.insert(branch, at);
+            if let Some(push) = fetch_last_push(repo, &branch)? {
+                snapshot.pushes.insert(branch, push);
             }
         }
         Ok(snapshot)
@@ -343,14 +383,22 @@ fn fetch_comments(repo: &str, number: u64) -> Result<Vec<Comment>, Error> {
 /// When `branch` was last pushed to, or `None` when there is no such
 /// branch: an agent that claimed an issue before pushing anything is
 /// alive by its comments, not by a branch that does not exist.
-fn fetch_last_push(repo: &str, branch: &str) -> Result<Option<DateTime<Utc>>, Error> {
+///
+/// The repository's activity is the only place GitHub says when a push
+/// happened. A commit's `committer.date` is when the commit was made, so
+/// a commit written offline at 03:10 and pushed at 05:10 would look like
+/// two hours of silence and get the issue taken away; reading activity
+/// needs push access, and without it the push time is reported as
+/// unreadable rather than guessed from the commit.
+fn fetch_last_push(repo: &str, branch: &str) -> Result<Option<Push>, Error> {
     let path = format!(
-        "repos/{repo}/commits?sha={}&per_page=1",
+        "repos/{repo}/activity?ref=refs/heads/{}&per_page=20",
         encode(branch.trim())
     );
     match gh_api(&path) {
-        Ok(text) => last_push_from_json("分支的提交", &text),
+        Ok(text) => last_push_from_json("分支的推送活动", &text),
         Err(Error::Gh { why, .. }) if why.contains("404") || why.contains("Not Found") => Ok(None),
+        Err(Error::Gh { why, .. }) => Ok(Some(Push::Unreadable(why))),
         Err(e) => Err(e),
     }
 }

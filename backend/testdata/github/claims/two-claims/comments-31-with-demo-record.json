@@ -1,0 +1,30 @@
+[
+  {
+    "id": 6153061966,
+    "created_at": "2026-10-13T19:06:03Z",
+    "updated_at": "2026-10-13T19:06:03Z",
+    "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/31#issuecomment-6153061966",
+    "body": "## 认领\n\n- agent: DemoAgent\n- 开始时间: 2026-10-14T03:05:55+08:00\n- 改动模块: docs/demo/claim-lease-demo.md\n- 预计完成: 2026-10-14T05:00:00+08:00\n- 分支: demo/claim-lease\n\n心跳至少每 30 分钟一次（`scripts/claims heartbeat` 或推一次分支）；超过 120 分钟没有更新，这条认领就过期，别的 agent 可以收回（#16）。\n\nAgent: DemoAgent\n"
+  },
+  {
+    "id": 6153067061,
+    "created_at": "2026-10-13T19:06:20Z",
+    "updated_at": "2026-10-13T19:06:20Z",
+    "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/31#issuecomment-6153067061",
+    "body": "## 心跳\n\n- agent: DemoAgent\n- 时间: 2026-10-14T03:06:13+08:00\n- 进度: 演示用：租约命令已经能跑，正在补回放测试\n\nAgent: DemoAgent\n"
+  },
+  {
+    "id": 6153109240,
+    "created_at": "2026-10-13T19:08:42Z",
+    "updated_at": "2026-10-13T19:08:42Z",
+    "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/31#issuecomment-6153109240",
+    "body": "## 收回认领\n\n- 原认领: DemoAgent（https://github.com/zbtzbtzbt/theFlash/issues/31#issuecomment-6153061966）\n- 最后更新: 2026-10-14T03:06:20+08:00（心跳评论，3 小时 3 分钟前）\n- 收回时间: 2026-10-14T06:10:00+08:00\n- 收回者: Claude\n- 为什么: 超过 120 分钟没有更新，按 #16 的租约规则视为过期；已去掉 认领中 标签，这个 issue 可以被重新认领\n\n原认领的 agent 如果还在做，重新认领一次（`scripts/claims claim`）再继续。\n\nAgent: Claude\n"
+  },
+  {
+    "id": 6153344810,
+    "created_at": "2026-10-13T19:21:18Z",
+    "updated_at": "2026-10-13T19:21:18Z",
+    "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/31#issuecomment-6153344810",
+    "body": "## 演示记录：认领 → 心跳 → 过期 → 收回（#16）\n\n全部跑在真实 GitHub 上，`scripts/claims` 自己发的评论就是这个 issue 上面那三条。`DemoAgent` 是虚构的 agent 名字，没有碰今晚任何一条线的认领。\n\n**1. 模块重叠时拒绝认领**（#16 当时认领了 `backend/src/claim`）\n\n```\n$ scripts/claims claim --issue 31 --agent DemoAgent --modules backend/src/claim --dry-run\n拒绝 — 要改的模块和进行中的认领重叠：#16（Claude）的 backend/src/claim。排在它后面，或者在两个 issue 上写明怎么分工，然后用 --overlap <怎么分工> 再来一次\n退出码 1\n```\n\n**2. 认领**（发评论 + 加 `认领中` 标签）\n\n```\n$ scripts/claims claim --issue 31 --agent DemoAgent --modules docs/demo/claim-lease-demo.md \\\n    --branch demo/claim-lease --due 2026-10-14T05:00:00+08:00\n要发的认领评论：\n## 认领\n\n- agent: DemoAgent\n- 开始时间: 2026-10-14T03:05:55+08:00\n- 改动模块: docs/demo/claim-lease-demo.md\n- 预计完成: 2026-10-14T05:00:00+08:00\n- 分支: demo/claim-lease\n…\nhttps://github.com/zbtzbtzbt/theFlash/issues/31#issuecomment-6153061966\n#31 加上了 认领中 标签\n```\n\n**3. 心跳**\n\n```\n$ scripts/claims heartbeat --issue 31 --agent DemoAgent --note \"演示用：租约命令已经能跑，正在补回放测试\"\n…\nhttps://github.com/zbtzbtzbt/theFlash/issues/31#issuecomment-6153067061\n```\n\n**4. 别人来认领被拒**\n\n```\n$ scripts/claims claim --issue 31 --agent Claude --modules docs/demo/claim-lease-demo.md --dry-run\n拒绝 — #31 由 DemoAgent 认领中（活跃，0 分钟前最后更新），改 docs/demo/claim-lease-demo.md。等它做完，或者在两个 issue 上写明怎么分工；它要到 2 小时后才算过期\n```\n\n**5. 一条命令看全部认领**（#16 这一条的“最后更新”是一次 push，不是评论）\n\n```\n$ scripts/claims list\n进行中的认领（10-14 03:07 北京时间）\n\n#16 认领改成带过期时间的租约，并写明要改哪些模块\n  agent     Claude\n  模块      backend/src/claim, backend/src/bin/claims.rs, …, AGENTS.md, prompts/work-tick.md\n  最后更新  10-14 03:07（0 分钟前，推送 night/issue-16）\n  状态      活跃，2 小时后过期\n  分支      night/issue-16\n  预计完成  10-14 06:00\n  认领评论  https://github.com/zbtzbtzbt/theFlash/issues/16#issuecomment-6152896686\n\n#31 测试：认领租约演示（#16，演完就关）\n  agent     DemoAgent\n  模块      docs/demo/claim-lease-demo.md\n  最后更新  10-14 03:06（0 分钟前，心跳评论）\n  状态      活跃，2 小时后过期\n  分支      demo/claim-lease\n  预计完成  10-14 05:00\n  认领评论  https://github.com/zbtzbtzbt/theFlash/issues/31#issuecomment-6153061966\n\n2 条认领：2 活跃，0 该心跳了，0 已过期。\n```\n\n**6. 没过期时不许收回**\n\n```\n$ scripts/claims reclaim --issue 31 --agent Claude\n拒绝 — #31 由 DemoAgent 认领，活跃（1 分钟前最后更新：心跳评论），还没过期，不能收回。再等 1 小时 59 分钟，它才算过期\n```\n\n**7. 过期的样子**（同一份数据，问它三小时后是什么状态）\n\n```\n$ scripts/claims list --now 2026-10-14T06:10:00+08:00\n…\n#31 测试：认领租约演示（#16，演完就关）\n  agent     DemoAgent\n  模块      docs/demo/claim-lease-demo.md\n  最后更新  10-14 03:06（3 小时 3 分钟前，心跳评论）\n  状态      已过期，可以收回\n  …\n2 条认领：0 活跃，0 该心跳了，2 已过期（`claims reclaim --issue <号> --agent <你>` 收回）。\n```\n\n**8. 收回**（发收回评论 + 去掉 `认领中` 标签，就是这个 issue 上最后那条评论）\n\n```\n$ scripts/claims reclaim --issue 31 --agent Claude --now 2026-10-14T06:10:00+08:00\n要发的收回评论：\n## 收回认领\n\n- 原认领: DemoAgent（…#issuecomment-6153061966）\n- 最后更新: 2026-10-14T03:06:20+08:00（心跳评论，3 小时 3 分钟前）\n- 收回时间: 2026-10-14T06:10:00+08:00\n- 收回者: Claude\n- 为什么: 超过 120 分钟没有更新，按 #16 的租约规则视为过期；已去掉 认领中 标签，这个 issue 可以被重新认领\n…\nhttps://github.com/zbtzbtzbt/theFlash/issues/31#issuecomment-6153109240\n#31 去掉了 认领中 标签\n\n$ scripts/claims list\n… 1 条认领：1 活跃，0 该心跳了，0 已过期。\n```\n\n没有真的等 120 分钟：过期那两步用 `--now` 指定“三小时之后”，这是命令本来就有的参数（调度脚本问“到某个时刻谁会过期”用同一个）。其余每一步都是真实时间、真实请求。\n\n这个 issue 的真实响应已经脱敏（本来就没有凭据）存进 `backend/testdata/github/claims/two-claims/`，给回放测试用。演示到此结束，关掉这个 issue。实现见 PR #33。\n\nAgent: Claude\n"
+  }
+]

@@ -24,7 +24,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use chrono::{DateTime, FixedOffset, Utc};
 
 pub use lease::{Claim, Heartbeat};
-pub use snapshot::{Issue, Snapshot};
+pub use snapshot::{Issue, Push, Snapshot};
 
 /// What kept a lease alive most recently.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,6 +87,14 @@ pub struct Lease {
     /// The agent the `指派:<agent>` label reserves the issue for, if any.
     pub assigned_to: Option<String>,
     pub last: Activity,
+    /// Why the pushes of the branch this claim names could not be read.
+    /// A push is a heartbeat, so while this is set the lease cannot be
+    /// shown to have gone silent, and nobody may take it over.
+    pub push_unreadable: Option<String>,
+    /// Whether the issue carries the `认领中` label. A claim comment that
+    /// went out while the label did not is still a lease; the label is
+    /// only what `gh issue list` filters on.
+    pub labelled: bool,
 }
 
 impl Lease {
@@ -142,11 +150,56 @@ pub struct Board {
     /// Readable leases, lowest issue number first.
     pub leases: Vec<Lease>,
     pub trouble: Vec<Trouble>,
+    /// The pushes the snapshot read, so an issue read separately from the
+    /// snapshot is judged on the same evidence.
+    pub pushes: BTreeMap<String, Push>,
 }
 
 impl Board {
     pub fn lease(&self, issue: u64) -> Option<&Lease> {
         self.leases.iter().find(|l| l.issue == issue)
+    }
+
+    /// Puts what `issue`'s own comments say onto the board, replacing
+    /// whatever the snapshot said about that issue.
+    ///
+    /// The snapshot only holds issues labelled `认领中`, and the label is
+    /// added after the claim comment, so a `gh issue edit` that failed
+    /// leaves a live lease the snapshot cannot see. Every command that
+    /// acts on one issue reads that issue and comes through here, so a
+    /// missing label can no longer make a claim invisible (#16).
+    pub fn include(&mut self, issue: &Issue) {
+        self.leases.retain(|l| l.issue != issue.number);
+        self.trouble.retain(|t| t.issue != issue.number);
+        match read_lease(issue, &self.pushes) {
+            Ok(lease) => {
+                self.leases.push(lease);
+                self.leases.sort_by_key(|l| l.issue);
+            }
+            Err((problem, why)) => {
+                // Without the label, a hand-back is just a free issue
+                // (the label came off, as it should), and so is an issue
+                // nobody ever posted a claim on. A claim comment that is
+                // missing a field is trouble either way: somebody may be
+                // working and only they can say.
+                let has_claim = issue
+                    .comments
+                    .iter()
+                    .any(|c| lease::parse_claim(&c.body, &c.url, c.posted_at).is_some());
+                if !issue.labels.iter().any(|l| l == lease::CLAIM_LABEL)
+                    && (problem == Problem::HandedBack || !has_claim)
+                {
+                    return;
+                }
+                self.trouble.push(Trouble {
+                    issue: issue.number,
+                    title: issue.title.clone(),
+                    problem,
+                    why,
+                });
+                self.trouble.sort_by_key(|t| t.issue);
+            }
+        }
     }
 
     /// The leases that still hold, so work being planned avoids them.
@@ -162,7 +215,10 @@ impl Board {
 /// that the board stayed silent about is an issue nobody would look at
 /// again.
 pub fn board(snapshot: &Snapshot) -> Board {
-    let mut out = Board::default();
+    let mut out = Board {
+        pushes: snapshot.pushes.clone(),
+        ..Board::default()
+    };
     for issue in &snapshot.issues {
         match read_lease(issue, &snapshot.pushes) {
             Ok(lease) => out.leases.push(lease),
@@ -181,36 +237,81 @@ pub fn board(snapshot: &Snapshot) -> Board {
 
 /// The lease an issue's comments describe, or why it cannot be read.
 ///
-/// The newest claim comment wins, so an issue claimed, handed back and
-/// claimed again reads as the latest claim. A `收回认领` comment after the
-/// claim ends it: the label may still be on the issue for a moment, and
-/// the lease must not outlive the hand-back.
+/// A `收回认领` comment ends every claim before it, so the lease is read
+/// from the comments after the last hand-back: the label may still be on
+/// the issue for a moment, and the lease must not outlive the hand-back.
+///
+/// **In that window, the earliest claim comment holds the issue.** Two
+/// agents that read "nobody is working on this" at the same moment both
+/// post a claim, and both have to reach the same answer about which one
+/// counts; GitHub's own order of the comments is the only thing they both
+/// see. The holder's later claims are updates to its own lease (and
+/// count as a sign of life); another agent's later claim lost the race
+/// and does not count at all — the command that posted it says so with a
+/// `让出认领` comment and exits non-zero.
 pub fn read_lease(
     issue: &Issue,
-    pushes: &BTreeMap<String, DateTime<Utc>>,
+    pushes: &BTreeMap<String, Push>,
 ) -> Result<Lease, (Problem, String)> {
-    let claim = issue
+    let handed_back_at = issue
         .comments
         .iter()
-        .rev()
-        .find_map(|c| lease::parse_claim(&c.body, &c.url, c.posted_at))
-        .ok_or_else(|| {
-            (
-                Problem::Unreadable,
-                format!(
-                    "标着 {} 但没有认领评论：没法知道是哪个 agent、在改哪些模块。\
-                     让持有者补一条认领评论（格式见 docs/subsystems/claim-lease.md），\
-                     或者在 issue 上问清楚之后手动去掉标签",
-                    lease::CLAIM_LABEL
-                ),
-            )
-        })?;
-    if let Some(field) = claim.missing_field() {
+        .rposition(|c| lease::is_reclaim(&c.body));
+    let window = match handed_back_at {
+        Some(i) => &issue.comments[i + 1..],
+        None => &issue.comments[..],
+    };
+    let mut claims: Vec<(DateTime<Utc>, u64, Claim)> = window
+        .iter()
+        .filter_map(|c| {
+            lease::parse_claim(&c.body, &c.url, c.posted_at).map(|claim| (c.posted_at, c.id, claim))
+        })
+        .filter(|(_, _, c)| {
+            // A claim the agent itself gave up after losing a race is
+            // not a lease; the comment that gave it up names it.
+            !window
+                .iter()
+                .any(|later| lease::yielded_claim(&later.body).is_some_and(|url| url == c.url))
+        })
+        .collect();
+    // When two claims are posted in the same second, GitHub's comment id
+    // says which came first.
+    claims.sort_by_key(|(at, id, _)| (*at, *id));
+    let claims: Vec<Claim> = claims.into_iter().map(|(_, _, c)| c).collect();
+    let Some(holder) = claims.first() else {
+        if let Some(i) = handed_back_at {
+            let before = issue.comments[..i]
+                .iter()
+                .rev()
+                .find_map(|c| lease::parse_claim(&c.body, &c.url, c.posted_at));
+            if let Some(before) = before {
+                return Err((
+                    Problem::HandedBack,
+                    format!(
+                        "最后一条认领（{}）之后有人收回了它，但 {} 标签还在：没有人在做，\
+                         下一次认领会把标签理顺",
+                        before.url,
+                        lease::CLAIM_LABEL
+                    ),
+                ));
+            }
+        }
+        return Err((
+            Problem::Unreadable,
+            format!(
+                "标着 {} 但没有认领评论：没法知道是哪个 agent、在改哪些模块。\
+                 让持有者补一条认领评论（格式见 docs/subsystems/claim-lease.md），\
+                 或者在 issue 上问清楚之后手动去掉标签",
+                lease::CLAIM_LABEL
+            ),
+        ));
+    };
+    if let Some(field) = holder.missing_field() {
         return Err((
             Problem::Unreadable,
             format!(
                 "认领评论缺字段 `{field}`（{}）：补上之后才知道{}",
-                claim.url,
+                holder.url,
                 if field == "agent" {
                     "是哪个 agent 在做"
                 } else {
@@ -219,26 +320,18 @@ pub fn read_lease(
             ),
         ));
     }
-    if issue
-        .comments
+    // The holder's newest claim says what it is changing now; an earlier
+    // one may name fewer modules.
+    let claim = claims
         .iter()
-        .any(|c| c.posted_at > claim.posted_at && lease::is_reclaim(&c.body))
-    {
-        return Err((
-            Problem::HandedBack,
-            format!(
-                "最后一条认领（{}）之后有人收回了它，但 {} 标签还在：没有人在做，\
-                 下一次认领会把标签理顺",
-                claim.url,
-                lease::CLAIM_LABEL
-            ),
-        ));
-    }
+        .rfind(|c| lease::same_agent(&c.agent, &holder.agent))
+        .unwrap_or(holder)
+        .clone();
     let mut last = Activity {
         at: claim.posted_at,
         sign: Sign::Claim,
     };
-    for comment in &issue.comments {
+    for comment in window {
         if comment.posted_at <= claim.posted_at {
             continue;
         }
@@ -256,23 +349,31 @@ pub fn read_lease(
             };
         }
     }
-    if let Some(branch) = &claim.branch
-        && let Some(at) = pushes.get(branch.as_str())
-        && *at > last.at
-    {
-        last = Activity {
-            at: *at,
-            sign: Sign::Push {
-                branch: branch.clone(),
-            },
-        };
+    let mut push_unreadable = None;
+    if let Some(branch) = &claim.branch {
+        match pushes.get(branch.as_str()) {
+            Some(Push::At(at)) if *at > last.at => {
+                last = Activity {
+                    at: *at,
+                    sign: Sign::Push {
+                        branch: branch.clone(),
+                    },
+                };
+            }
+            Some(Push::Unreadable(why)) => {
+                push_unreadable = Some(format!("{branch} 的推送时间读不到：{why}"));
+            }
+            _ => {}
+        }
     }
     Ok(Lease {
         issue: issue.number,
         title: issue.title.clone(),
         assigned_to: lease::assigned_agent(&issue.labels),
+        labelled: issue.labels.iter().any(|l| l == lease::CLAIM_LABEL),
         claim,
         last,
+        push_unreadable,
     })
 }
 
@@ -345,6 +446,15 @@ pub fn decide_claim(
     }
     if let Some(held) = board.lease(issue.number) {
         let status = held.status(now);
+        if let Some(why) = &held.push_unreadable {
+            return Verdict::Refuse(format!(
+                "#{} 由 {} 认领，而且 {why}：\
+                 推一次分支也算心跳，读不到推送时间就证明不了它已经沉默。\
+                 先把读得到推送的权限配好（`gh auth status`），或者在 issue 上问清楚",
+                issue.number,
+                held.agent(),
+            ));
+        }
         if lease::same_agent(held.agent(), agent) && status != Status::Expired {
             return Verdict::Refuse(format!(
                 "#{} 已经是你（{}）的认领，{}前最后更新（{}）。\
@@ -418,6 +528,14 @@ pub fn decide_reclaim(board: &Board, number: u64, now: DateTime<Utc>) -> Verdict
             lease::CLAIM_LABEL
         ));
     };
+    if let Some(why) = &held.push_unreadable {
+        return Verdict::Refuse(format!(
+            "#{number} 由 {} 认领，而且 {why}：\
+             推一次分支也算心跳，读不到推送时间就证明不了它已经沉默，不能收回。\
+             先把读得到推送的权限配好（`gh auth status`），或者在 issue 上问清楚",
+            held.agent(),
+        ));
+    }
     match held.status(now) {
         Status::Expired => Verdict::Ok { overlaps: vec![] },
         status => Verdict::Refuse(format!(
@@ -429,6 +547,39 @@ pub fn decide_reclaim(board: &Board, number: u64, now: DateTime<Utc>) -> Verdict
             held.last.sign.what(),
             minutes(held.expires_in_minutes(now)),
         )),
+    }
+}
+
+/// What a claim comment turned out to be, read back after posting it.
+///
+/// Nothing stops two agents from posting a claim at the same moment:
+/// GitHub has no compare-and-set, and the agents run in different
+/// worktrees and sometimes on different machines. So the claim is
+/// confirmed instead of locked — post, read the issue again, and the
+/// earliest claim in the window is the one that holds it ([`read_lease`]).
+/// Both agents read the same comments and reach the same answer, and the
+/// one that lost says so and stops.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Confirmed {
+    /// The claim that was posted is the lease.
+    Held,
+    /// An earlier claim holds the issue; this one does not count.
+    Lost { agent: String, claim: String },
+    /// The issue cannot be read back, so whether the claim holds is
+    /// unknown and an agent should look before starting work.
+    Unclear(String),
+}
+
+/// Whether the claim comment at `posted` is the lease on `issue`, read
+/// from the issue as it is after posting.
+pub fn confirm_claim(issue: &Issue, posted: &str, pushes: &BTreeMap<String, Push>) -> Confirmed {
+    match read_lease(issue, pushes) {
+        Ok(lease) if lease.claim.url == posted => Confirmed::Held,
+        Ok(lease) => Confirmed::Lost {
+            agent: lease.claim.agent.clone(),
+            claim: lease.claim.url.clone(),
+        },
+        Err((_, why)) => Confirmed::Unclear(why),
     }
 }
 
@@ -484,6 +635,21 @@ pub fn heartbeat_comment(agent: &str, note: &str, now: DateTime<Utc>) -> String 
         lease::HEARTBEAT_MARKER,
         stamp(now),
         note.trim(),
+    )
+}
+
+/// The comment an agent posts when its claim lost a race: it gives up
+/// the claim it names and nothing else, so the claim that won still
+/// holds. [`lease::yielded_claim`] reads it back.
+pub fn yield_comment(agent: &str, posted: &str, winner: &str, winner_claim: &str) -> String {
+    format!(
+        "## {}\n\n- agent: {agent}\n- 让出的认领: {posted}\n- 让给: {winner}（{winner_claim}）\n\
+         - 为什么: 两个 agent 几乎同时认领这个 issue，两边都读到“没人在做”。\
+         按 #16 的租约规则，窗口里最早的那条认领算数，所以我这条作废，{winner} 继续；\
+         我不会开始做这个 issue\n\n\
+         这条评论只作废上面那一条认领，不是 {}：{winner} 的租约照常有效。\n\nAgent: {agent}\n",
+        lease::YIELD_MARKER,
+        lease::RECLAIM_MARKER,
     )
 }
 

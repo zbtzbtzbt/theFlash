@@ -33,6 +33,9 @@ pub const ASSIGNED_PREFIX: &str = "指派:";
 pub const CLAIM_MARKER: &str = "认领";
 pub const HEARTBEAT_MARKER: &str = "心跳";
 pub const RECLAIM_MARKER: &str = "收回认领";
+/// The heading of the comment an agent posts when its claim lost a race
+/// to an earlier one (#16).
+pub const YIELD_MARKER: &str = "让出认领";
 
 /// A claim with no sign of life for this long is overdue for a heartbeat.
 pub const HEARTBEAT_EVERY_MINUTES: i64 = 30;
@@ -92,10 +95,11 @@ pub struct Heartbeat {
 /// one. A comment is a claim when a line of it is the `认领` heading on
 /// its own, so `## 收回认领` and prose about claiming are not claims.
 pub fn parse_claim(body: &str, url: &str, posted_at: DateTime<Utc>) -> Option<Claim> {
-    if !body.lines().any(|l| is_marker_line(l, CLAIM_MARKER)) {
+    let lines = said(body);
+    if !lines.iter().any(|l| is_marker_line(l, CLAIM_MARKER)) {
         return None;
     }
-    let field = |keys: &[&str]| field(body, keys);
+    let field = |keys: &[&str]| field(&lines, keys);
     Some(Claim {
         url: url.to_string(),
         posted_at,
@@ -119,11 +123,12 @@ pub fn parse_claim(body: &str, url: &str, posted_at: DateTime<Utc>) -> Option<Cl
 /// comment is a progress report whether or not it carries the heading.
 /// A claim comment is not a heartbeat: the claim itself starts the clock.
 pub fn parse_heartbeat(body: &str, url: &str, posted_at: DateTime<Utc>) -> Option<Heartbeat> {
-    if body.lines().any(|l| is_marker_line(l, CLAIM_MARKER)) {
+    let lines = said(body);
+    if lines.iter().any(|l| is_marker_line(l, CLAIM_MARKER)) {
         return None;
     }
-    let marked = body.lines().any(|l| is_marker_line(l, HEARTBEAT_MARKER));
-    let agent = match field(body, &["agent", "认领者", "认领 agent"]) {
+    let marked = lines.iter().any(|l| is_marker_line(l, HEARTBEAT_MARKER));
+    let agent = match field(&lines, &["agent", "认领者", "认领 agent"]) {
         a if !a.is_empty() => a,
         _ => agent_trailer(body)?,
     };
@@ -138,7 +143,54 @@ pub fn parse_heartbeat(body: &str, url: &str, posted_at: DateTime<Utc>) -> Optio
 /// Whether a comment hands an issue back, so the lease before it no
 /// longer counts.
 pub fn is_reclaim(body: &str) -> bool {
-    body.lines().any(|l| is_marker_line(l, RECLAIM_MARKER))
+    said(body).iter().any(|l| is_marker_line(l, RECLAIM_MARKER))
+}
+
+/// The claim a `让出认领` comment gives up, by its link. Giving up ends
+/// only the one claim it names, which is why it is not a `收回认领`: the
+/// claim that won the race is still held.
+pub fn yielded_claim(body: &str) -> Option<String> {
+    let lines = said(body);
+    if !lines.iter().any(|l| is_marker_line(l, YIELD_MARKER)) {
+        return None;
+    }
+    let url = field(&lines, &["让出的认领", "我的认领"]);
+    (!url.is_empty()).then_some(url)
+}
+
+/// The lines a comment says itself, which is what the lease is read from:
+/// not inside a fenced code block, and not quoted from somewhere else.
+///
+/// Agents write up what they ran, and those write-ups quote whole claim,
+/// heartbeat and hand-back comments (the demo record on issue #31 quotes
+/// all three). Reading a quote as the thing it quotes would let a report
+/// claim an issue, or resurrect a lease that was handed back hours ago.
+fn said(body: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut fence: Option<(char, usize)> = None;
+    for line in body.lines() {
+        let trimmed = line.trim_start();
+        match fence {
+            // Inside a fence until a run of the same character at least
+            // as long as the one that opened it (CommonMark).
+            Some((marker, len)) => {
+                if fence_run(trimmed, marker) >= len {
+                    fence = None;
+                }
+            }
+            None => match ['`', '~'].into_iter().find(|c| fence_run(trimmed, *c) >= 3) {
+                Some(marker) => fence = Some((marker, fence_run(trimmed, marker))),
+                None if trimmed.starts_with('>') => {}
+                None => out.push(line),
+            },
+        }
+    }
+    out
+}
+
+/// How many `marker` characters this line opens with.
+fn fence_run(line: &str, marker: char) -> usize {
+    line.chars().take_while(|c| *c == marker).count()
 }
 
 /// Two agent names for the same agent: case and a suffix such as
@@ -232,10 +284,11 @@ pub fn parse_time(value: &str) -> Option<DateTime<Utc>> {
     None
 }
 
-/// The value of the first of `keys` the body has a field for.
-fn field(body: &str, keys: &[&str]) -> String {
-    body.lines()
-        .filter_map(split_field)
+/// The value of the first of `keys` these lines have a field for.
+fn field(lines: &[&str], keys: &[&str]) -> String {
+    lines
+        .iter()
+        .filter_map(|l| split_field(l))
         .find(|(k, _)| keys.iter().any(|want| k.eq_ignore_ascii_case(want)))
         .map(|(_, v)| v)
         .unwrap_or_default()
@@ -280,9 +333,10 @@ fn split_field(line: &str) -> Option<(String, String)> {
 /// thing that tells them apart. The last one wins: a comment that quotes
 /// the convention above its own trailer still reads as its own.
 pub fn agent_trailer(body: &str) -> Option<String> {
-    body.lines()
+    said(body)
+        .iter()
         .filter_map(|l| {
-            let l = l.trim().trim_start_matches(['-', '*', '>']).trim();
+            let l = l.trim().trim_start_matches(['-', '*']).trim();
             let rest = l.strip_prefix("Agent")?;
             let rest = rest.trim_start().strip_prefix([':', '：'])?;
             let name = rest.trim().trim_matches('`').trim();

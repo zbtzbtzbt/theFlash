@@ -1,0 +1,12 @@
+[
+  {
+    "sha": "eca6af1f93332953506abee73e8274ea8da5bf1f",
+    "commit": {
+      "message": "claim: 认领读不出来时不当成没人在做，被收回过的 issue 可以直接认领（#16）\n\nWhat changed:\n- `claim` 原来只看“有没有读得出来的租约”：一个标着 `认领中` 但认领评论缺字段、\n  或者根本没有认领评论的 issue，会被当成没人在做，于是直接盖上一条新认领——\n  而那种 issue 恰恰可能真有人在做，只是没写清。现在这种情况直接拒绝，让你先去\n  issue 上问清楚。\n- 分得出两种“读不出来”：缺评论/缺字段（可能有人在做，拒绝）和认领之后被收回了\n  （没有人在做，标签只是还没摘掉，下一次认领会把标签理顺，照常放行）。\n\nRun:\n- 把判断里的 Problem::Unreadable 换成 HandedBack（等于去掉这道拦）：\n  an_unreadable_claim_is_not_a_free_issue FAIL“读不出来的认领可能有人在做，\n  不能直接盖掉”，回放测试\n  an_issue_labelled_claimed_with_no_claim_comment_is_reported_not_treated_as_free\n  也 FAIL（打印出它本来要发的那条认领评论）。\n- `cargo test --lib claim`：23 passed。`cargo test --test claims`：11 passed。\n- `make check`：全绿。\n\nAgent: Claude",
+      "committer": {
+        "name": "bintaozhou",
+        "date": "2026-10-13T19:35:13Z"
+      }
+    }
+  }
+]
