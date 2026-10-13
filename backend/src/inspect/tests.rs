@@ -383,6 +383,7 @@ fn a_report_with_no_finding_says_so_and_one_with_a_finding_names_it() {
             replaced: None,
             changes: Vec::new(),
             unseen: Vec::new(),
+            checked: true,
             session: Some(286937789),
             failed: None,
             candidates: Vec::new(),

@@ -112,6 +112,10 @@ pub struct EventReport {
     pub replaced: Option<u64>,
     pub changes: Vec<Change>,
     pub unseen: Vec<Unseen>,
+    /// Whether this event's page was read and its fields checked at all.
+    /// False means nothing about it was looked at, so the report says only
+    /// why, and not that its structure and status codes were fine.
+    pub checked: bool,
     /// The session whose tiers were checked.
     pub session: Option<u64>,
     /// Why this event could not be checked, when it could not be.
@@ -328,19 +332,25 @@ pub async fn run(client: &Client, opts: &Options) -> Result<Report, Error> {
             kept.push(was.clone());
         }
         match was {
-            // Its page was read and no longer shows this situation, or
-            // could not be read: coverage is lost until an agent hands
-            // this situation a new event, so the run fails.
-            Some(was) if asked.contains(&was.item_id) => report.uncovered.push(Uncovered {
-                category,
-                why: format!(
-                    "{}：{} 不再是这个状态，首页也没有能替代它的演出。\
-                     补一个：改 {}，把这一类的 itemId 换成一场现在是这个状态的演出",
-                    category.name(),
-                    was.item_id,
-                    opts.samples_path.display()
-                ),
-            }),
+            // Its page no longer shows this situation, or could not be
+            // read at all: coverage is lost until an agent hands this
+            // situation a new event, so the run fails. Which of the two it
+            // was decides what whoever reads this has to do.
+            Some(was) if asked.contains(&was.item_id) => {
+                let what_happened = match failures.iter().find(|f| f.item_id == was.item_id) {
+                    Some(f) => format!("{} 这次读不了（{}）", was.item_id, f.why),
+                    None => format!("{} 不再是这个状态", was.item_id),
+                };
+                report.uncovered.push(Uncovered {
+                    category,
+                    why: format!(
+                        "{}：{what_happened}，首页也没有能替代它的演出。\
+                         补一个：改 {}，把这一类的 itemId 换成一场现在是这个状态的演出",
+                        category.name(),
+                        opts.samples_path.display()
+                    ),
+                });
+            }
             // The budget ran out before its turn: this run looked at
             // fewer events on purpose, which is not news about damai.cn.
             Some(was) => report.notes.push(format!(
@@ -370,6 +380,7 @@ pub async fn run(client: &Client, opts: &Options) -> Result<Report, Error> {
             replaced: None,
             changes: Vec::new(),
             unseen: codes::unseen_on_item_page(&page.json),
+            checked: true,
             session: None,
             failed: None,
             candidates: Vec::new(),
@@ -440,6 +451,7 @@ pub async fn run(client: &Client, opts: &Options) -> Result<Report, Error> {
             replaced: None,
             changes: Vec::new(),
             unseen: Vec::new(),
+            checked: false,
             session: None,
             failed: Some(failed.why),
             candidates: Vec::new(),
@@ -750,6 +762,7 @@ pub async fn record(
         replaced: None,
         changes: Vec::new(),
         unseen: Vec::new(),
+        checked: false,
         session: None,
         failed: None,
         candidates: Vec::new(),
@@ -885,14 +898,16 @@ pub fn render(report: &Report) -> String {
         if let Some(session) = event.session {
             out.push_str(&format!("  票档接口查的场次：{session}\n"));
         }
-        if event.changes.is_empty() {
+        // Nothing was read, so there is nothing to say about this event's
+        // fields: the line above already says why.
+        if event.checked && event.changes.is_empty() {
             out.push_str("  结构：和 testdata 里的一样\n");
         } else {
             for change in &event.changes {
                 out.push_str(&format!("  结构变化：{change}\n"));
             }
         }
-        if event.unseen.is_empty() {
+        if event.checked && event.unseen.is_empty() {
             out.push_str("  状态码：都见过\n");
         } else {
             for unseen in &event.unseen {

@@ -519,6 +519,70 @@ fn a_situation_left_without_a_sample_fails_and_keeps_the_sample_it_had() {
     assert_eq!(saved.matches("itemId").count(), 5, "样本集缩水了：{saved}");
 }
 
+/// An event whose page could not be read had nothing checked, so the run
+/// must not also say its structure and status codes were fine — on the
+/// real site a request that timed out read as "查不了" and "结构：和
+/// testdata 里的一样" in the same breath. The missing sample it leaves
+/// behind says it could not be read, not that damai.cn changed it.
+#[test]
+fn an_event_that_could_not_be_read_claims_nothing_about_its_structure() {
+    let home = Home::new("unreadable-event");
+    let samples = home.path().join("samples.json");
+    std::fs::write(
+        &samples,
+        r#"{"updatedAt":"2026-10-14 03:00（北京时间）","samples":[
+             {"itemId":1090000000001,"category":"onSale"},
+             {"itemId":1092337348536,"category":"notYetOnSale"},
+             {"itemId":1077137031347,"category":"soldOut"},
+             {"itemId":1084537866279,"category":"calendar"},
+             {"itemId":1080486727522,"category":"notOnPcChannel"}]}"#,
+    )
+    .unwrap();
+    let gone = (
+        "/item.htm?id=1090000000001".to_string(),
+        support::fixture("item_not_found.html"),
+    );
+    let routes = with_route(unchanged_routes(), gone);
+    let no_candidates = (
+        "/".to_string(),
+        "<html><body>没有演出链接</body></html>".to_string(),
+    );
+    let damai = support::MockDamai::start_bodies(with_route(routes, no_candidates));
+    let out = run(&home, &damai, &["--samples", samples.to_str().unwrap()]);
+    let text = stdout(&out);
+    let block = about(&text, "1090000000001");
+    assert!(block.contains("查不了"), "{block}");
+    assert!(
+        !block.contains("结构：和 testdata 里的一样"),
+        "一个字段都没查到，却说结构没变：{block}"
+    );
+    assert!(
+        !block.contains("状态码：都见过"),
+        "一个状态码都没读到，却说都见过：{block}"
+    );
+    assert!(
+        text.contains("缺样本：已开售：1090000000001 这次读不了"),
+        "缺样本的原因说成了状态变了，其实是这一页读不了：{text}"
+    );
+    assert_eq!(out.status.code(), Some(1), "{text}");
+}
+
+/// The part of the report about one event: its heading and the lines under
+/// it, up to the blank line that ends it.
+fn about(text: &str, item_id: &str) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let start = lines
+        .iter()
+        .position(|l| l.starts_with('[') && l.contains(item_id))
+        .unwrap_or_else(|| panic!("报告里没有 {item_id}：{text}"));
+    lines[start..]
+        .iter()
+        .take_while(|l| !l.trim().is_empty())
+        .copied()
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// A candidate is the response as damai.cn sent it, under the name the
 /// fixture beside it has: whoever fixes the change copies it into
 /// testdata/damai and the same readers replay it.
