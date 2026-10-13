@@ -7,6 +7,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::clock::Sample;
 use super::notify::system_notification;
+use super::push::PhonePush;
 use super::target::session_matches;
 use crate::damai::{Client, Error, Event};
 
@@ -41,6 +42,7 @@ pub(crate) struct RealEnv<'a> {
     start: Instant,
     all_sessions: Vec<String>,
     system_notify: bool,
+    phone_push: Option<PhonePush>,
     tty: bool,
     /// A countdown line is on screen without its newline (on a terminal).
     countdown_open: bool,
@@ -61,6 +63,7 @@ impl<'a> RealEnv<'a> {
             start: Instant::now(),
             all_sessions: Vec::new(),
             system_notify,
+            phone_push: PhonePush::from_config(),
             tty: std::io::stdout().is_terminal(),
             countdown_open: false,
             last_countdown_minute: None,
@@ -69,6 +72,12 @@ impl<'a> RealEnv<'a> {
 
     fn mono(&self, t: Instant) -> i64 {
         t.saturating_duration_since(self.start).as_millis() as i64
+    }
+
+    pub async fn finish_push(&mut self) {
+        if let Some(push) = &mut self.phone_push {
+            push.finish().await;
+        }
     }
 
     fn end_countdown_line(&mut self) {
@@ -139,6 +148,9 @@ impl Env for RealEnv<'_> {
         println!("\x07【提醒】{title}");
         for l in lines {
             println!("  {l}");
+        }
+        if let Some(push) = &self.phone_push {
+            push.alert(title, lines);
         }
         if self.system_notify
             && let Err(e) = system_notification(title, &lines.join("\n"))

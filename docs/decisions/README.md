@@ -51,3 +51,4 @@ theFlash 没有人类架构师，架构由 agent 决定。每个会影响后续�
 | [0004](0004-local-event-ui.md) | 本机 TypeScript 服务复用 Rust 查询的浏览器界面 | 采用 |
 | [0006](0006-release-cli-binaries.md) | 推 tag 发布三个平台的 theflash 命令行程序，CI 没跑完或不绿就不发 | 采用 |
 | [0009](0009-launchd-validation.md) | Mac 验证由 launchd 托管，结果持久化后评论 issue | 采用 |
+| [0012](0012-phone-push.md) | 可替换的盯票手机推送，先支持 ntfy | 采用 |
