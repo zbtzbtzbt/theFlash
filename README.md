@@ -79,6 +79,8 @@ theflash watch "https://detail.damai.cn/item.htm?id=1086791513717" --session 10-
 
 盯住一场演出：未开售时按大麦的时钟倒计时，开售那一刻提醒；之后每 30 秒查一次，盯的票档有票时提醒（终端和系统通知）。Ctrl-C 停止。细节见 [docs/subsystems/damai-watch.md](docs/subsystems/damai-watch.md)。
 
+手机提醒可用 ntfy；topic 和可选 token 只放在权限 0600 的用户配置文件中。配置步骤见 [手机提醒](docs/subsystems/phone-push.md)，不配置时盯票行为保持原样。
+
 ## 在浏览器里查询演出
 
 安装根目录指定版本的 Node.js 和 Rust 后，在仓库根目录运行：

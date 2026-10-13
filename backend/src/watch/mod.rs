@@ -5,6 +5,7 @@
 mod clock;
 mod env;
 mod notify;
+mod push;
 mod target;
 
 use std::collections::HashMap;
@@ -62,7 +63,9 @@ pub async fn watch(client: &Client, opts: &Options) -> Result<(), WatchError> {
         opts.filter.session.clone(),
         opts.system_notify,
     );
-    run(&mut env, opts).await
+    let result = run(&mut env, opts).await;
+    env.finish_push().await;
+    result
 }
 
 type Last = HashMap<(u64, String), TierStatus>;
