@@ -3,10 +3,15 @@
 //!
 //! - credentials and personal data stay out of the repository: no login
 //!   cookie with a value, no Cookie/Authorization header, no valid 18-digit
-//!   ID card number, no mainland mobile number in any tracked text file;
-//! - nothing that tests run can reach the real damai.cn: every damai host in
-//!   source code is on the blocklist CI resolves to nowhere, and tests start
-//!   the binary only through `support::offline`.
+//!   ID card number, no mainland mobile number in any text file;
+//! - nothing that tests run can reach the real damai.cn: every damai host
+//!   named outside Markdown is on the blocklist CI resolves to nowhere, and
+//!   tests start a binary only through the helpers in `support`.
+//!
+//! The repository is what git tracks and the untracked files it does not
+//! ignore, so a new file is checked before it is committed. The checks read
+//! text, not code: what they still miss is listed in
+//! docs/decisions/0003-tests-cannot-reach-damai.md.
 //!
 //! The sample values below are built from pieces so that this file does not
 //! contain what it looks for. Findings name the file, line and rule, never
@@ -97,67 +102,183 @@ fn is_value_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || matches!(b, b'%' | b'-' | b'_' | b'.' | b'+' | b'/' | b'~')
 }
 
-/// `name=value`, or `"name":"value"` in JSON.
-fn cookie_names_with_value(line: &str) -> BTreeSet<&'static str> {
-    let b = line.as_bytes();
-    let skip = |mut i: usize, set: &[u8]| {
-        while b.get(i).is_some_and(|c| set.contains(c)) {
-            i += 1;
-        }
-        i
+fn is_quote(b: u8) -> bool {
+    matches!(b, b'"' | b'\'')
+}
+
+/// The first byte from `i` on that is not a space, a tab or a line break:
+/// a name, its separator and its value may sit on different lines (#21).
+fn skip_space(b: &[u8], mut i: usize) -> usize {
+    while b.get(i).is_some_and(u8::is_ascii_whitespace) {
+        i += 1;
+    }
+    i
+}
+
+/// Whether a value, quoted or not, starts at `i`.
+fn value_at(b: &[u8], mut i: usize) -> bool {
+    if b.get(i).copied().is_some_and(is_quote) {
+        i += 1;
+    }
+    b.get(i).copied().is_some_and(is_value_byte)
+}
+
+/// Whether a string literal starting at `i` holds a value rather than
+/// another name. After a comma a name is the next item of a list, as in
+/// `["unb", "munb"]` or `["cookie", "set-cookie"]`; a value has a digit or
+/// a sign in it, as in `"Bearer abc"`, `"a=b"` or `"2200000000000"`.
+fn literal_value_at(b: &[u8], i: usize) -> bool {
+    let Some(&quote) = b.get(i).filter(|q| is_quote(**q)) else {
+        return false;
     };
-    let mut found = BTreeSet::new();
+    let rest = &b[i + 1..];
+    let len = rest
+        .iter()
+        .position(|c| *c == quote || *c == b'\n')
+        .unwrap_or(rest.len());
+    let literal = &rest[..len];
+    let is_name = |n: &&str| literal.eq_ignore_ascii_case(n.as_bytes());
+    literal.first().copied().is_some_and(is_value_byte)
+        && literal
+            .iter()
+            .any(|c| !(c.is_ascii_alphabetic() || matches!(c, b'_' | b'-')))
+        && !COOKIE_NAMES.iter().chain(&HEADER_NAMES).any(is_name)
+}
+
+/// Whether the quoted name at `at..at + len` is the value of a `name` key
+/// in an object whose `value` key holds a quoted value:
+/// `{"name": "unb", "value": "…"}`, the way HAR files, Playwright's
+/// storageState, Puppeteer and browser extensions save cookies and
+/// headers. `b` is the text in lowercase.
+fn named_in_object(b: &[u8], at: usize, len: usize) -> bool {
+    let end = at + len;
+    if at == 0 || !is_quote(b[at - 1]) || b.get(end) != Some(&b[at - 1]) {
+        return false;
+    }
+    // Back from the opening quote: a `:`, then the key `name`, maybe quoted.
+    let back = |mut k: usize| {
+        while k > 0 && b[k - 1].is_ascii_whitespace() {
+            k -= 1;
+        }
+        k
+    };
+    let mut k = back(at - 1);
+    if k == 0 || b[k - 1] != b':' {
+        return false;
+    }
+    k = back(k - 1);
+    if k > 0 && is_quote(b[k - 1]) {
+        k -= 1;
+    }
+    if k < 4 || &b[k - 4..k] != b"name" || (k > 4 && is_name_byte(b[k - 5])) {
+        return false;
+    }
+    // The object runs from the `{` before the name to the `}` after it.
+    let (Some(lo), Some(hi)) = (
+        b[..at].iter().rposition(|c| *c == b'{'),
+        b[end..].iter().position(|c| *c == b'}').map(|p| end + p),
+    ) else {
+        return false;
+    };
+    let object = &b[lo..hi];
+    (1..object.len()).any(|i| {
+        if !object[i..].starts_with(b"value") || is_name_byte(object[i - 1]) {
+            return false;
+        }
+        let mut j = i + "value".len();
+        if object.get(j).copied().is_some_and(is_quote) {
+            j += 1;
+        }
+        j = skip_space(object, j);
+        if object.get(j) != Some(&b':') {
+            return false;
+        }
+        j = skip_space(object, j + 1);
+        object.get(j).copied().is_some_and(is_quote) && value_at(object, j)
+    })
+}
+
+/// Where login cookies are written with a value, and their names. Spaces
+/// and line breaks may sit between the parts:
+/// - `name=value`, as in a Cookie header or `document.cookie`;
+/// - `"name": "value"`, a JSON key or a JS or Python dict entry;
+/// - `"name", "value"`, adjacent arguments or a pair, as in
+///   `Cookie::new("unb", "…")`, when the second is not just another name;
+/// - `{"name": "unb", …, "value": "…"}` (see `named_in_object`).
+fn cookies_with_values(text: &str) -> Vec<(usize, &'static str)> {
+    let b = text.as_bytes();
+    let lower = text.to_ascii_lowercase();
+    let mut found = Vec::new();
     for name in COOKIE_NAMES {
-        for (at, _) in line.match_indices(name) {
+        for (at, _) in text.match_indices(name) {
             if at > 0 && is_name_byte(b[at - 1]) {
                 continue;
             }
             let mut i = at + name.len();
-            let quoted = matches!(b.get(i), Some(b'"' | b'\''));
+            let quoted = b.get(i).copied().is_some_and(is_quote);
             if quoted {
                 i += 1;
             }
-            i = skip(i, b" \t");
-            match b.get(i) {
-                Some(b'=') => {}
-                Some(b':') if quoted => {}
-                _ => continue,
-            }
-            i = skip(i + 1, b" \t");
-            if matches!(b.get(i), Some(b'"' | b'\'')) {
-                i += 1;
-            }
-            if b.get(i).is_some_and(|c| is_value_byte(*c)) {
-                found.insert(name);
+            i = skip_space(b, i);
+            let with_value = match b.get(i) {
+                Some(b'=') => value_at(b, skip_space(b, i + 1)),
+                Some(b':') if quoted => value_at(b, skip_space(b, i + 1)),
+                Some(b',') if quoted => literal_value_at(b, skip_space(b, i + 1)),
+                _ => false,
+            };
+            if with_value || named_in_object(lower.as_bytes(), at, name.len()) {
+                found.push((at, name));
             }
         }
     }
     found
 }
 
-/// `Cookie:`, `Set-Cookie:` and `Authorization:`, also as JSON keys.
-fn header_names(line: &str) -> BTreeSet<&'static str> {
-    let lower = line.to_ascii_lowercase();
+/// Where `Cookie`, `Set-Cookie` and `Authorization` are written as a
+/// header, and their names:
+/// - `Cookie:`, also as a JSON key;
+/// - `"Authorization", "Bearer …"`, the name and a literal value as
+///   adjacent arguments, as in `.header("Authorization", "Bearer …")`;
+/// - `{"name": "cookie", "value": "…"}` in a HAR file.
+fn headers(text: &str) -> Vec<(usize, &'static str)> {
+    let lower = text.to_ascii_lowercase();
     let b = lower.as_bytes();
-    let mut found = BTreeSet::new();
+    let mut found = Vec::new();
     for name in HEADER_NAMES {
         for (at, _) in lower.match_indices(name) {
             if at > 0 && (b[at - 1].is_ascii_alphanumeric() || b[at - 1] == b'-') {
                 continue;
             }
             let mut i = at + name.len();
-            if matches!(b.get(i), Some(b'"' | b'\'')) {
+            if b.get(i).copied().is_some_and(is_quote) {
                 i += 1;
             }
-            while matches!(b.get(i), Some(b' ' | b'\t')) {
-                i += 1;
-            }
-            if b.get(i) == Some(&b':') {
-                found.insert(name);
+            i = skip_space(b, i);
+            let as_header = match b.get(i) {
+                Some(b':') => true,
+                Some(b',') => literal_value_at(b, skip_space(b, i + 1)),
+                _ => false,
+            };
+            if as_header || named_in_object(b, at, name.len()) {
+                found.push((at, name));
             }
         }
     }
     found
+}
+
+/// The login cookie on a cookies.txt line, the Netscape format `curl -c`
+/// and browser extensions write: seven tab-separated fields, the name in
+/// the sixth and the value in the seventh.
+fn cookies_txt_name(line: &str) -> Option<&'static str> {
+    let fields: Vec<&str> = line.split('\t').collect();
+    let [_, _, _, _, _, name, value] = fields[..] else {
+        return None;
+    };
+    if !value.bytes().next().is_some_and(is_value_byte) {
+        return None;
+    }
+    COOKIE_NAMES.into_iter().find(|n| *n == name)
 }
 
 fn is_mobile(t: &str) -> bool {
@@ -201,35 +322,45 @@ fn is_id_card(t: &str) -> bool {
     b"10X98765432"[(sum % 11) as usize] == b[17].to_ascii_uppercase()
 }
 
-/// What in one line of a text file is a credential or personal data.
-fn sensitive_in_line(line: &str) -> Vec<(Rule, String)> {
-    let mut out = Vec::new();
-    for name in cookie_names_with_value(line) {
-        out.push((Rule::Cookie, format!("cookie {name} with a value")));
+/// What in a text file is a credential or personal data, by line number.
+/// A cookie or header split across lines is reported on the line of its
+/// name.
+fn sensitive_in_text(text: &str) -> BTreeSet<(usize, Rule, String)> {
+    let starts: Vec<usize> = std::iter::once(0)
+        .chain(text.match_indices('\n').map(|(i, _)| i + 1))
+        .collect();
+    let line_of = |at: usize| starts.partition_point(|s| *s <= at);
+    let cookie = |name: &str| format!("cookie {name} with a value");
+    let mut out = BTreeSet::new();
+    for (at, name) in cookies_with_values(text) {
+        out.insert((line_of(at), Rule::Cookie, cookie(name)));
     }
-    for name in header_names(line) {
-        out.push((Rule::Header, format!("{name} header")));
+    for (at, name) in headers(text) {
+        out.insert((line_of(at), Rule::Header, format!("{name} header")));
     }
-    let tokens = || {
-        line.split(|c: char| !c.is_ascii_alphanumeric())
-            .filter(|t| !t.is_empty())
-    };
-    if tokens().any(is_id_card) {
-        out.push((Rule::IdCard, "an 18-digit ID card number".into()));
-    }
-    if tokens().any(is_mobile) {
-        out.push((Rule::Phone, "an 11-digit mobile number".into()));
+    for (i, line) in text.lines().enumerate() {
+        if let Some(name) = cookies_txt_name(line) {
+            out.insert((i + 1, Rule::Cookie, cookie(name)));
+        }
+        let tokens = || {
+            line.split(|c: char| !c.is_ascii_alphanumeric())
+                .filter(|t| !t.is_empty())
+        };
+        if tokens().any(is_id_card) {
+            out.insert((i + 1, Rule::IdCard, "an 18-digit ID card number".into()));
+        }
+        if tokens().any(is_mobile) {
+            out.insert((i + 1, Rule::Phone, "an 11-digit mobile number".into()));
+        }
     }
     out
 }
 
-// ---- damai hosts in source code ----
-
-const SOURCE_EXTENSIONS: [&str; 10] = [
-    "rs", "ts", "tsx", "js", "mjs", "cjs", "sh", "yml", "yaml", "toml",
-];
+// ---- damai hosts named in the repository ----
 
 /// Every `*.damai.cn`-style host named in a line, as written (lowercased).
+/// The escape in front of a host is not part of it: `%2F` in a URL-encoded
+/// link, `\t` or `\u002F` in a string literal.
 fn damai_hosts_in_line(line: &str) -> BTreeSet<String> {
     let lower = line.to_ascii_lowercase();
     let b = lower.as_bytes();
@@ -247,18 +378,47 @@ fn damai_hosts_in_line(line: &str) -> BTreeSet<String> {
             {
                 start -= 1;
             }
-            let host = lower[start..end].trim_start_matches(['.', '-']);
+            let host = lower[after_escape(b, start, at)..end].trim_start_matches(['.', '-']);
             found.insert(host.to_string());
         }
     }
     found
 }
 
-fn is_source_file(path: &str) -> bool {
-    Path::new(path)
-        .extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| SOURCE_EXTENSIONS.contains(&e))
+/// Where a host read back to `start` really starts, once the escape that
+/// runs into it is left out: `%XX`, `\t`, `\xXX` and `\uXXXX` end in letters
+/// or digits. Never past `at`, where the host's `damai.cn` begins.
+fn after_escape(b: &[u8], mut start: usize, at: usize) -> usize {
+    let hex = |i: usize, n: usize| i + n <= at && b[i..i + n].iter().all(u8::is_ascii_hexdigit);
+    match start.checked_sub(1).map(|i| b[i]) {
+        Some(b'%') => {
+            // `%25` is an encoded `%`, so `%252F` is `%2F` encoded twice.
+            while hex(start, 2) {
+                let percent = &b[start..start + 2] == b"25";
+                start += 2;
+                if !percent {
+                    break;
+                }
+            }
+        }
+        Some(b'\\') => {
+            start += match b.get(start) {
+                Some(b'u') if hex(start + 1, 4) => 5,
+                Some(b'x') if hex(start + 1, 2) => 3,
+                _ if start < at => 1,
+                _ => 0,
+            }
+        }
+        _ => {}
+    }
+    start
+}
+
+/// Markdown only talks about hosts. Every other text file can make a
+/// request or feed a host to one: code, config, scripts, and the fixtures
+/// the mock server replays to the program.
+fn is_markdown(path: &str) -> bool {
+    Path::new(path).extension().is_some_and(|e| e == "md")
 }
 
 /// The hosts of scripts/damai-hosts.txt.
@@ -324,32 +484,33 @@ fn is_text(bytes: &[u8]) -> bool {
     !bytes.contains(&0)
 }
 
+/// The text of `file`, or None when it is binary or deleted in this
+/// checkout.
+fn read_text(root: &Path, file: &str) -> Option<String> {
+    let bytes = std::fs::read(root.join(file)).ok()?;
+    is_text(&bytes).then(|| String::from_utf8_lossy(&bytes).into_owned())
+}
+
 /// What is wrong with `files` (paths relative to `root`): findings not on
 /// the allowlist, and allowlist entries that no longer match anything.
 fn check_files(root: &Path, files: &[String], allow: &[Allowed]) -> Vec<String> {
     let mut findings = Vec::new();
     let mut used = vec![false; allow.len()];
     for file in files {
-        let Ok(bytes) = std::fs::read(root.join(file)) else {
-            continue; // tracked, but deleted in this checkout
-        };
-        if !is_text(&bytes) {
+        let Some(text) = read_text(root, file) else {
             continue;
-        }
-        let text = String::from_utf8_lossy(&bytes);
-        for (i, line) in text.lines().enumerate() {
-            for (rule, what) in sensitive_in_line(line) {
-                if let Some(k) = allow.iter().position(|a| a.path == *file && a.rule == rule) {
-                    used[k] = true;
-                    continue;
-                }
-                findings.push(Finding {
-                    path: file.clone(),
-                    line: i + 1,
-                    rule,
-                    what,
-                });
+        };
+        for (line, rule, what) in sensitive_in_text(&text) {
+            if let Some(k) = allow.iter().position(|a| a.path == *file && a.rule == rule) {
+                used[k] = true;
+                continue;
             }
+            findings.push(Finding {
+                path: file.clone(),
+                line,
+                rule,
+                what,
+            });
         }
     }
     findings.sort();
@@ -366,11 +527,11 @@ fn check_files(root: &Path, files: &[String], allow: &[Allowed]) -> Vec<String> 
     problems
 }
 
-/// Damai hosts named in the source files of `files` that are not in `blocked`.
+/// Damai hosts named in `files`, Markdown aside, that are not in `blocked`.
 fn unblocked_hosts(root: &Path, files: &[String], blocked: &BTreeSet<String>) -> Vec<Finding> {
     let mut out = Vec::new();
-    for file in files.iter().filter(|f| is_source_file(f)) {
-        let Ok(text) = std::fs::read_to_string(root.join(file)) else {
+    for file in files.iter().filter(|f| !is_markdown(f)) {
+        let Some(text) = read_text(root, file) else {
             continue;
         };
         for (i, line) in text.lines().enumerate() {
@@ -390,6 +551,30 @@ fn unblocked_hosts(root: &Path, files: &[String], blocked: &BTreeSet<String>) ->
     out
 }
 
+/// Lines of Rust files outside backend/tests/support/mod.rs that name a
+/// test binary through one of cargo's `CARGO_BIN_EXE` variables. A test
+/// that starts a binary itself goes around the helpers that keep it
+/// offline, so only support may name one; tests/offline_guard.rs shows that
+/// `support::theflash` does keep it offline.
+fn binaries_started_outside_support(root: &Path, files: &[String]) -> Vec<String> {
+    let needle = concat!("CARGO_BIN", "_EXE_");
+    let mut out = Vec::new();
+    for file in files
+        .iter()
+        .filter(|f| f.ends_with(".rs") && *f != "backend/tests/support/mod.rs")
+    {
+        let Some(text) = read_text(root, file) else {
+            continue;
+        };
+        for (i, line) in text.lines().enumerate() {
+            if line.contains(needle) {
+                out.push(format!("{file}:{}", i + 1));
+            }
+        }
+    }
+    out
+}
+
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -397,11 +582,36 @@ fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
-fn tracked_files(root: &Path) -> Vec<String> {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(["ls-files", "-z"])
+/// git in the repository at `root`. A git hook that runs the tests sets
+/// GIT_DIR and friends, which would point git at another repository.
+fn git_in(root: &Path) -> Command {
+    let mut git = Command::new("git");
+    git.arg("-C").arg(root);
+    for v in [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_COMMON_DIR",
+        "GIT_OBJECT_DIRECTORY",
+    ] {
+        git.env_remove(v);
+    }
+    git
+}
+
+/// The files git tracks, and the ones `git add -A` would add: untracked
+/// files that no ignore rule excludes. A new file is checked before it is
+/// committed, so `make check` is not green just because it is not yet
+/// added (#21).
+fn repo_files(root: &Path) -> Vec<String> {
+    let out = git_in(root)
+        .args([
+            "ls-files",
+            "-z",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+        ])
         .output()
         .unwrap_or_else(|e| panic!("git ls-files: {e}"));
     assert!(
@@ -434,7 +644,7 @@ fn load_allowlist(root: &Path) -> Vec<Allowed> {
 #[test]
 fn tracked_files_hold_no_credentials_or_personal_data() {
     let root = repo_root();
-    let problems = check_files(&root, &tracked_files(&root), &load_allowlist(&root));
+    let problems = check_files(&root, &repo_files(&root), &load_allowlist(&root));
     assert!(
         problems.is_empty(),
         "credentials or personal data in the repository. Remove them, or, for a \
@@ -445,13 +655,13 @@ fn tracked_files_hold_no_credentials_or_personal_data() {
 }
 
 #[test]
-fn every_damai_host_in_source_code_is_blocked_in_ci() {
+fn every_damai_host_named_outside_markdown_is_blocked_in_ci() {
     let root = repo_root();
     let blocked = blocked_hosts(&root);
-    let found = unblocked_hosts(&root, &tracked_files(&root), &blocked);
+    let found = unblocked_hosts(&root, &repo_files(&root), &blocked);
     assert!(
         found.is_empty(),
-        "source code names damai hosts that CI does not block. Add each to \
+        "these files name damai hosts that CI does not block. Add each to \
          scripts/damai-hosts.txt, so a test that reaches for it fails:\n{}",
         found
             .iter()
@@ -462,33 +672,91 @@ fn every_damai_host_in_source_code_is_blocked_in_ci() {
 }
 
 #[test]
-fn tests_start_theflash_only_through_the_offline_helper() {
+fn tests_start_binaries_only_through_support() {
     let root = repo_root();
-    let needle = concat!("CARGO_BIN_EXE", "_theflash");
-    let helper = concat!("support::", "offline(");
-    let bypassing: Vec<String> = tracked_files(&root)
-        .into_iter()
-        .filter(|f| f.starts_with("backend/tests/") && f.ends_with(".rs"))
-        .filter(|f| f != "backend/tests/support/mod.rs")
-        .filter(|f| {
-            let text = std::fs::read_to_string(root.join(f)).unwrap_or_default();
-            text.contains(needle) && !text.contains(helper)
-        })
-        .collect();
+    let found = binaries_started_outside_support(&root, &repo_files(&root));
     assert!(
-        bypassing.is_empty(),
-        "these tests start the binary without `support::offline`, so a missing \
-         THEFLASH_DAMAI_BASE_URL would reach the real damai.cn: {bypassing:?}"
+        found.is_empty(),
+        "these lines start a test binary themselves. Start it through a helper \
+         in backend/tests/support/mod.rs (`support::theflash`), which keeps it \
+         from reaching the real damai.cn:\n{}",
+        found.join("\n")
     );
 }
 
 // ---- the scanner itself ----
 
-fn found(line: &str) -> Vec<Rule> {
-    sensitive_in_line(line)
+fn found(text: &str) -> Vec<Rule> {
+    sensitive_in_text(text)
         .into_iter()
-        .map(|(r, _)| r)
+        .map(|(_, r, _)| r)
         .collect()
+}
+
+#[test]
+fn a_test_that_starts_a_binary_itself_fails_even_where_it_also_uses_the_helper() {
+    // #21: the guard asked only whether a file named both the binary and
+    // `support::offline(`, so one start through the helper hid a direct one.
+    let bin = concat!("CARGO_BIN", "_EXE_theflash");
+    let mixed = [
+        "mod support;",
+        "fn a() { let mut c = Command::new(\"x\"); support::offline(&mut c); }",
+        &format!("fn b() {{ Command::new(env!(\"{bin}\")).output(); }}"),
+        "",
+    ]
+    .join("\n");
+    let (root, files) = temp_repo(
+        "binaries",
+        &[
+            ("backend/tests/mixed.rs", mixed),
+            (
+                "backend/tests/support/mod.rs",
+                format!("let c = Command::new(env!(\"{bin}\"));\n"),
+            ),
+            (
+                "backend/tests/clean.rs",
+                "fn c() { support::theflash(\"x\"); }\n".to_string(),
+            ),
+            (
+                "docs/notes.md",
+                format!("tests reach {bin} through support\n"),
+            ),
+        ],
+    );
+    let got = binaries_started_outside_support(&root, &files);
+    let _ = std::fs::remove_dir_all(&root);
+    assert_eq!(got, ["backend/tests/mixed.rs:3"]);
+}
+
+#[test]
+fn files_not_yet_added_to_git_are_checked_too() {
+    // #21: the guards read `git ls-files` alone, so `make check` stayed
+    // green until the new file with the problem was committed.
+    let root = std::env::temp_dir().join(format!("theflash-repo-guard-{}-git", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let git = |args: &[&str]| {
+        let out = git_in(&root).args(args).output().unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    git(&["init", "-q"]);
+    for (path, text) in [
+        ("tracked.txt", "a\n"),
+        ("new.txt", "b\n"),
+        (".gitignore", "ignored.txt\n"),
+        ("ignored.txt", "c\n"),
+    ] {
+        std::fs::write(root.join(path), text).unwrap();
+    }
+    git(&["add", "tracked.txt"]);
+    let mut files = repo_files(&root);
+    files.sort();
+    let _ = std::fs::remove_dir_all(&root);
+    assert_eq!(files, [".gitignore", "new.txt", "tracked.txt"]);
 }
 
 fn join(parts: &[&str]) -> String {
@@ -560,6 +828,127 @@ fn cookie_and_authorization_headers_are_found() {
     ] {
         assert!(!found(line).contains(&Rule::Header), "{line}");
     }
+}
+
+#[test]
+fn headers_and_cookies_passed_as_arguments_are_found() {
+    // #21: a name and its literal value as adjacent arguments or as a pair,
+    // with no `:` or `=` between them.
+    for text in [
+        ".header(\"Authorization\", \"Bearer abc.def\")",
+        "headers.append('Cookie', 'a=b; c=d')",
+        ".header(header::AUTHORIZATION, \"Basic dXNlcjpwYXNz\")",
+        "new Headers([[\"set-cookie\", \"sid=1; Path=/\"]])",
+        ".header(\n    \"Authorization\",\n    \"Bearer abc\",\n)",
+    ] {
+        assert!(found(text).contains(&Rule::Header), "{text}");
+    }
+    for name in COOKIE_NAMES {
+        for text in [
+            format!("Cookie::new(\"{name}\", \"abc123\")"),
+            format!("[(\"{name}\", \"2200000000000\")]"),
+            format!("cookies.set('{name}', 'abc_123')"),
+        ] {
+            assert!(found(&text).contains(&Rule::Cookie), "{text}");
+        }
+    }
+}
+
+#[test]
+fn lists_of_names_and_values_that_are_not_literals_are_left_alone() {
+    for text in [
+        "[\"unb\", \"munb\"]",
+        "const KEEP: [&str; 5] = [\"_m_h5_tk\", \"_m_h5_tk_enc\", \"cookie2\", \"unb\", \"t\"];",
+        "strip: [\"cookie\", \"set-cookie\", \"authorization\", \"x-forwarded-for\"]",
+        ".header(\"Authorization\", token)",
+        ".header(\"Cookie\", \"\")",
+        "cookies.set(\"unb\", \"REDACTED\")",
+    ] {
+        assert!(found(text).is_empty(), "{text}: {:?}", found(text));
+    }
+}
+
+#[test]
+fn cookies_saved_as_name_and_value_objects_are_found() {
+    // How HAR files, Playwright's storageState, Puppeteer and browser
+    // extensions save a cookie: the name and the value are two entries.
+    for name in COOKIE_NAMES {
+        for text in [
+            format!("{{\"name\": \"{name}\", \"value\": \"abc123\", \"domain\": \".damai.cn\"}}"),
+            format!(
+                "{{\n  \"domain\": \".damai.cn\",\n  \"name\": \"{name}\",\n  \"path\": \"/\",\n  \"value\": \"abc123\"\n}}"
+            ),
+            format!("{{ name: '{name}', value: 'abc123' }}"),
+        ] {
+            assert!(found(&text).contains(&Rule::Cookie), "{text}");
+        }
+    }
+    let har_header = "{\"name\": \"Authorization\", \"value\": \"Bearer abc\"}";
+    assert!(found(har_header).contains(&Rule::Header), "{har_header}");
+    for text in [
+        "{\"name\": \"unb\", \"value\": \"\"}",
+        "{\"name\": \"unb\", \"value\": \"<redacted>\"}",
+        "{\"name\": \"unb\"}",
+        "{\"name\": \"unb\"}, {\"value\": \"abc123\"}",
+        "json!({\"name\": \"unb\", \"value\": token})",
+        "{\"name\": \"cookie\", \"value\": \"\"}",
+    ] {
+        assert!(found(text).is_empty(), "{text}: {:?}", found(text));
+    }
+}
+
+#[test]
+fn a_cookies_txt_line_is_found() {
+    // The Netscape format that `curl -c` and browser extensions write:
+    // tab-separated, the name in the sixth field and the value in the last.
+    for name in COOKIE_NAMES {
+        for text in [
+            format!(".damai.cn\tTRUE\t/\tFALSE\t1760000000\t{name}\tabc123"),
+            format!("#HttpOnly_.damai.cn\tTRUE\t/\tTRUE\t0\t{name}\tabc123"),
+        ] {
+            assert!(found(&text).contains(&Rule::Cookie), "{text}");
+        }
+    }
+    for text in [
+        "# Netscape HTTP Cookie File",
+        ".damai.cn\tTRUE\t/\tFALSE\t0\tunb\t",
+        ".damai.cn\tTRUE\t/\tFALSE\t0\tcna\tabc123",
+    ] {
+        assert!(found(text).is_empty(), "{text}: {:?}", found(text));
+    }
+}
+
+#[test]
+fn a_credential_split_across_lines_fails_and_names_the_line_of_the_name() {
+    // #21: the scan went line by line, so a value on the line after its
+    // name was never seen.
+    let (root, files) = temp_repo(
+        "multiline",
+        &[
+            (
+                "backend/testdata/damai/a7_multiline.json",
+                format!("{{\n  \"{}\":\n    \"7a1f3c9d2b4e_176\"\n}}\n", "_m_h5_tk"),
+            ),
+            (
+                "backend/testdata/damai/b.txt",
+                format!("x\n{}\n  = abc123\n", "unb"),
+            ),
+            (
+                "backend/testdata/damai/c.json",
+                "{\"Cookie\"\n  : \"a=b\"}\n".to_string(),
+            ),
+        ],
+    );
+    let problems = check_files(&root, &files, &[]);
+    let _ = std::fs::remove_dir_all(&root);
+    assert_eq!(
+        problems,
+        [
+            "backend/testdata/damai/a7_multiline.json:2: [cookie] cookie _m_h5_tk with a value",
+            "backend/testdata/damai/b.txt:2: [cookie] cookie unb with a value",
+            "backend/testdata/damai/c.json:1: [header] cookie header",
+        ]
+    );
 }
 
 #[test]
@@ -636,6 +1025,61 @@ fn damai_hosts_are_read_as_written() {
     assert_eq!(
         hosts("damai.cnx and damai.html and crate::damai"),
         Vec::<String>::new()
+    );
+}
+
+#[test]
+fn damai_hosts_are_read_without_the_escape_in_front_of_them() {
+    // #21: the letters and digits of an escape ran into the host: the `t`
+    // of a string's `\t`, the `2F` of a URL-encoded `/`.
+    let hosts = |l: &str| damai_hosts_in_line(l).into_iter().collect::<Vec<_>>();
+    assert_eq!(hosts("\"0.0.0.0\\tdamai.cn\""), ["damai.cn"]);
+    assert_eq!(hosts("\"a\\ndetail.damai.cn\""), ["detail.damai.cn"]);
+    assert_eq!(hosts("https%3A%2F%2Ft.damai.cn%2Fyep"), ["t.damai.cn"]);
+    assert_eq!(
+        hosts("https%253A%252F%252Fdetail.damai.cn"),
+        ["detail.damai.cn"]
+    );
+    assert_eq!(hosts("\"https:\\u002F\\u002Fm.damai.cn\""), ["m.damai.cn"]);
+    assert_eq!(hosts("'\\x2Fsearch.damai.cn'"), ["search.damai.cn"]);
+    // `%da` is not an escape of the host it starts: the host is all there.
+    assert_eq!(hosts("LIKE '%damai.cn'"), ["damai.cn"]);
+}
+
+#[test]
+fn damai_hosts_in_every_file_but_markdown_must_be_blocked() {
+    // #21: only ten source extensions were read, so a host in a .json
+    // config or in a fixture the mock server replays was never checked.
+    let host = join(&["order.", "damai", ".cn"]);
+    let (root, files) = temp_repo(
+        "domain-any-file",
+        &[
+            (
+                "frontend/config.json",
+                format!("{{\"api\": \"https://{host}/create\"}}\n"),
+            ),
+            (
+                "backend/testdata/damai/page.html",
+                format!("<a href=\"//{host}/list\">\n"),
+            ),
+            ("scripts/probe.py", format!("URL = 'https://{host}'\n")),
+            ("docs/notes.md", format!("prose about {host}\n")),
+            ("backend/testdata/damai/shot.png", format!("\0{host}")),
+        ],
+    );
+    let got: Vec<String> = unblocked_hosts(&root, &files, &parse_host_list("damai.cn"))
+        .iter()
+        .map(Finding::to_string)
+        .collect();
+    let _ = std::fs::remove_dir_all(&root);
+    let not_listed = format!("[domain] {host} is not in scripts/damai-hosts.txt");
+    assert_eq!(
+        got,
+        [
+            format!("backend/testdata/damai/page.html:1: {not_listed}"),
+            format!("frontend/config.json:1: {not_listed}"),
+            format!("scripts/probe.py:1: {not_listed}"),
+        ]
     );
 }
 

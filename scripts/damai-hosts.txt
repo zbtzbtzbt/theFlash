@@ -1,12 +1,34 @@
-# Every damai.cn host. CI resolves each one to an address nothing listens on
-# (scripts/block-damai-hosts.sh), so a test that reaches for the real damai.cn
-# fails instead of sending a request. backend/tests/repo_guard.rs fails when
-# source code names a damai host that is not in this list, so add a host here
-# in the same change that starts using it. One host per line; # starts a
-# comment. Subdomains are not covered by their parent: list each one.
+# The damai hosts CI resolves to an address nothing listens on
+# (scripts/block-damai-hosts.sh), so a test that reaches for one of them fails
+# instead of sending a request.
+#
+# Covers: every damai.cn host (and the same names with .com, .net or .org for
+# .cn) that a file in this repository names, Markdown aside: code, config,
+# scripts, and the fixtures the mock server replays to the program, because a
+# host in a replayed page is one the program can be sent on to.
+# backend/tests/repo_guard.rs fails when such a file names a host that is not
+# here, so add a host in the same change that first names it.
+#
+# Does not cover: damai hosts no file names yet; subdomains of a listed host
+# (a parent does not cover them, so list each one); and the other domains
+# damai.cn's pages use, such as alicdn.com, alipay.com and taopiaopiao.com.
+# Requests to those are stopped only by the proxy layers
+# (backend/tests/support/mod.rs, scripts/check.sh), which a client that
+# ignores the proxy environment variables goes around.
+#
+# One host per line; # starts a comment.
 damai.cn
 www.damai.cn
 detail.damai.cn
 m.damai.cn
 search.damai.cn
 mtop.damai.cn
+# Named by the saved detail pages in backend/testdata/damai: the login and
+# account links, the order list, the QR code image and the footer links.
+passport.damai.cn
+orders.damai.cn
+item-cdn.damai.cn
+t.damai.cn
+# Not a host the program uses: how backend/testdata/damai/risk_control.html
+# reads after its x5secdata token was redacted.
+redacted.damai.cn

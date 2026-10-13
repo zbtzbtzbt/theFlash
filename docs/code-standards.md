@@ -24,8 +24,8 @@
 | 测试检查行为，不检查实现。 | 断言用户或调用方需要的东西。格式调整和内部重构不应该让测试失败，除非逐字节一致本身就是需求。 |
 | main 上失败的测试是当下要修的 bug。 | “main 上也一样失败”不是基线，“全量跑失败、单独跑通过”也不是。要么在原因处修掉，要么开 issue 写明原因，并在单独的 commit 里完成，然后才能在它上面继续发版。 |
 | 测试不碰真实机器。 | 测试在临时目录下跑，不读写真实配置，不访问真实的大麦网或其他第三方服务，用本地 mock 回放 `testdata/` 里保存的真实响应。 |
-| 测试启动 `theflash` 只走 `support::offline`，新的大麦域名先进屏蔽清单。 | 没经过 `support::offline` 的测试，或源码里出现 [`scripts/damai-hosts.txt`](../scripts/damai-hosts.txt) 里没有的大麦域名，守护测试会失败。机制和理由见 [0003](decisions/0003-tests-cannot-reach-damai.md)。 |
-| 仓库里没有凭据和个人信息。 | [`repo_guard.rs`](../backend/tests/repo_guard.rs) 扫描所有被跟踪的文本文件：登录 cookie 带值、Cookie 和 Authorization 请求头、合法的身份证号和手机号。白名单每项写原因。**截图里的文字扫描不到**：截图仍靠人工规则，保存前自己看一遍，出现凭据就整张删掉重截。 |
+| 测试启动 `theflash` 只走 `support` 里的 helper，新的大麦域名先进屏蔽清单。 | `backend/tests/support/mod.rs` 以外的文件直接写测试二进制的路径，或者 Markdown 以外的文件（fixture 也算）出现 [`scripts/damai-hosts.txt`](../scripts/damai-hosts.txt) 里没有的大麦域名，守护测试会失败。机制、理由和还查不到的写法见 [0003](decisions/0003-tests-cannot-reach-damai.md)。 |
+| 仓库里没有凭据和个人信息。 | [`repo_guard.rs`](../backend/tests/repo_guard.rs) 扫描所有被跟踪的和还没 `git add` 的文本文件：登录 cookie 带值（名字和值隔着换行、作为函数参数、存成 `{"name", "value"}` 对象或 `cookies.txt` 都算）、Cookie 和 Authorization 请求头、合法的身份证号和手机号。白名单每项写原因。**截图里的文字扫描不到**：截图仍靠人工规则，保存前自己看一遍，出现凭据就整张删掉重截。 |
 | 测试启动的东西随测试结束。 | 测试启动的进程、协程、定时任务，在测试返回前停止或等待完成，否则会写进下一个测试的目录，或者空转好几天。 |
 | 时序测试两边都留余量。 | 不用负载高的机器可能超过的墙钟时间做断言。复现时序失败靠注入延迟，不靠反复重跑等它失败。 |
 | 以某个保证命名的测试，在保证被破坏时必须失败。 | 合并前手动破坏这个保证，看测试变红。 |
