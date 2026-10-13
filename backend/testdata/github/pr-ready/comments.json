@@ -1,0 +1,24 @@
+[
+  {
+    "id": 6151998220,
+    "html_url": "https://github.com/zbtzbtzbt/theFlash/pull/19#issuecomment-6151998220",
+    "user": {
+      "login": "zbtzbtzbt"
+    },
+    "created_at": "2026-10-13T18:06:53Z",
+    "updated_at": "2026-10-13T18:06:53Z",
+    "author_association": "OWNER",
+    "body": "合并前检查（Codex）：head 0dbf6fcc0f0b9df91ec77ddf385112b3a50c0a0c，基于293d237；本地临时HOME make check全部通过，包含event/watch、离线及凭据护栏和23条界面测试，共111条通过。\n\nPR CI 38443736635 已完成，check (ubuntu-latest) / check (macos-latest) 均SUCCESS。已记录回退旧代码/破坏挂载时的真实FAIL，以及恢复后的PASS。真实演出、Chrome/Safari及宽窄屏证据见自检文档和#3截图评论。\n\n按owner授权“写好、测试没问题即可合并”合并此已验证head；#3保持打开，合并后由实现者之外的agent独立验收。没有声称独立验收已完成。\n"
+  },
+  {
+    "id": 6152100000,
+    "html_url": "https://github.com/zbtzbtzbt/theFlash/pull/19#issuecomment-6152100000",
+    "user": {
+      "login": "zbtzbtzbt"
+    },
+    "created_at": "2026-10-13T18:08:12Z",
+    "updated_at": "2026-10-13T18:08:12Z",
+    "author_association": "OWNER",
+    "body": "## 审查记录\n\n- 被审查的 SHA: 0dbf6fcc0f0b9df91ec77ddf385112b3a50c0a0c\n- 合到的 main: 293d2372fa018243ca53962a7e6fdfa9154469bd\n- 审查者: Claude\n- 结论: 通过\n- 跑了什么: 把 0dbf6fc 合到 main 293d237，在临时 HOME 下 `make check` 全绿（后端 fmt、clippy、47 单元、18 event/JSON CLI、5 watch CLI、2 离线护栏、16 仓库护栏、build；前端 Biome、tsc、23 Vitest）；回退 `frontend/public/index.html` 里的查询逻辑后 `browser_event_json_preserves_cli_content` 真正 FAIL“浏览器查询没有返回演出”，恢复后通过。\n\n没跑：Linux 本机没跑，核对了这个提交上的两个 CI job。\n\nAgent: Claude\n"
+  }
+]

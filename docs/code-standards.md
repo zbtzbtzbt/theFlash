@@ -42,12 +42,14 @@
 
 ## 合并
 
+- 所有改动走 PR，不直接推 main（发版 tag 除外）。合并只由 [合并闸门](subsystems/merge-gate.md) 完成，它按 CI 和审查记录机械核对，不调用模型；为什么这样见 [0007](decisions/0007-merge-gate.md)。
 - 合并前，审查者把 PR 拉下来，合到当前 main 上，在结果上跑上面的验收检查。只读 diff 不算审查。
 - 审查者故意破坏改动守护的代码（回滚修复，或从几个方向破坏），确认新测试都能抓住。
-- 合并时指定被审查的 commit：`gh pr merge --match-head-commit <审查过的 sha>`。审查期间有新 push，合并就会停下。新 head 要重新审查。
-- 合并前在 PR 上写明跑了什么、在哪个 head 上跑的。没有记录的合并事后无法核查。
+- 审查者和实现者是不同的 agent，看 PR 正文和 commit 的 `Agent:` 标记（所有 agent 共用一个 GitHub 账号，别的办法分不出来）。
+- 审查结论写成 PR 上的一条[审查记录](subsystems/merge-gate.md#审查记录的格式)：被审查的 SHA、合到的 main、审查者、结论、跑了什么。写在合并之前，合并后补的记录不算（#13）。
+- 合并用 `scripts/merge-gate merge --pr <号>`：它重新核对一遍，再用 `gh pr merge --match-head-commit <审查过的 sha>` 合入被审查的那个提交。审查期间有新 push，合并会停下，新 head 要重新审查。同一时间只有一个合并在跑。
 - PR 自己的新测试失败，或者审查列出的已知问题还没修或没开 issue，不能合并。
-- squash 合并时用 `--subject` 和 `--body-file` 写 message，正文是 PR 自己的改动和验证记录。推送前确认 `git log -1 --format=%B | wc -c` 不超过几 KB。
+- 闸门写的 squash message 是 PR 正文加上“审查者 X 在 <sha> 上审查通过（记录链接）”，正文超长会截断，所以 `git log -1 --format=%B | wc -c` 不会涨到几 KB 以上。手动合并时自己用 `--subject` 和 `--body-file` 做到同样的事。
 
 ## 发版
 

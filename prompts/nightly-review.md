@@ -36,6 +36,16 @@ gh pr list --state merged --search "merged:>=<水位线日期>" --json number,ti
 - 打 tag 时 CI run 没跑完、被取消或是红的。
 - PR 自己的新测试失败，或者没有记录在哪个 head 上跑了什么。
 - 两个会话共用 checkout 导致的串文件、空 commit。
+- **绕过合并闸门的合并**。闸门写的 message 里有“合并闸门：审查者 … 在 … 上审查通过”这一段，没有这一段的合并就是绕过来的（#13 那次就是）。范围内的每个合并都查一遍，顺便核对审查记录的时间早于合并时间：
+
+  ```sh
+  git log --format='%h %s%n%b%n----' --merges --first-parent "$from"..origin/main | grep -L 合并闸门
+  gh pr list --state merged --search "merged:>=<水位线日期>" \
+    --json number,mergedAt,comments --jq '.[] | {number, mergedAt,
+      records: [.comments[] | select(.body | contains("审查记录")) | .createdAt]}'
+  ```
+
+  闸门挡不住这种合并（见 [0007](../docs/decisions/0007-merge-gate.md)），所以这里是唯一会发现它的地方。
 
 **验证太薄的**：
 

@@ -1,0 +1,27 @@
+{
+  "number": 19,
+  "state": "open",
+  "locked": false,
+  "draft": false,
+  "title": "frontend: 在本机浏览器查看演出场次和票档（#3）",
+  "body": "原来只能用命令行查看演出。现在从根目录运行 `make serve`，打开终端打印的本机地址，输入大麦链接或ID即可查看全部场次、票档、状态和开售时间。查询与 `theflash event` 共用 Rust 数据源和显示规则。\n\n只绑定127.0.0.1，拒绝外部Host/Origin，查询串行、断开即取消、触发风控后整个服务停止后续查询。暂为源码运行入口，需要项目指定的Node/Rust工具链；单文件发布和长期盯票UI另见#5/#2，跨进程请求与风控协同见#4。选择和边界记录在 `docs/decisions/0004-local-event-ui.md`。\n\nRun:\n- rebase到293d237，临时HOME下 `make check` 全通过：47 Rust单元、18 event/JSON CLI、5 watch CLI、2离线护栏、16仓库护栏、23 Vitest测试；fmt/clippy/build/Biome/tsc/前端构建通过。\n- 回退旧main：`browser_event_json_preserves_cli_content` 真正FAIL“浏览器查询没有返回演出”，恢复PASS。空表单DOM测试在实现前FAIL，破坏挂载再FAIL，恢复PASS。\n- Chrome 1280/390px查询已开售、未开售、已售罄真实演出和无效链接，加载及全部字段正确，手机宽度无横向溢出。Safari实机宽/窄窗口检查相同场景，并在真实大麦原站逐场核对票档。8张无凭据截图已贴到#3。\n- 前端测试回放真实fixture，并加HTTP/CONNECT陷阱代理；漏设fixture上游时被本机陷阱拦截，没有真实大麦请求。\n- 详细自检和CLI输出：`docs/validation/issue-3.md`。CLI event/watch测试均保留并通过。\n\nNot tried:\n- Linux实机浏览器没跑，由Linux/macOS CI验证自动检查。未登录、下单或支付，未在真实网站制造风控；风控使用保存的响应回放。\n- 匿名agent-browser Chrome原站跳404，使用Safari完成真实原站核对；axe 0 violations，渐变背景对比度有incomplete，未声称自动覆盖。\n- 实现者Codex；独立验收由其他agent完成，合并不关闭#3。此PR不打发布tag。\n\nReferences #3\n\nAgent: Codex\n",
+  "user": {
+    "login": "zbtzbtzbt"
+  },
+  "labels": [],
+  "head": {
+    "ref": "codex/issue-3",
+    "sha": "0dbf6fcc0f0b9df91ec77ddf385112b3a50c0a0c"
+  },
+  "base": {
+    "ref": "main",
+    "sha": "293d2372fa018243ca53962a7e6fdfa9154469bd"
+  },
+  "merged": false,
+  "mergeable": true,
+  "mergeable_state": "clean",
+  "rebaseable": null,
+  "html_url": "https://github.com/zbtzbtzbt/theFlash/pull/19",
+  "created_at": "2026-10-13T18:03:58Z",
+  "updated_at": "2026-10-13T18:06:53Z"
+}

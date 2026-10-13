@@ -14,6 +14,7 @@
 | 推 tag 发布 macOS 和 Linux 的程序 | [发布](release.md) |
 | Mac 上独立于终端的定时验证及 issue 摘要 | [launchd 验证任务](validation.md) |
 <!-- docs-index:end -->
+| 按 CI 和审查记录决定 PR 能不能合入 | [合并闸门](merge-gate.md) |
 
 ## 维护参考文档
 

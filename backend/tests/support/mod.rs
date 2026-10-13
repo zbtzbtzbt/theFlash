@@ -219,6 +219,32 @@ pub fn offline(cmd: &mut Command) {
     cmd.env("no_proxy", "127.0.0.1,localhost,::1");
 }
 
+/// The merge-gate binary with nothing to reach GitHub with: `gh` is gone
+/// from PATH, so a test that forgets `--replay` fails instead of asking
+/// the real GitHub, and the merge lock lives under `state` instead of the
+/// real home directory. Every test that starts merge-gate goes through
+/// here (tests/repo_guard.rs checks that).
+pub fn merge_gate(state: &std::path::Path) -> Command {
+    let mut c = Command::new(env!("CARGO_BIN_EXE_merge-gate"));
+    std::fs::create_dir_all(state).unwrap();
+    c.env("PATH", empty_dir());
+    c.env("HOME", state);
+    c.env("THEFLASH_MERGE_GATE_STATE", state);
+    offline(&mut c);
+    c
+}
+
+/// A directory with no executables in it, used as PATH. One per test
+/// binary; it holds nothing, so nothing outlives the run.
+fn empty_dir() -> &'static str {
+    static DIR: OnceLock<String> = OnceLock::new();
+    DIR.get_or_init(|| {
+        let dir = std::env::temp_dir().join(format!("theflash-empty-path-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.display().to_string()
+    })
+}
+
 /// The address of a proxy that fails the test run for any request it
 /// receives. One per test binary, started on first use; it ends with the
 /// binary, and nothing a test starts depends on it.

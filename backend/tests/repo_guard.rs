@@ -6,7 +6,9 @@
 //!   ID card number, no mainland mobile number in any text file;
 //! - nothing that tests run can reach the real damai.cn: every damai host
 //!   named outside Markdown is on the blocklist CI resolves to nowhere, and
-//!   tests start a binary only through the helpers in `support`.
+//!   tests start a binary only through the helpers in `support`
+//!   (`support::offline` for theflash, `support::merge_gate` for the merge
+//!   gate, whose tests must not reach the real GitHub either).
 //!
 //! The repository is what git tracks and the untracked files it does not
 //! ignore, so a new file is checked before it is committed. The checks read
@@ -678,8 +680,9 @@ fn tests_start_binaries_only_through_support() {
     assert!(
         found.is_empty(),
         "these lines start a test binary themselves. Start it through a helper \
-         in backend/tests/support/mod.rs (`support::theflash`), which keeps it \
-         from reaching the real damai.cn:\n{}",
+         in backend/tests/support/mod.rs (`support::theflash` keeps theflash \
+         away from the real damai.cn, `support::merge_gate` keeps the merge \
+         gate away from the real GitHub):\n{}",
         found.join("\n")
     );
 }

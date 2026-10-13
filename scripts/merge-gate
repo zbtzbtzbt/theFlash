@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# 合并闸门：审查者用它合并别人的 PR。它核对 CI 和 PR 上的审查记录，
+# 全对上才合，不调用模型。用法和拒绝条件见
+# docs/subsystems/merge-gate.md，为什么这样见 docs/decisions/0007-merge-gate.md。
+#
+#   scripts/merge-gate check --pr 21     只看能不能合并，什么都不改
+#   scripts/merge-gate merge --pr 21     拿锁、重新核对、合并
+#   scripts/merge-gate queue             所有打开的 PR 依次核对、依次合并
+#
+# 退出码：0 可以合并 / 已合并，1 拒绝合并，2 用法或取数据出错。
+set -euo pipefail
+cd "$(dirname "$0")/../backend"
+# --quiet keeps cargo's progress out of the gate's own output, so a
+# refusal is the only thing the reviewer has to read.
+exec cargo run --quiet --bin merge-gate -- "$@"
