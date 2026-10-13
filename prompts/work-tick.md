@@ -17,7 +17,7 @@ gh run list --branch main --limit 5 --json headSha,status,conclusion,displayTitl
 
 ## 2. 有没有可以发版的修复
 
-上次 tag 之后有用户可见的修复，并且最新 commit 上的 CI run 已经跑完且是绿的，就发版：`git fetch --tags`，取下一个可用版本号，打 tag，push，确认发布产物都在。CI 还在跑就等下一轮。
+上次 tag 之后有用户可见的修复，并且最新 commit 上的 CI run 已经跑完且是绿的，就按 [code-standards 的“发版”](../docs/code-standards.md#发版)发版：`git fetch --tags`，取下一个可用版本号，用一个 PR 把它写进 `backend/Cargo.toml`；合进 main、那个 commit 上的 Test 跑完变绿以后，在那个 commit 上打 tag 并 push。Release 工作流跑完后，确认 release 页面上的产物都在。CI 还在跑就等下一轮。
 
 ## 3. 有没有待审的 PR
 

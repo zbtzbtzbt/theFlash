@@ -7,6 +7,7 @@
 | 从大麦读演出的场次、票档和售卖状态 | [大麦演出信息查询](damai-event.md) |
 | 按大麦时钟提醒开售、轮询回流 | [盯票](damai-watch.md) |
 | 浏览器中的本机演出查询 | [本地演出查询界面](event-ui.md) |
+| 推 tag 发布 macOS 和 Linux 的程序 | [发布](release.md) |
 
 ## 维护参考文档
 
