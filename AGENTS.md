@@ -2,7 +2,7 @@
 
 theFlash 是大麦网（damai.cn）的抢票程序，一个 AI Native 项目：架构设计、编码、测试、审查、发布全部由 agent 完成，人不参与架构设计，也不写任何代码。没有人会替你审 diff，也没有人会替你做技术决定；你和其他 agent 就是这个项目的架构师、开发者、测试者和审查者。
 
-人只做四件事：提出目标和问题、提供账号和授权、对产品和安全规则做裁决、验收结果。除此之外的一切由 agent 自己决定，并把决定写下来，让后来的 agent 读得到。
+人只做三件事：提出目标和问题、提供账号和授权、对产品和安全规则做裁决。人不验收：每个 issue 由实现者之外的另一个 agent 按 [prompts/acceptance.md](prompts/acceptance.md) 独立验收，通过后才关闭。除此之外的一切由 agent 自己决定，并把决定写下来，让后来的 agent 读得到。
 
 每个会话都按下面的流程走。
 
@@ -38,14 +38,14 @@ theFlash 是大麦网（damai.cn）的抢票程序，一个 AI Native 项目：�
 ## 一次会话的流程
 
 1. **自己的 worktree**：`git fetch && git worktree add --detach ../theFlash-<任务名> origin/main`。两个会话不能共用一个 checkout，否则会把对方暂存的文件提交到自己的标题下。
-2. **认领**：开工前在 issue 上留言说你在做（没有 issue 就新建一个）。再看一眼 `git log origin/main`，确认没人已经修了。
+2. **认领**：开工前在 issue 上留言说你在做，写明你是哪个 agent（例如 Claude、Codex），验收者靠这一点避开自己做的 issue。没有 issue 就新建一个。再看一眼 `git log origin/main`，确认没人已经修了。正文写着“负责：某个 agent”的 issue，只由那个 agent 认领。
 3. **复现**：按报告人的原始场景复现，用他们的输入、平台和界面。fixture 用他们的原始字节，不要自己编一个相似的。
 4. **先写失败的测试**：写一个在当前代码上失败的测试，记下失败信息。
 5. **修复，并覆盖同类**：grep 同样的模式，同类位置在同一个改动里一起修。
-6. **验收**：跑 [code-standards 的验收标准](docs/code-standards.md#验收标准)，记下每条命令和结果。没跑的写“没跑”。
+6. **自检**：跑 [code-standards 的验收标准](docs/code-standards.md#验收标准)，记下每条命令和结果。没跑的写“没跑”。
 7. **提交**：一个 commit 只做一件事，格式见下。提交后 `git show --stat HEAD` 必须只列出你的文件。
 8. **推送并盯 CI**：push 后等 CI。CI 红了，修它就是你当下的任务。
-9. **关闭**：issue 保持打开，直到报告人确认他的场景好了。
+9. **交给验收**：在 issue 上汇报怎么运行、每条验收标准的证据、没做的部分，然后加上 `待验收` 标签。不要自己关闭 issue。另一个 agent 按 [prompts/acceptance.md](prompts/acceptance.md) 验收：通过就由它关闭；不通过它会把标签换成 `验收未通过` 并写明问题，由你或下一个接手的 agent 修好后重新加上 `待验收`。
 
 ## 用 computer use 验证
 

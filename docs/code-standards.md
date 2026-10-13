@@ -80,6 +80,7 @@
 - 凭据（账号密码、cookie、token）不进仓库、日志、commit message、截图和 fixture。
 - 自动化测试和 CI 绝不访问真实的大麦网。
 - 账号出现风控提示（验证码、限流、封禁）时停下来报告 owner，由 owner 决定下一步。
+- 人不验收。每个 issue 由实现者之外的 agent 按 [prompts/acceptance.md](../prompts/acceptance.md) 独立验收，通过后才关闭；实现者不关闭自己的 issue。
 
 ## Commits
 

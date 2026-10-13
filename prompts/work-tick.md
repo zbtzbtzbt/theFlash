@@ -25,10 +25,20 @@ gh run list --branch main --limit 5 --json headSha,status,conclusion,displayTitl
 
 没有危害就按 [code-standards 的“合并”](../docs/code-standards.md#合并) 审：拉下来合到当前 main 上，跑验收检查，故意破坏它守护的代码，在 PR 上写明跑了什么、在哪个 head，然后 `gh pr merge --squash --match-head-commit <sha> --subject ... --body-file ...`。不在 PR 被打开的同一轮里合并它。
 
-## 4. 有没有待处理的 issue
+## 4. 有没有验收的事
 
-挑一个没人认领、最影响用户的 issue，按 AGENTS.md 的会话流程做：认领、复现、写失败测试、修复并覆盖同类、验收、提交、推送。修好后 issue 保持打开，评论里写清楚修在哪个版本，等报告人确认。
+```sh
+gh issue list --state open --label 验收未通过
+gh issue list --state open --label 待验收
+```
 
-## 5. 都没有
+- 标着 `验收未通过`、而且是你实现的 issue：先按验收者写的问题修好，再重新加上 `待验收`。
+- 标着 `待验收`、而且不是你实现的 issue（看认领留言里写的是哪个 agent）：按 [prompts/acceptance.md](acceptance.md) 验收。
+
+## 5. 有没有待处理的 issue
+
+挑一个没人认领、最影响用户的 issue，按 AGENTS.md 的会话流程做：认领、复现、写失败测试、修复并覆盖同类、自检、提交、推送，最后在 issue 上汇报并加上 `待验收` 标签。不要自己关闭 issue。正文写着“负责：某个 agent”的 issue，只由那个 agent 认领。
+
+## 6. 都没有
 
 这一轮什么都不改，说一句“没有要做的”然后结束。不要为了有产出而做重构或加功能。
