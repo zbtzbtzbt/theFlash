@@ -415,13 +415,16 @@ fn build(wanted: Wanted, state: &State, config: &Config, now: DateTime<Utc>) -> 
     // A session that was started and ended is not started again, except
     // once more after a failure or a timeout: a dispatcher that keeps
     // restarting the same failing session burns the daily ceiling on one
-    // issue.
+    // issue. A session the dispatcher lost track of (`不知所终`, because
+    // the dispatcher itself restarted while it ran) is not retried
+    // either: it may well have finished the work, and doing it twice is
+    // worse than waiting for the labels to say what is still missing.
     if attempt > 0 {
         let previous = format!("{key}-a{attempt}");
         let retriable = state
             .session(&previous)
             .and_then(|s| s.outcome)
-            .is_some_and(|o| matches!(o, Outcome::Failed | Outcome::TimedOut | Outcome::Vanished));
+            .is_some_and(|o| matches!(o, Outcome::Failed | Outcome::TimedOut));
         if attempt >= MAX_ATTEMPTS || !retriable {
             return Candidate::Skip(task, Skip::Done(previous));
         }
@@ -590,7 +593,7 @@ pub fn instruction(task: &Task, config: &Config, worktree: &std::path::Path) -> 
          开工前读 AGENTS.md、LESSONS.md、docs/code-standards.md 和你要改的子系统文档。不要问人，决定自己做并写成决定记录。\n\n\
          要做的事：{what}\n\n\
          规则：遵守 AGENTS.md 的大麦安全规则（不登录、不下单、凭据不进仓库）；commit 和 PR 正文最后一行写 `Agent: {vendor}`；\
-         不要合并自己的 PR，不要关闭自己的 issue；至少每 30 分钟 scripts/claims heartbeat 一次或推一次分支；\
+         不要合并自己的 PR，不要关闭自己的 issue；至少每 30 分钟 scripts/claims heartbeat 一次或推一次分支         （仓库里还没有这个脚本时，按 docs/subsystems/claim-lease.md 的格式在 issue 上留评论）；\
          这个会话最多跑 {timeout} 分钟，超时会被停掉并释放认领，所以进度要及时推到分支和 issue 上。\n\
          为什么派给你：{why}",
         vendor = task.vendor,

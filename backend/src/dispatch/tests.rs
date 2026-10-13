@@ -649,6 +649,43 @@ fn a_session_whose_process_is_gone_is_closed_without_touching_the_claim() {
 }
 
 #[test]
+fn a_session_the_dispatcher_lost_track_of_is_not_dispatched_again() {
+    // The dispatcher restarted while the session ran, so it never saw an
+    // exit code. The session may well have done the work; doing it twice
+    // is worse than waiting for the labels to say what is still missing.
+    let snapshot = Snapshot {
+        issues: vec![issue(51, &["待验收"], Some("claude"))],
+        pulls: vec![],
+        main_checks: MainChecks::Green,
+    };
+    let mut gone = running(
+        "accept-51-a1",
+        Some(51),
+        "codex",
+        "2026-10-14T00:00:00+08:00",
+    );
+    gone.finished_at = Some(at("2026-10-14T02:00:00+08:00"));
+    gone.outcome = Some(Outcome::Vanished);
+    let state = State {
+        sessions: vec![gone],
+        ..State::default()
+    };
+
+    let plan = decide(
+        &snapshot,
+        &state,
+        &config(),
+        at("2026-10-14T04:00:00+08:00"),
+    );
+
+    assert!(
+        plan.start.is_empty(),
+        "不知所终的会话不自动再派一次：{:?}",
+        plan.start
+    );
+}
+
+#[test]
 fn the_instruction_says_the_task_the_rules_and_the_ceiling() {
     let task = Task {
         id: "accept-51-a1".to_string(),

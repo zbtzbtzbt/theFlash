@@ -49,7 +49,7 @@
 | --- | --- |
 | 按 #9 归云端 | 设置里 `cloud_roles` 列的角色（默认 `review`、`fix-ci`、`nightly-review`）不碰大麦，由云端的定时 agent 做，本机不重复派 |
 | 同一个 issue 已经有会话 | 一个 issue 同时只有一个会话；PR 和它标题里的 issue 算同一件活 |
-| 已经派过 | 任务编号派过就不再派；失败或超时的只自动再试一次（`-a2`），然后不再动它 |
+| 已经派过 | 任务编号派过就不再派；失败（退出码非 0）或超时的只自动再试一次（`-a2`），然后不再动它 |
 | 看不出实现者 | 审查和验收必须换厂商，猜错等于让它审自己的改动，所以宁可不派 |
 | 没配这个厂商的命令行 | 设置里没有它 |
 | 到每日上限 | 排队，并在 issue 上说明一次 |
@@ -64,7 +64,7 @@
 - **自己的进程组**：停一个会话会连它启动的工具一起停；调度程序自己的 Ctrl-C 不会打到会话上。
 - **自己的任务说明**：按角色生成一段话，告诉它是谁、在哪个目录、要做什么（指向 `prompts/acceptance.md`、`docs/code-standards.md` 这些仓库里已有的规则，而不是重复一遍）、`Agent:` 签名写什么、超时多少分钟。环境变量 `THEFLASH_DISPATCH_TASK` 是任务编号。
 - **超时**：跑过 `session_timeout_minutes` 就停掉整个进程组，调 `scripts/claims reclaim` 释放认领，并在 issue 上写明会话编号、跑了多久、日志在哪、认领有没有被收回。`claims` 因为租约还没过期而拒绝时，拒绝的原话写进评论，由下一个 agent 按租约规则决定。
-- **进程没了但没超时**：当成自己结束了（`不知所终`），不去动认领——它可能已经把活干完了。
+- **会话怎么算结束**：调度程序留着自己启动的子进程，拿它的退出码——0 是 `完成`，非 0 是 `失败`（再试一次）。只有调度程序自己重启过、退出码已经没人收的会话才算 `不知所终`：不动认领，也不自动再试一次——它可能已经把活干完了，重做一遍比等标签说还缺什么更糟。
 
 ## 设置
 
@@ -105,7 +105,9 @@ scripts/dispatch uninstall              # 停掉并删掉服务（已经启动�
 
 每个子命令都接受 `--config <文件>`、`--replay <目录>`（用保存下来的 GitHub 响应判断，不访问 GitHub）、`--now <带时区的时间>`、`--dry-run`。退出码：0 做了 / 可以做，1 没有要派的活或被拒绝，2 用法错或取数据失败。
 
-常驻：macOS 写 `~/Library/LaunchAgents/cn.theflash.dispatch.plist`（`RunAtLoad` + `KeepAlive`），Linux 写 `~/.config/systemd/user/cn.theflash.dispatch.service`（`Restart=always`）。两边都把自己的输出写到 `<logs>/dispatch.out.log` 和 `dispatch.err.log`。`install --print` 只打印要装的文件，不动这台机器。
+常驻：macOS 写 `~/Library/LaunchAgents/cn.theflash.dispatch.plist`（`RunAtLoad` + `KeepAlive`），Linux 写 `~/.config/systemd/user/cn.theflash.dispatch.service`（`Restart=always`）。两边都把自己的输出写到 `<logs>/dispatch.out.log` 和 `dispatch.err.log`，并显式写上 `PATH`（服务拿到的 `PATH` 很小，否则找不到 `git`、`gh` 和 agent 的命令行）。`install --print` 只打印要装的文件，不动这台机器。
+
+服务跑的不是仓库里的 `target/debug/dispatch`，而是 `install` 复制到 `~/.local/libexec/theflash-dispatch` 的那一份，所以仓库里的程序改了要重新 `install`。两个原因，后一个是真机上踩出来的：`cargo build` 会把正在被服务执行的文件换掉；macOS 上 launchd 服务去加载 `~/Desktop`、`~/Documents`、`~/Downloads` 这些受保护目录里的程序时，进程会卡在动态链接器的 `open()` 里，连 `main` 都进不去——日志一个字都没有，看起来就像程序什么都不做（`sample` 打出来的栈停在 `dyld4::SyscallDelegate::mapFileReadOnly`）。
 
 ## 验证
 

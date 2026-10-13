@@ -549,6 +549,18 @@ fn install_prints_the_service_file_without_touching_this_machine() {
     assert_eq!(code, 0, "{out}");
     assert!(out.contains("cn.theflash.dispatch"), "{out}");
     assert!(out.contains("run"), "{out}");
+    // The service runs a copy outside the repository: `cargo build`
+    // replaces the one in `target/`, and on macOS a launchd agent loading
+    // a binary from under ~/Desktop hangs in the dynamic loader before
+    // main runs, with an empty log.
+    assert!(
+        out.contains(".local/libexec/theflash-dispatch"),
+        "服务要跑仓库外的那份程序：{out}"
+    );
+    assert!(
+        !out.contains("target/debug") && !out.contains("target/release"),
+        "服务不许指向仓库里的 target/：{out}"
+    );
     assert!(out.contains(&config.display().to_string()), "{out}");
     assert!(
         out.contains(

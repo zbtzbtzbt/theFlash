@@ -235,7 +235,13 @@ fn tick(args: &Args) -> Result<i32, String> {
         print_plan(&plan, &config);
         return Ok(if plan.start.is_empty() { 1 } else { 0 });
     }
-    let done = runner::run(&plan, &mut state, &config, args.now);
+    let done = runner::run(
+        &plan,
+        &mut state,
+        &config,
+        args.now,
+        &mut runner::Sessions::new(),
+    );
     report(&done, &plan);
     Ok(if done.started.is_empty() { 1 } else { 0 })
 }
@@ -277,11 +283,14 @@ fn run(args: &Args) -> Result<i32, String> {
             format!("，只认带 `{}` 标签的 issue 和 PR", config.require_label)
         }
     );
+    // The sessions this dispatcher started, kept so their exit codes are
+    // known across ticks.
+    let mut sessions = runner::Sessions::new();
     loop {
         let now = dispatch::now();
         match read_plan(args, &config) {
             Ok((plan, mut state)) => {
-                let done = runner::run(&plan, &mut state, &config, now);
+                let done = runner::run(&plan, &mut state, &config, now, &mut sessions);
                 report(&done, &plan);
             }
             Err(why) => println!("[{}] 这一轮没看成：{why}", dispatch::stamp(dispatch::now())),
@@ -363,9 +372,17 @@ fn install(args: &Args) -> Result<i32, String> {
     let kind = service::kind();
     let program = program_path()?;
     if args.print {
+        // What the service file would say, with the program it would
+        // actually run: a copy outside the repository (why:
+        // service::installed_program).
         print!(
             "{}",
-            service::unit(kind, &program, &args.config, &config.logs)
+            service::unit(
+                kind,
+                &service::installed_program(),
+                &args.config,
+                &config.logs
+            )
         );
         return Ok(0);
     }

@@ -5,10 +5,11 @@
 //! session that ran too long and says so on the issue. The decisions it
 //! carries out are made in [`super::plan`], which touches nothing.
 
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 
 use chrono::{DateTime, Utc};
 
@@ -24,12 +25,66 @@ pub struct Done {
     pub notes: Vec<String>,
 }
 
+/// The sessions this dispatcher started and has not collected yet. It
+/// holds them so their exit code is known: a session that exited 0 is
+/// done, and one that exited with anything else failed and is worth one
+/// more try. Without this, every session that simply finished would look
+/// like a session whose process disappeared, and the work would be
+/// dispatched a second time.
+#[derive(Default)]
+pub struct Sessions {
+    children: BTreeMap<String, Child>,
+}
+
+impl Sessions {
+    pub fn new() -> Sessions {
+        Sessions::default()
+    }
+
+    fn keep(&mut self, id: &str, child: Child) {
+        self.children.insert(id.to_string(), child);
+    }
+
+    /// How the session ended, if this dispatcher started it and it has
+    /// ended. `None` means "still running" or "not ours".
+    fn outcome_of(&mut self, id: &str) -> Option<Outcome> {
+        let child = self.children.get_mut(id)?;
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => Some(Outcome::Done),
+            Ok(Some(_)) => Some(Outcome::Failed),
+            Ok(None) => None,
+            Err(_) => None,
+        }
+    }
+
+    fn forget(&mut self, id: &str) {
+        self.children.remove(id);
+    }
+}
+
 /// Carries out a plan: tidies up the sessions that ended, then starts the
 /// ones the plan asks for. The state is written after every change, so a
 /// dispatcher killed between two sessions still knows what it started.
-pub fn run(plan: &Plan, state: &mut State, config: &Config, now: DateTime<Utc>) -> Done {
+pub fn run(
+    plan: &Plan,
+    state: &mut State,
+    config: &Config,
+    now: DateTime<Utc>,
+    sessions: &mut Sessions,
+) -> Done {
     let mut done = Done::default();
     for sweep in &plan.sweep {
+        // The exit code, when this dispatcher is the one that started it,
+        // says more than "the process is gone".
+        let sweep = &match sessions.outcome_of(&sweep.id) {
+            Some(outcome) => Sweep {
+                outcome,
+                release_claim: sweep.release_claim && outcome != Outcome::Done,
+                ..sweep.clone()
+            },
+            None => sweep.clone(),
+        };
+        sessions.forget(&sweep.id);
         match finish(sweep, state, config, now) {
             Ok(note) => done.ended.push(note),
             Err(why) => done.notes.push(why),
@@ -40,7 +95,8 @@ pub fn run(plan: &Plan, state: &mut State, config: &Config, now: DateTime<Utc>) 
     }
     for task in &plan.start {
         match start(task, config, now) {
-            Ok(session) => {
+            Ok((session, child)) => {
+                sessions.keep(&session.id, child);
                 done.started.push(format!(
                     "{} → {}（{}）",
                     session.id, session.vendor, task.why
@@ -89,7 +145,7 @@ pub fn run(plan: &Plan, state: &mut State, config: &Config, now: DateTime<Utc>) 
 /// Starts one session: its own worktree, its own log file, its own
 /// process group. Nothing is shared with another session, because two
 /// sessions in one checkout commit each other's staged files (AGENTS.md).
-pub fn start(task: &Task, config: &Config, now: DateTime<Utc>) -> Result<Session, String> {
+pub fn start(task: &Task, config: &Config, now: DateTime<Utc>) -> Result<(Session, Child), String> {
     let agent = config
         .agents
         .get(&task.vendor)
@@ -137,7 +193,7 @@ pub fn start(task: &Task, config: &Config, now: DateTime<Utc>) -> Result<Session
             .write_all(prompt.as_bytes())
             .map_err(|e| format!("把任务写给 {program} 失败：{e}"))?;
     }
-    Ok(Session {
+    let session = Session {
         id: task.id.clone(),
         role: task.role.name().to_string(),
         vendor: task.vendor.clone(),
@@ -149,7 +205,8 @@ pub fn start(task: &Task, config: &Config, now: DateTime<Utc>) -> Result<Session
         pid: Some(child.id()),
         log,
         worktree,
-    })
+    };
+    Ok((session, child))
 }
 
 /// The worktree a session works in: one per task id, checked out from

@@ -42,7 +42,14 @@ pub fn unit_path(kind: Kind) -> PathBuf {
 /// The service file that runs `dispatch run` forever: started at login,
 /// restarted if it dies, with its own output in the log directory next to
 /// the session logs.
+///
+/// It carries a PATH of its own: launchd and systemd start a service with
+/// a minimal PATH, which has none of the tools the dispatcher runs (`gh`,
+/// `git`, the agent command lines live in Homebrew and under the home
+/// directory), and a dispatcher that cannot find `gh` says "问 GitHub 要 …
+/// 失败" once a minute forever.
 pub fn unit(kind: Kind, program: &Path, config_path: &Path, logs: &Path) -> String {
+    let path = tools_path();
     let out = logs.join("dispatch.out.log");
     let err = logs.join("dispatch.err.log");
     match kind {
@@ -59,6 +66,10 @@ pub fn unit(kind: Kind, program: &Path, config_path: &Path, logs: &Path) -> Stri
     <string>--config</string>
     <string>{config_path}</string>
   </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>{path}</string>
+  </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <!-- Ten seconds between restarts, so a settings file launchd cannot
@@ -74,6 +85,7 @@ pub fn unit(kind: Kind, program: &Path, config_path: &Path, logs: &Path) -> Stri
             config_path = escape(config_path),
             out = escape(&out),
             err = escape(&err),
+            path = escape(Path::new(&path)),
         ),
         Kind::Systemd => format!(
             "[Unit]\n\
@@ -81,6 +93,7 @@ pub fn unit(kind: Kind, program: &Path, config_path: &Path, logs: &Path) -> Stri
              After=network-online.target\n\n\
              [Service]\n\
              ExecStart={program} run --config {config_path}\n\
+             Environment=PATH={path}\n\
              Restart=always\n\
              RestartSec=10\n\
              StandardOutput=append:{out}\n\
@@ -91,19 +104,71 @@ pub fn unit(kind: Kind, program: &Path, config_path: &Path, logs: &Path) -> Stri
             config_path = config_path.display(),
             out = out.display(),
             err = err.display(),
+            path = path,
         ),
     }
 }
 
-/// Registers the service and starts it.
+/// The PATH the service gets: the one the person installing it has, plus
+/// the usual places, so the tools that are on PATH now are still found
+/// after a reboot.
+fn tools_path() -> String {
+    let mut parts: Vec<String> = std::env::var("PATH")
+        .unwrap_or_default()
+        .split(':')
+        .filter(|p| !p.is_empty())
+        .map(|p| p.to_string())
+        .collect();
+    for fallback in [
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        "/usr/bin",
+        "/bin",
+        "/usr/sbin",
+        "/sbin",
+    ] {
+        if !parts.iter().any(|p| p == fallback) {
+            parts.push(fallback.to_string());
+        }
+    }
+    parts.join(":")
+}
+
+/// Where the service's copy of the program lives. The service never names
+/// the program inside the repository, for two reasons found the hard way:
+/// `cargo build` replaces `target/debug/dispatch` under a running service,
+/// and a launchd agent loading a binary from a macOS-protected folder
+/// (`~/Desktop`, `~/Documents`, `~/Downloads`) hangs in the dynamic loader
+/// before `main` runs — the process sits in `open()` and the log stays
+/// empty, which looks exactly like a program that does nothing.
+pub fn installed_program() -> PathBuf {
+    config::home().join(".local/libexec/theflash-dispatch")
+}
+
+/// Registers the service and starts it. `program` is this binary; a copy
+/// of it is what the service runs.
 pub fn install(
     kind: Kind,
     program: &Path,
     config_path: &Path,
     logs: &Path,
 ) -> Result<String, String> {
+    let installed = installed_program();
+    if let Some(dir) = installed.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("建 {} 失败：{e}", dir.display()))?;
+    }
+    // Remove first: copying onto a file a running service is executing
+    // would break that service's process.
+    let _ = std::fs::remove_file(&installed);
+    std::fs::copy(program, &installed).map_err(|e| {
+        format!(
+            "把 {} 复制到 {} 失败：{e}",
+            program.display(),
+            installed.display()
+        )
+    })?;
     let path = unit_path(kind);
-    write(&path, &unit(kind, program, config_path, logs))?;
+    write(&path, &unit(kind, &installed, config_path, logs))?;
     std::fs::create_dir_all(logs).map_err(|e| format!("建 {} 失败：{e}", logs.display()))?;
     match kind {
         Kind::Launchd => {
@@ -121,7 +186,11 @@ pub fn install(
             systemctl(&["enable", "--now", &format!("{LABEL}.service")])?;
         }
     }
-    Ok(format!("装好了：{}", path.display()))
+    Ok(format!(
+        "装好了：{}（跑的是 {}，仓库里的程序换了要重新 install）",
+        path.display(),
+        installed.display()
+    ))
 }
 
 /// Stops the service and removes it. Sessions it already started keep
@@ -140,6 +209,7 @@ pub fn uninstall(kind: Kind) -> Result<String, String> {
     if path.exists() {
         std::fs::remove_file(&path).map_err(|e| format!("删 {} 失败：{e}", path.display()))?;
     }
+    let _ = std::fs::remove_file(installed_program());
     Ok(format!(
         "卸掉了：{}（已经启动的会话不受影响，它们是独立的进程）",
         path.display()
