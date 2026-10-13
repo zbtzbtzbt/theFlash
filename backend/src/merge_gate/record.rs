@@ -74,6 +74,24 @@ pub fn is_sha(s: &str) -> bool {
     s.len() == 40 && s.chars().all(|c| c.is_ascii_hexdigit())
 }
 
+/// The sha a field starts with, lower case, dropping whatever the reviewer
+/// wrote after it.
+///
+/// Reviewers annotate the sha itself: the second review of pull request
+/// #24 wrote `- 合到的 main：<sha>（尝试合并，发生冲突，未产生合并结果）`,
+/// and reading the note as part of the sha made the gate refuse with that
+/// field missing instead of with the verdict the reviewer wrote. Only the
+/// run of hex digits the value opens with counts, so a note cannot turn a
+/// short prefix into a sha, and a sha buried after prose is still not
+/// read.
+fn sha_at_the_front(value: &str) -> String {
+    value
+        .chars()
+        .take_while(char::is_ascii_hexdigit)
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
 /// Reads a review record out of a comment body, or `None` when the comment
 /// is not one. A comment is a record when a line of it is the marker
 /// heading on its own; an unparsable field is left empty rather than
@@ -98,15 +116,14 @@ pub fn parse(body: &str, url: &str, posted_at: DateTime<Utc>) -> Option<ReviewRe
         posted_at,
         reviewer: field(&["审查者", "审查 agent"]),
         // `被审查的提交` is the name the review task #20 dispatches uses.
-        reviewed_sha: field(&[
+        reviewed_sha: sha_at_the_front(&field(&[
             "被审查的 SHA",
             "被审查的提交",
             "审查的提交",
             "审查 head",
             "head",
-        ])
-        .to_lowercase(),
-        reviewed_main: field(&["合到的 main", "基线 main", "合到的 main sha"]).to_lowercase(),
+        ])),
+        reviewed_main: sha_at_the_front(&field(&["合到的 main", "基线 main", "合到的 main sha"])),
         verdict: verdict_of(&field(&["结论"])),
         verdict_said: field(&["结论"]),
         ran: field(&["跑了什么", "跑了"]),

@@ -120,6 +120,41 @@ fn a_short_sha_is_not_enough_to_merge_on() {
 }
 
 #[test]
+fn a_sha_a_reviewer_annotated_is_still_read() {
+    // The second review of pull request #24 wrote the main it merged onto
+    // with what happened to that merge after it, and the gate read the
+    // whole thing as the sha, so it refused with `合到的 main` missing
+    // instead of the verdict the reviewer actually wrote. The lines below
+    // are that record's own bytes.
+    let body = CANONICAL
+        .replace(
+            "- 被审查的 SHA: 0dbf6fcc0f0b9df91ec77ddf385112b3a50c0a0c",
+            "- 被审查的提交：0dbf6fcc0f0b9df91ec77ddf385112b3a50c0a0c",
+        )
+        .replace(
+            "- 合到的 main: 293d2372fa018243ca53962a7e6fdfa9154469bd",
+            "- 合到的 main：293d2372fa018243ca53962a7e6fdfa9154469bd（尝试合并，\
+             发生冲突，未产生合并结果）",
+        );
+    let r = record(&body).expect("这是一条审查记录");
+    assert_eq!(r.reviewed_main, MAIN);
+    assert_eq!(r.missing_field(), None);
+    // A note cannot turn a prefix into a sha, and a field that names no
+    // sha at all is still missing.
+    for value in [
+        format!("{}（尝试合并）", &MAIN[..7]),
+        "还没合，等 CI".to_string(),
+    ] {
+        let body = CANONICAL.replace(MAIN, &value);
+        assert_eq!(
+            record(&body).unwrap().missing_field(),
+            Some("合到的 main"),
+            "{value}"
+        );
+    }
+}
+
+#[test]
 fn only_an_explicit_pass_counts_as_passing() {
     let verdict = |v: &str| {
         record(&CANONICAL.replace("- 结论: 通过", &format!("- 结论: {v}")))
