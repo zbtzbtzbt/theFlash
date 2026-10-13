@@ -60,9 +60,10 @@ pub enum Refusal {
         url: String,
         missing: String,
     },
-    ChangesRequested {
+    VerdictNotPassed {
         reviewer: String,
         url: String,
+        said: String,
     },
     ReviewerIsImplementer {
         agent: String,
@@ -87,15 +88,10 @@ pub enum Refusal {
     ChecksUnfinished {
         unfinished: Vec<String>,
     },
-    ChecksFailed {
-        failed: Vec<String>,
+    ChecksNotGreen {
+        not_green: Vec<String>,
     },
-    MainMovedOverlap {
-        reviewed_main: String,
-        main: String,
-        files: Vec<String>,
-    },
-    MainMovedUnknown {
+    MainMoved {
         reviewed_main: String,
         main: String,
     },
@@ -127,9 +123,15 @@ impl std::fmt::Display for Refusal {
                 f,
                 "审查记录缺少字段 `{missing}`：{url}（格式见 docs/subsystems/merge-gate.md）"
             ),
-            Refusal::ChangesRequested { reviewer, url } => {
-                write!(f, "最新的审查记录是“要修改”（审查者 {reviewer}）：{url}")
-            }
+            Refusal::VerdictNotPassed {
+                reviewer,
+                url,
+                said,
+            } => write!(
+                f,
+                "最新的审查记录的结论不是“通过”，写的是“{said}”（审查者 {reviewer}）：{url}。\
+                 改好以后请审查者写一条新的记录，结论那一行只写“通过”",
+            ),
             Refusal::ReviewerIsImplementer { agent, url } => write!(
                 f,
                 "审查者和实现者是同一个 agent（{agent}），要另一个 agent 审：{url}"
@@ -163,28 +165,19 @@ impl std::fmt::Display for Refusal {
             Refusal::ChecksUnfinished { unfinished } => {
                 write!(f, "CI 还在跑：{}", unfinished.join("、"))
             }
-            Refusal::ChecksFailed { failed } => {
-                write!(f, "CI 是红的：{}", failed.join("、"))
-            }
-            Refusal::MainMovedOverlap {
-                reviewed_main,
-                main,
-                files,
-            } => write!(
+            Refusal::ChecksNotGreen { not_green } => write!(
                 f,
-                "审查是在 main {} 上做的，main 已经走到 {}，两边都改了 {}，\
-                 要在新 main 上重新审查",
-                short(reviewed_main),
-                short(main),
-                files.join("、")
+                "CI 不是绿的：{}。必需的两个 job 都要是 success，\
+                 skipped / neutral / cancelled 都不算跑过这个平台",
+                not_green.join("、")
             ),
-            Refusal::MainMovedUnknown {
+            Refusal::MainMoved {
                 reviewed_main,
                 main,
             } => write!(
                 f,
-                "审查是在 main {} 上做的，main 已经走到 {}，但没拿到这段时间 main 改了哪些文件，\
-                 没法判断会不会互相影响",
+                "审查是在 main {} 上做的，main 现在是 {}：这个改动没有在最新的 main 上验证过。\
+                 审查者在新 main 上重新跑一遍检查，再写一条新的审查记录（`合到的 main` 写新的那个）",
                 short(reviewed_main),
                 short(main)
             ),
@@ -247,10 +240,11 @@ pub fn decide(s: &Snapshot) -> Decision {
             missing: missing.to_string(),
         });
     }
-    if rec.verdict == Verdict::ChangesRequested {
-        return Decision::Refuse(R::ChangesRequested {
+    if rec.verdict == Verdict::NotPassed {
+        return Decision::Refuse(R::VerdictNotPassed {
             reviewer: rec.reviewer.clone(),
             url: rec.url.clone(),
+            said: rec.verdict_said.clone(),
         });
     }
     if same_agent(&rec.reviewer, &implementer) {
@@ -287,30 +281,17 @@ pub fn decide(s: &Snapshot) -> Decision {
     if let Some(r) = checks_refusal(&s.checks) {
         return Decision::Refuse(r);
     }
+    // #15 asks for the change to be verified on the latest main, and the
+    // review record says which main it was verified on. main having moved
+    // since means it was not. Comparing the files the two sides touched is
+    // not a substitute: a call site, a trait, a fixture or a CI step in
+    // another file breaks just as well, and the only thing that answers it
+    // is running the checks on the merge result (0007).
     if s.main_head.sha != rec.reviewed_main {
-        match &s.main_since_review {
-            None => {
-                return Decision::Refuse(R::MainMovedUnknown {
-                    reviewed_main: rec.reviewed_main.clone(),
-                    main: s.main_head.sha.clone(),
-                });
-            }
-            Some(changed) => {
-                let both: Vec<String> = s
-                    .files
-                    .iter()
-                    .filter(|f| changed.contains(*f))
-                    .cloned()
-                    .collect();
-                if !both.is_empty() {
-                    return Decision::Refuse(R::MainMovedOverlap {
-                        reviewed_main: rec.reviewed_main.clone(),
-                        main: s.main_head.sha.clone(),
-                        files: both,
-                    });
-                }
-            }
-        }
+        return Decision::Refuse(R::MainMoved {
+            reviewed_main: rec.reviewed_main.clone(),
+            main: s.main_head.sha.clone(),
+        });
     }
     match s.pull.mergeable {
         Some(false) => return Decision::Refuse(R::Conflicted),
@@ -357,14 +338,22 @@ fn checks_refusal(checks: &Checks) -> Option<Refusal> {
     if !unfinished.is_empty() {
         return Some(Refusal::ChecksUnfinished { unfinished });
     }
-    let failed: Vec<String> = checks
+    // A required job has to be `success`. GitHub reports a job that never
+    // ran as `completed` with `skipped` or `neutral`, which says the
+    // platform was not covered, not that it passed — and a workflow edit
+    // or a path filter can turn a required job into a skipped one without
+    // anyone noticing. Jobs that are not required may be skipped or
+    // neutral; failing is still failing whoever ran it.
+    let not_green: Vec<String> = checks
         .runs
         .iter()
         .filter(|r| {
-            !matches!(
-                r.conclusion.as_deref(),
-                Some("success" | "neutral" | "skipped")
-            )
+            let required = REQUIRED_CHECKS.contains(&r.name.as_str());
+            match r.conclusion.as_deref() {
+                Some("success") => false,
+                Some("neutral" | "skipped") => required,
+                _ => true,
+            }
         })
         .map(|r| {
             format!(
@@ -374,8 +363,8 @@ fn checks_refusal(checks: &Checks) -> Option<Refusal> {
             )
         })
         .collect();
-    if !failed.is_empty() {
-        return Some(Refusal::ChecksFailed { failed });
+    if !not_green.is_empty() {
+        return Some(Refusal::ChecksNotGreen { not_green });
     }
     None
 }

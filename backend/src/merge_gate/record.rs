@@ -2,11 +2,13 @@
 //!
 //! The format is written by agents and read by the gate, so parsing is
 //! forgiving about the things agents vary (heading level, bullet
-//! character, full-width or half-width colon, upper or lower case sha)
-//! and strict about the four facts a merge hangs on: which commit was
-//! reviewed, which main it was merged onto, who reviewed it, and whether
-//! it passed. The shape is the one tonight's reviewers already write
-//! (issue #20), so their records parse without being rewritten.
+//! character, full-width or half-width colon, spaces and case inside a
+//! field name, upper or lower case sha) and strict about the four facts a
+//! merge hangs on: which commit was reviewed, which main it was merged
+//! onto, who reviewed it, and whether it passed. The shape is the one
+//! tonight's reviewers already write (issue #20), including the
+//! `被审查的提交` the dispatched review task uses, so their records parse
+//! without being rewritten.
 //!
 //! ```text
 //! ## 审查记录
@@ -26,7 +28,7 @@ pub const MARKER: &str = "审查记录";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
     Passed,
-    ChangesRequested,
+    NotPassed,
 }
 
 /// One review record, as posted. Missing fields stay empty so the gate can
@@ -42,6 +44,9 @@ pub struct ReviewRecord {
     pub reviewed_sha: String,
     pub reviewed_main: String,
     pub verdict: Verdict,
+    /// The `结论` field as the reviewer wrote it, so a refusal can show
+    /// what the gate read instead of only saying it was not a pass.
+    pub verdict_said: String,
     pub ran: String,
 }
 
@@ -77,27 +82,75 @@ pub fn parse(body: &str, url: &str, posted_at: DateTime<Utc>) -> Option<ReviewRe
     if !body.lines().any(is_marker_line) {
         return None;
     }
+    // Keys are matched without their spaces and case, so `被审查的 SHA`,
+    // `被审查的SHA` and `被审查的 sha` are one key, and each field lists
+    // the other names agents write it under.
     let field = |keys: &[&str]| -> String {
+        let keys: Vec<String> = keys.iter().map(|k| key_of(k)).collect();
         body.lines()
             .filter_map(split_field)
-            .find(|(k, _)| keys.contains(&k.as_str()))
+            .find(|(k, _)| keys.contains(k))
             .map(|(_, v)| v)
             .unwrap_or_default()
     };
-    let verdict = field(&["结论"]);
     Some(ReviewRecord {
         url: url.to_string(),
         posted_at,
         reviewer: field(&["审查者", "审查 agent"]),
-        reviewed_sha: field(&["被审查的 SHA", "被审查的 sha", "审查 head", "head"]).to_lowercase(),
+        // `被审查的提交` is the name the review task #20 dispatches uses.
+        reviewed_sha: field(&[
+            "被审查的 SHA",
+            "被审查的提交",
+            "审查的提交",
+            "审查 head",
+            "head",
+        ])
+        .to_lowercase(),
         reviewed_main: field(&["合到的 main", "基线 main", "合到的 main sha"]).to_lowercase(),
-        verdict: if verdict.contains("通过") && !verdict.contains("不通过") {
-            Verdict::Passed
-        } else {
-            Verdict::ChangesRequested
-        },
+        verdict: verdict_of(&field(&["结论"])),
+        verdict_said: field(&["结论"]),
         ran: field(&["跑了什么", "跑了"]),
     })
+}
+
+/// Only a verdict that says `通过` and nothing else about it is a pass.
+///
+/// A merge cannot be taken back, so everything the gate is not sure of is
+/// a refusal: `未通过` and `没通过` contain `通过`, `要修改，通过后再合并`
+/// and `有条件通过` promise a pass that has not happened yet, and
+/// `通过，但要修改` is two answers at once. Writing `- 结论: 通过` again
+/// costs the reviewer one comment; merging on a misread verdict costs a
+/// commit on main that nobody passed.
+fn verdict_of(value: &str) -> Verdict {
+    /// Words that make a verdict something other than a plain pass,
+    /// wherever in it they appear.
+    const NOT_A_PASS: [&str; 10] = [
+        "不通过",
+        "未通过",
+        "没通过",
+        "要修改",
+        "待修改",
+        "不合并",
+        "不要合并",
+        "不能合并",
+        "有条件",
+        "暂",
+    ];
+    let value = value.trim();
+    if NOT_A_PASS.iter().any(|w| value.contains(w)) {
+        return Verdict::NotPassed;
+    }
+    // The first clause only: `通过，可以合并` is a pass, `通过后再合并`
+    // and `基本通过` are not.
+    let first = value
+        .split(|c: char| c.is_whitespace() || "，,、；;。.！!？?（(【[“\"：:".contains(c))
+        .find(|s| !s.is_empty())
+        .unwrap_or_default();
+    if first == "通过" {
+        Verdict::Passed
+    } else {
+        Verdict::NotPassed
+    }
 }
 
 /// `审查记录` on a line of its own, with or without `#` heading markers,
@@ -119,11 +172,11 @@ fn is_marker_line(line: &str) -> bool {
 fn split_field(line: &str) -> Option<(String, String)> {
     let line = line.trim().trim_start_matches(['-', '*', '+']).trim();
     let at = line.find([':', '：'])?;
-    let key = line[..at]
-        .trim()
-        .trim_matches(|c: char| c == '*' || c == '_' || c == '`')
-        .trim()
-        .to_string();
+    let key = key_of(
+        line[..at]
+            .trim()
+            .trim_matches(|c: char| c == '*' || c == '_' || c == '`'),
+    );
     let value = line[at + line[at..].chars().next().unwrap().len_utf8()..]
         .trim()
         .trim_matches(|c: char| c == '`' || c.is_whitespace())
@@ -132,6 +185,15 @@ fn split_field(line: &str) -> Option<(String, String)> {
         return None;
     }
     Some((key, value))
+}
+
+/// A field name as the gate compares it: without its spaces, and with
+/// `SHA` and `sha` the same name.
+fn key_of(key: &str) -> String {
+    key.chars()
+        .filter(|c| !c.is_whitespace())
+        .flat_map(char::to_lowercase)
+        .collect()
 }
 
 /// The `Agent: <name>` trailer that says which agent wrote a pull request

@@ -53,15 +53,9 @@ pub struct Snapshot {
     pub pull: Pull,
     /// Oldest first, as GitHub lists them.
     pub commits: Vec<Commit>,
-    /// Paths this pull request changes.
-    pub files: Vec<String>,
     pub checks: Checks,
     pub main_head: Commit,
     pub records: Vec<ReviewRecord>,
-    /// Paths changed on main between the main the review ran on and main
-    /// now. `None` means it was not fetched, which the gate refuses on
-    /// rather than guessing.
-    pub main_since_review: Option<Vec<String>>,
 }
 
 #[derive(Debug)]
@@ -143,11 +137,6 @@ struct ApiCommitPerson {
 }
 
 #[derive(Deserialize)]
-struct ApiFile {
-    filename: String,
-}
-
-#[derive(Deserialize)]
 struct ApiCheckRuns {
     #[serde(default)]
     check_runs: Vec<ApiCheckRun>,
@@ -172,12 +161,6 @@ struct ApiComment {
     submitted_at: Option<String>,
 }
 
-#[derive(Deserialize)]
-struct ApiComparison {
-    #[serde(default)]
-    files: Vec<ApiFile>,
-}
-
 fn parse_time(what: &str, s: &str) -> Result<DateTime<Utc>, Error> {
     DateTime::parse_from_rfc3339(s)
         .map(|t| t.with_timezone(&Utc))
@@ -192,6 +175,35 @@ fn from_json<T: serde::de::DeserializeOwned>(what: &str, text: &str) -> Result<T
         what: what.to_string(),
         why: e.to_string(),
     })
+}
+
+/// Every page of an answer that came back in pages.
+///
+/// `gh api --paginate` prints each page as its own JSON value, one after
+/// another (`gh api --help`), so an answer that did not fit on one page is
+/// several arrays or objects back to back and not one array. Reading it as
+/// a single value fails with "trailing characters", and reading only up to
+/// the first value would silently lose the rest — a review record on the
+/// second page of comments would look like no review record at all.
+pub(super) fn pages<T: serde::de::DeserializeOwned>(
+    what: &str,
+    text: &str,
+) -> Result<Vec<T>, Error> {
+    serde_json::Deserializer::from_str(text)
+        .into_iter::<T>()
+        .collect::<Result<Vec<T>, _>>()
+        .map_err(|e| Error::Json {
+            what: what.to_string(),
+            why: e.to_string(),
+        })
+}
+
+/// The items of a paginated list endpoint, pages flattened in order.
+pub(super) fn list_from_json<T: serde::de::DeserializeOwned>(
+    what: &str,
+    text: &str,
+) -> Result<Vec<T>, Error> {
+    Ok(pages::<Vec<T>>(what, text)?.into_iter().flatten().collect())
 }
 
 fn pull_from_json(text: &str) -> Result<Pull, Error> {
@@ -210,7 +222,7 @@ fn pull_from_json(text: &str) -> Result<Pull, Error> {
 }
 
 fn commits_from_json(what: &str, text: &str) -> Result<Vec<Commit>, Error> {
-    let list: Vec<ApiCommit> = from_json(what, text)?;
+    let list: Vec<ApiCommit> = list_from_json(what, text)?;
     list.into_iter()
         .map(|c| {
             Ok(Commit {
@@ -229,23 +241,19 @@ fn commit_from_json(what: &str, text: &str) -> Result<Commit, Error> {
     })
 }
 
-fn files_from_json(what: &str, text: &str) -> Result<Vec<String>, Error> {
-    let list: Vec<ApiFile> = from_json(what, text)?;
-    Ok(list.into_iter().map(|f| f.filename).collect())
-}
-
 fn checks_from_json(head_sha: &str, text: &str) -> Result<Checks, Error> {
-    let c: ApiCheckRuns = from_json("check-runs", text)?;
-    let sha = c
-        .check_runs
+    let runs: Vec<ApiCheckRun> = pages::<ApiCheckRuns>("check-runs", text)?
+        .into_iter()
+        .flat_map(|page| page.check_runs)
+        .collect();
+    let sha = runs
         .first()
         .map(|r| r.head_sha.clone())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| head_sha.to_string());
     Ok(Checks {
         head_sha: sha,
-        runs: c
-            .check_runs
+        runs: runs
             .into_iter()
             .map(|r| CheckRun {
                 name: r.name,
@@ -258,7 +266,7 @@ fn checks_from_json(head_sha: &str, text: &str) -> Result<Checks, Error> {
 
 /// The review records among a list of comments or reviews.
 fn records_from_json(what: &str, text: &str) -> Result<Vec<ReviewRecord>, Error> {
-    let list: Vec<ApiComment> = from_json(what, text)?;
+    let list: Vec<ApiComment> = list_from_json(what, text)?;
     let mut out = Vec::new();
     for c in list {
         let body = c.body.unwrap_or_default();
@@ -274,20 +282,16 @@ fn records_from_json(what: &str, text: &str) -> Result<Vec<ReviewRecord>, Error>
     Ok(out)
 }
 
-fn comparison_from_json(text: &str) -> Result<Vec<String>, Error> {
-    let c: ApiComparison = from_json("compare", text)?;
-    Ok(c.files.into_iter().map(|f| f.filename).collect())
-}
-
 // ---- replayed responses ----
 
 impl Snapshot {
     /// A snapshot built from saved responses in `dir`:
-    /// `pull.json`, `commits.json`, `files.json`, `check-runs.json`,
-    /// `main.json`, `comments.json`, `reviews.json` and, when the review
-    /// ran on an older main, `compare.json`. The last two are optional;
+    /// `pull.json`, `commits.json`, `check-runs.json`, `main.json`,
+    /// `comments.json` and `reviews.json`. Only the last is optional;
     /// everything else must be there, because a gate that silently treats
     /// a missing file as "nothing to see" would merge on no evidence.
+    /// Each file holds what `gh api` printed, so a file may hold several
+    /// pages back to back the way `--paginate` prints them.
     pub fn replay(dir: &Path) -> Result<Snapshot, Error> {
         let read = |name: &str| -> Result<String, Error> {
             std::fs::read_to_string(dir.join(name)).map_err(|e| Error::Read {
@@ -304,14 +308,10 @@ impl Snapshot {
         }
         Ok(Snapshot {
             commits: commits_from_json("PR 的提交", &read("commits.json")?)?,
-            files: files_from_json("PR 改的文件", &read("files.json")?)?,
             checks: checks_from_json(&pull.head_sha, &read("check-runs.json")?)?,
             main_head: commit_from_json("main", &read("main.json")?)?,
             pull,
             records,
-            main_since_review: optional("compare.json")
-                .map(|t| comparison_from_json(&t))
-                .transpose()?,
         })
     }
 }
@@ -348,22 +348,16 @@ fn gh(args: &[&str]) -> Result<String, Error> {
 
 impl Snapshot {
     /// A snapshot of pull request `number` in `repo` (`owner/name`), read
-    /// through `gh`. `compare.json`'s live equivalent is only fetched when
-    /// a review record says the review ran on an older main, so an
-    /// up-to-date pull request costs one request less.
+    /// through `gh`.
     pub fn fetch(repo: &str, number: u64) -> Result<Snapshot, Error> {
         let pull = pull_from_json(&gh_api(&format!("repos/{repo}/pulls/{number}"))?)?;
         let commits = commits_from_json(
             "PR 的提交",
             &gh_api_list(&format!("repos/{repo}/pulls/{number}/commits"))?,
         )?;
-        let files = files_from_json(
-            "PR 改的文件",
-            &gh_api_list(&format!("repos/{repo}/pulls/{number}/files"))?,
-        )?;
         let checks = checks_from_json(
             &pull.head_sha,
-            &gh_api(&format!(
+            &gh_api_list(&format!(
                 "repos/{repo}/commits/{}/check-runs",
                 pull.head_sha
             ))?,
@@ -380,26 +374,12 @@ impl Snapshot {
             "reviews",
             &gh_api_list(&format!("repos/{repo}/pulls/{number}/reviews"))?,
         )?);
-        let reviewed_main = records
-            .iter()
-            .max_by(|a, b| a.posted_at.cmp(&b.posted_at))
-            .map(|r| r.reviewed_main.clone())
-            .filter(|s| record::is_sha(s));
-        let main_since_review = match reviewed_main {
-            Some(base) if base != main_head.sha => Some(comparison_from_json(&gh_api(&format!(
-                "repos/{repo}/compare/{base}...{}",
-                main_head.sha
-            ))?)?),
-            _ => None,
-        };
         Ok(Snapshot {
             pull,
             commits,
-            files,
             checks,
             main_head,
             records,
-            main_since_review,
         })
     }
 
@@ -410,7 +390,7 @@ impl Snapshot {
         struct Item {
             number: u64,
         }
-        let list: Vec<Item> = from_json(
+        let list: Vec<Item> = list_from_json(
             "open PRs",
             &gh_api_list(&format!("repos/{repo}/pulls?state=open"))?,
         )?;

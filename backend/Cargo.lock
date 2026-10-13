@@ -1084,6 +1084,7 @@ name = "theflash"
 version = "0.1.0-rc.1"
 dependencies = [
  "chrono",
+ "libc",
  "reqwest",
  "serde",
  "serde_json",

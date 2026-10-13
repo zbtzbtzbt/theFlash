@@ -76,6 +76,26 @@ fn a_record_is_read_however_the_agent_wrote_the_markup() {
 }
 
 #[test]
+fn a_field_is_found_under_the_other_names_agents_write_it_under() {
+    // The review task #20 dispatches writes `被审查的提交：<sha>`, and
+    // agents vary the space and the case of `SHA`. All of them name the
+    // commit the review was about.
+    for key in [
+        "- 被审查的 SHA:",
+        "- 被审查的SHA：",
+        "- 被审查的 sha:",
+        "- 被审查的提交：",
+        "- 审查的提交:",
+        "* **被审查的提交**：",
+    ] {
+        let body = CANONICAL.replace("- 被审查的 SHA:", key);
+        let r = record(&body).unwrap_or_else(|| panic!("读不出来：{body}"));
+        assert_eq!(r.reviewed_sha, SHA, "{key}");
+        assert_eq!(r.missing_field(), None, "{key}");
+    }
+}
+
+#[test]
 fn a_record_missing_a_field_says_which_one() {
     let without = |line: &str| {
         let body: String = CANONICAL
@@ -108,10 +128,24 @@ fn only_an_explicit_pass_counts_as_passing() {
     };
     assert_eq!(verdict("通过"), Verdict::Passed);
     assert_eq!(verdict("通过，可以合并"), Verdict::Passed);
-    assert_eq!(verdict("要修改"), Verdict::ChangesRequested);
-    assert_eq!(verdict("不通过"), Verdict::ChangesRequested);
-    assert_eq!(verdict(""), Verdict::ChangesRequested);
-    assert_eq!(verdict("待定"), Verdict::ChangesRequested);
+    assert_eq!(verdict("通过。"), Verdict::Passed);
+    assert_eq!(verdict("要修改"), Verdict::NotPassed);
+    assert_eq!(verdict("不通过"), Verdict::NotPassed);
+    assert_eq!(verdict(""), Verdict::NotPassed);
+    assert_eq!(verdict("待定"), Verdict::NotPassed);
+    // A verdict that says it did not pass contains 通过 too, and one that
+    // passes only after something else is not a pass yet. Anything the
+    // gate is not sure of is a refusal: the reviewer writes `通过` again
+    // and the merge happens, but a merge on a misread verdict cannot be
+    // taken back.
+    assert_eq!(verdict("未通过"), Verdict::NotPassed);
+    assert_eq!(verdict("没通过"), Verdict::NotPassed);
+    assert_eq!(verdict("要修改，通过后再合并"), Verdict::NotPassed);
+    assert_eq!(verdict("通过后再合并"), Verdict::NotPassed);
+    assert_eq!(verdict("有条件通过"), Verdict::NotPassed);
+    assert_eq!(verdict("基本通过，细节见下"), Verdict::NotPassed);
+    assert_eq!(verdict("通过，但要修改文案"), Verdict::NotPassed);
+    assert_eq!(verdict("不通过，要修改"), Verdict::NotPassed);
 }
 
 #[test]
@@ -181,11 +215,34 @@ fn a_run_is_green_only_when_both_platforms_finished_green() {
     cancelled[1] = run("check (macos-latest)", "completed", Some("cancelled"));
     assert!(matches!(
         green(cancelled),
-        Some(Refusal::ChecksFailed { .. })
+        Some(Refusal::ChecksNotGreen { .. })
     ));
-    let mut failed = both;
+    let mut failed = both.clone();
     failed[0] = run("check (ubuntu-latest)", "completed", Some("failure"));
-    assert!(matches!(green(failed), Some(Refusal::ChecksFailed { .. })));
+    assert!(matches!(
+        green(failed),
+        Some(Refusal::ChecksNotGreen { .. })
+    ));
+    // A required job GitHub finished without running is not a pass: the
+    // platform it stands for was never covered.
+    for conclusion in [
+        "skipped",
+        "neutral",
+        "stale",
+        "action_required",
+        "timed_out",
+    ] {
+        let mut not_run = both.clone();
+        not_run[1] = run("check (macos-latest)", "completed", Some(conclusion));
+        assert!(
+            matches!(green(not_run), Some(Refusal::ChecksNotGreen { .. })),
+            "{conclusion} 被当成通过了"
+        );
+    }
+    // A job the project does not require may skip; `check.sh` is not it.
+    let mut extra = both;
+    extra.push(run("codeql", "completed", Some("skipped")));
+    assert_eq!(green(extra), None);
 }
 
 #[test]
@@ -208,9 +265,10 @@ fn a_refusal_says_what_to_do_about_it() {
             url: "u".into(),
             missing: "审查者".into(),
         },
-        Refusal::ChangesRequested {
+        Refusal::VerdictNotPassed {
             reviewer: "Claude".into(),
             url: "u".into(),
+            said: "要修改".into(),
         },
         Refusal::ReviewerIsImplementer {
             agent: "Claude".into(),
@@ -235,15 +293,10 @@ fn a_refusal_says_what_to_do_about_it() {
         Refusal::ChecksUnfinished {
             unfinished: vec!["check (macos-latest)（in_progress）".into()],
         },
-        Refusal::ChecksFailed {
-            failed: vec!["check (ubuntu-latest)（failure）".into()],
+        Refusal::ChecksNotGreen {
+            not_green: vec!["check (ubuntu-latest)（failure）".into()],
         },
-        Refusal::MainMovedOverlap {
-            reviewed_main: MAIN.into(),
-            main: SHA.into(),
-            files: vec!["backend/src/lib.rs".into()],
-        },
-        Refusal::MainMovedUnknown {
+        Refusal::MainMoved {
             reviewed_main: MAIN.into(),
             main: SHA.into(),
         },
@@ -259,4 +312,173 @@ fn a_sha_is_shortened_the_way_git_log_shows_it() {
     assert_eq!(short(SHA), "0dbf6fc");
     assert_eq!(short("abc"), "abc");
     assert_eq!(short(""), "");
+}
+
+// ---- answers that came back in pages ----
+
+#[test]
+fn an_answer_in_several_pages_reads_as_one_list() {
+    // What `gh api --paginate` prints for a list that did not fit on one
+    // page: one JSON array per page, back to back (`gh api --help`).
+    use super::snapshot::list_from_json;
+    let one_page = "[{\"number\": 1}, {\"number\": 2}]";
+    let two_pages = "[{\"number\": 1}]\n[{\"number\": 2}]\n";
+    let and_an_empty_one = "[{\"number\": 1}]\n[{\"number\": 2}]\n[]\n";
+    #[derive(serde::Deserialize, Debug, PartialEq)]
+    struct Item {
+        number: u64,
+    }
+    let numbers = |text: &str| {
+        list_from_json::<Item>("open PRs", text)
+            .map(|v| v.into_iter().map(|i| i.number).collect::<Vec<_>>())
+    };
+    assert_eq!(numbers(one_page).unwrap(), [1, 2]);
+    assert_eq!(numbers(two_pages).unwrap(), [1, 2]);
+    assert_eq!(numbers(and_an_empty_one).unwrap(), [1, 2]);
+    assert_eq!(numbers("[]").unwrap(), Vec::<u64>::new());
+    assert_eq!(numbers("").unwrap(), Vec::<u64>::new());
+    // Something that is not a list of these items is still an error, and
+    // the error says which answer could not be read.
+    let bad = numbers("[{\"number\": 1}]\n{\"message\": \"Not Found\"}")
+        .expect_err("第二页不是这个列表")
+        .to_string();
+    assert!(bad.contains("open PRs"), "{bad}");
+}
+
+// ---- the merge lock ----
+//
+// Several sessions run the gate at once (#20), so the lock is the only
+// thing between them and two merges landing on main without having been
+// reviewed against each other. These tests are about the two ways that
+// mutual exclusion can be lost: taking over a lock whose holder is still
+// running, and a holder releasing a lock that is no longer its own.
+
+mod merge_lock {
+    use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Barrier};
+    use std::time::{Duration, SystemTime};
+
+    use super::super::lock::{self, Lock};
+
+    /// A pid no process has: past the highest pid macOS (99999) and Linux
+    /// (4194304 at most) hand out, so `kill(pid, 0)` says "no such
+    /// process" without this test having to start and end one.
+    const PID_OF_NOBODY: u32 = 0x4000_0000;
+
+    /// A state directory of this test's own, emptied first so a run does
+    /// not inherit the lock of the previous one.
+    fn state(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("merge-gate-lock-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Makes the lock look as old as a lock taken `by` ago, the way the
+    /// clock reads it on a session that has been running that long.
+    fn age_lock(dir: &Path, by: Duration) {
+        let path = dir.join("merge.lock");
+        let times = std::fs::FileTimes::new().set_modified(SystemTime::now() - by);
+        std::fs::File::open(&path)
+            .unwrap()
+            .set_times(times)
+            .unwrap();
+    }
+
+    fn holder_file(dir: &Path) -> String {
+        std::fs::read_to_string(dir.join("merge.lock/holder")).unwrap_or_default()
+    }
+
+    #[test]
+    fn one_session_at_a_time_holds_the_lock() {
+        let dir = state("one-at-a-time");
+        let a = Lock::acquire_in(&dir, "merge --pr 1").expect("第一个会话拿到锁");
+        let busy = Lock::acquire_in(&dir, "merge --pr 2").expect_err("第二个会话不能同时合并");
+        assert!(busy.to_string().contains("merge --pr 1"), "{busy}");
+        drop(a);
+        let c = Lock::acquire_in(&dir, "merge --pr 3").expect("放了锁之后下一个会话拿得到");
+        drop(c);
+    }
+
+    #[test]
+    fn a_session_that_is_still_running_keeps_its_lock_however_old_it_looks() {
+        // A merge that has been running a long time is a session to go
+        // look at, not a lock to take: taking it over puts two merges on
+        // main at the same time, which is the one thing the lock is for.
+        let dir = state("old-but-running");
+        let a = Lock::acquire_in(&dir, "merge --pr 1").unwrap();
+        age_lock(&dir, Duration::from_secs(40 * 60));
+        let busy = Lock::acquire_in(&dir, "merge --pr 2")
+            .expect_err("持有者还活着，不能因为锁看起来旧就接管");
+        assert!(busy.to_string().contains("merge --pr 1"), "{busy}");
+        drop(a);
+    }
+
+    #[test]
+    fn a_lock_left_behind_by_a_session_that_is_gone_is_taken_over() {
+        // Without this, one crashed session stops every merge for the
+        // night.
+        let dir = state("holder-gone");
+        lock::plant(&dir, "merge --pr 1", PID_OF_NOBODY);
+        age_lock(&dir, Duration::from_secs(40 * 60));
+        let b = Lock::acquire_in(&dir, "merge --pr 2").expect("接管已经退出的持有者的锁");
+        assert!(
+            holder_file(&dir).contains("merge --pr 2"),
+            "{}",
+            holder_file(&dir)
+        );
+        drop(b);
+    }
+
+    #[test]
+    fn the_session_whose_lock_was_taken_over_does_not_release_the_new_one() {
+        // A dies, B takes the lock over, A's process ends and runs its
+        // Drop. A must not delete B's lock: the next session would walk
+        // straight into the merge B is in the middle of.
+        let dir = state("released-by-the-wrong-holder");
+        let a = Lock::acquire_in(&dir, "merge --pr 1").unwrap();
+        // The takeover, by hand, because A is not really dead here.
+        std::fs::rename(dir.join("merge.lock"), dir.join("taken-over")).unwrap();
+        std::fs::remove_dir_all(dir.join("taken-over")).unwrap();
+        let b = Lock::acquire_in(&dir, "merge --pr 2").unwrap();
+        drop(a);
+        assert!(
+            dir.join("merge.lock").exists(),
+            "原持有者把接管者的锁删了：{}",
+            dir.display()
+        );
+        assert!(
+            holder_file(&dir).contains("merge --pr 2"),
+            "锁不再属于接管者：{}",
+            holder_file(&dir)
+        );
+        drop(b);
+    }
+
+    #[test]
+    fn only_one_of_several_sessions_takes_over_a_dead_holders_lock() {
+        // Every session that reaches a stale lock at the same moment sees
+        // the same stale lock; only one of them may end up holding it.
+        let dir = state("racing-takeover");
+        lock::plant(&dir, "merge --pr 1", PID_OF_NOBODY);
+        age_lock(&dir, Duration::from_secs(40 * 60));
+        let start = Arc::new(Barrier::new(8));
+        let mut threads = Vec::new();
+        for i in 0..8 {
+            let dir = dir.clone();
+            let start = start.clone();
+            threads.push(std::thread::spawn(move || {
+                start.wait();
+                Lock::acquire_in(&dir, &format!("merge --pr {}", 100 + i)).ok()
+            }));
+        }
+        // Nobody releases until every thread has tried, so a second
+        // winner can only mean two sessions held the lock at once.
+        let held: Vec<Lock> = threads
+            .into_iter()
+            .filter_map(|t| t.join().unwrap())
+            .collect();
+        assert_eq!(held.len(), 1, "{} 个会话同时拿到了合并锁", held.len());
+    }
 }

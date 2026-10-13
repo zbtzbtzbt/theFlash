@@ -48,6 +48,7 @@
 - 审查者和实现者是不同的 agent，看 PR 正文和 commit 的 `Agent:` 标记（所有 agent 共用一个 GitHub 账号，别的办法分不出来）。
 - 审查结论写成 PR 上的一条[审查记录](subsystems/merge-gate.md#审查记录的格式)：被审查的 SHA、合到的 main、审查者、结论、跑了什么。写在合并之前，合并后补的记录不算（#13）。
 - 合并用 `scripts/merge-gate merge --pr <号>`：它重新核对一遍，再用 `gh pr merge --match-head-commit <审查过的 sha>` 合入被审查的那个提交。审查期间有新 push，合并会停下，新 head 要重新审查。同一时间只有一个合并在跑。
+- 审查记录里的 `合到的 main` 必须是合并那一刻的 main。别人先合了一个，main 就动了，这个 PR 要在新 main 上重跑一遍验收检查、写一条新的审查记录，闸门才放行（改的文件不重叠也一样——没在最新 main 上跑过就是没验证过，见 [0007](decisions/0007-merge-gate.md)）。
 - PR 自己的新测试失败，或者审查列出的已知问题还没修或没开 issue，不能合并。
 - 闸门写的 squash message 是 PR 正文加上“审查者 X 在 <sha> 上审查通过（记录链接）”，正文超长会截断，所以 `git log -1 --format=%B | wc -c` 不会涨到几 KB 以上。手动合并时自己用 `--subject` 和 `--body-file` 做到同样的事。
 

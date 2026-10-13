@@ -50,14 +50,18 @@
 - 所有改动从分支提 PR，不直接推 main（发版 tag 除外）。规则写进 AGENTS.md、docs/code-standards.md 和 prompts/work-tick.md。
 - 审查者（和实现者不同的 agent）在 PR 上写一条固定格式的**审查记录**评论：被审查的 SHA、合到的 main、审查者、结论、跑了什么。格式和理由见 [docs/subsystems/merge-gate.md](../subsystems/merge-gate.md)。
 - 合并由 `merge-gate` 完成（Rust，和后端同一个 crate，`backend/src/merge_gate/`、`backend/src/bin/merge-gate.rs`）。判断是 `decide(&Snapshot)` 这一个纯函数，输入是 `gh api` 的响应；`--replay <目录>` 换成保存下来的响应，所以每种拒绝都有测试，测试不访问真实 GitHub。
-- 它拒绝合并的情况：PR 不是打开状态、草稿、带阻断标签、PR 正文没有 `Agent:` 标记、没有审查记录、记录缺字段、结论是要修改、审查者就是实现者、记录的 SHA 和 head 对不上、审查之后又有新推送、CI 没跑完 / 少一个平台 / 是红的、main 在审查之后动了而且动的文件和 PR 重叠、PR 和 main 冲突。
-- 串行靠一把目录锁（`~/.theflash/merge.lock`，`THEFLASH_MERGE_GATE_STATE` 可改）：创建目录这一步在 macOS 和 Linux 上都是原子的，不需要新依赖和常驻进程；超过 30 分钟的锁视为持有者已挂，下一个会话接管并打印原持有者。
+- 它拒绝合并的情况：PR 不是打开状态、草稿、带阻断标签、PR 正文没有 `Agent:` 标记、没有审查记录、记录缺字段、结论不是明确的“通过”、审查者就是实现者、记录的 SHA 和 head 对不上、审查之后又有新推送、CI 没跑完 / 少一个平台 / 必需的 job 不是 `success`、main 在审查之后动了、PR 和 main 冲突。
+- 串行靠一把目录锁（`~/.theflash/merge.lock`，`THEFLASH_MERGE_GATE_STATE` 可改）：创建目录这一步在 macOS 和 Linux 上都是原子的，不需要常驻进程。只有在持有者进程已经不存在时才接管，接管靠在锁目录里 `create_new` 一个文件（只成功一次），释放前核对自己的 token。
 
-三个要解释的取舍：
+五个要解释的取舍：
 
-1. **用 Rust，放进后端 crate。** 它是开发工具，不是产品功能，但放进 `backend/` 就自动被 `scripts/check.sh` 的 fmt、clippy、`cargo test` 覆盖，不用改 CI，也不引入新依赖（serde、serde_json、chrono 已经在）。单独起一个 workspace 成员或者写成 shell 脚本都要先改 `scripts/check.sh`，而今晚有 5 条线在并行，改 CI 的风险不值得。
-2. **不 rebase 被审查的分支。** #15 原话是“rebase 到最新的 main……并使用 `--match-head-commit`”，这两件事互相矛盾：rebase 会改写 head，审查过的 sha 就不存在了，`--match-head-commit` 只能锁一个已经没人审过的提交。所以闸门不动分支：它用 GitHub 的 squash 合并被审查的那个提交，并自己判断“审查之后 main 动了会不会影响这次合并”——审查记录里写了审查是在哪个 main 上做的，闸门拿 `compare/<那个 main>...<现在的 main>` 改的文件和 PR 改的文件求交集，有交集就拒绝、要求在新 main 上重新审查，没交集就放行。这是文件粒度的判断，挡不住“两边改了不同文件但语义冲突”；挡这种要靠 A 的 required status checks + 分支必须最新，或者闸门自己在合并结果上跑一遍 `scripts/check.sh`（下一步，见后果）。
+1. **用 Rust，放进后端 crate。** 它是开发工具，不是产品功能，但放进 `backend/` 就自动被 `scripts/check.sh` 的 fmt、clippy、`cargo test` 覆盖，不用改 CI。serde、serde_json、chrono 已经在；只新增一个直接依赖 `libc`（`kill(pid, 0)`，见第 4 条），它本来就在依赖树里（tokio 在 unix 上依赖它），所以构建图没有变。单独起一个 workspace 成员或者写成 shell 脚本都要先改 `scripts/check.sh`，而今晚有 5 条线在并行，改 CI 的风险不值得。
+2. **不 rebase 被审查的分支，但 main 一动就要求重新审查。** #15 原话是“rebase 到最新的 main……并使用 `--match-head-commit`”，这两件事互相矛盾：rebase 会改写 head，审查过的 sha 就不存在了，`--match-head-commit` 只能锁一个已经没人审过的提交。所以闸门不动分支：它用 GitHub 的 squash 合并被审查的那个提交，而“在最新 main 上验证过”这一条靠审查记录里的 `合到的 main` 来保证——它和现在的 main 不一样，就拒绝，要求审查者在新 main 上重跑检查、写一条新记录。
+
+   第一版这里是文件粒度的判断（`compare/<审查时的 main>...<现在的 main>` 改的文件和 PR 改的文件求交集，没交集就放行）。**这是错的，已经改掉**：文件不重叠不等于验证过，调用点、trait、fixture、CI 步骤都可能在别的文件里，而 #15 要求的是“在最新 main 上验证成功后才能合入”，不能把它推迟到 main 真的红了再说（审查记录 b1b42f0 的第 4 条）。代价是 main 一动，排在后面的 PR 都要重新审查一遍；但审查者本来就要“把 PR 合到当前 main 上，在结果上跑验收检查”（[code-standards 的“合并”](../code-standards.md#合并)），所以重新审查就是把那件事再做一次，闸门只是不再允许跳过它。`compare` 端点和 `pulls/<号>/files` 都不再取。
 3. **闸门不调用模型，也不替代审查。** 它核对的全是机械事实。“diff 读了没有、守护测试弄坏了会不会红”这些只有审查者能做，闸门只负责“没有这条记录就合不进去”。
+4. **锁只在持有者进程不存在时才接管，为此引入 `libc`。** 第一版按锁的 mtime 判断“超过 30 分钟就算持有者已挂”，于是一个还活着但慢（或卡在 `gh` 上）的合并会被接管，两个合并并行；而 mtime 是外部能改的。现在持有者把 pid 写进锁，接管前用 `kill(pid, 0)` 问操作系统。没有依赖的替代方案都更差：读 `/proc` 在 macOS 上没有，调用 `kill` 命令在测试里 `PATH` 是空的，只靠租约区分不了“崩了”和“慢”。`libc` 已在依赖树里，加成直接依赖不增加构建图。租约（30 分钟）留下来只做一件事：pid 还活着而租约过了，就拒绝并提示“那个会话可能卡住了”，由 agent 判断，闸门不自己并行合并。
+5. **结论宽进严出，拿不准就拒。** `结论` 只有第一句就是“通过”才算通过，并且整段里出现“不通过 / 未通过 / 要修改 / 有条件 / 暂”之类的词就一概不算——包括在引用上一条记录。第一版用“包含‘通过’且不包含‘不通过’”来判，于是“未通过”和“要修改，通过后再合并”都被读成通过（审查记录 b1b42f0 的第 2 条）。误拒的代价是审查者重写一行，误放的代价是 main 上多一个没人通过的提交。
 
 ### 等套餐允许时怎么切到 GitHub 自带的保护规则（明早由协调者执行，今晚不执行）
 
@@ -68,12 +72,12 @@
 3. 建一条 ruleset（名字 `main`，目标 `~DEFAULT_BRANCH`）：`pull_request`（`required_approving_review_count: 0`，因为所有 agent 共用一个账号，GitHub 的 approve 分不出是哪个 agent，审查者身份仍然由审查记录认）、`required_status_checks`（`check (ubuntu-latest)`、`check (macos-latest)`，开 `strict_required_status_checks_policy`）、`non_fast_forward`、`deletion`。
 4. **不要**开 `required_linear_history` 之外的合并方式限制之前，先确认 `gh pr merge --squash --match-head-commit` 仍然可用。
 5. 闸门保留。GitHub 侧挡的是“没过 CI、不是最新 main、不走 PR”；闸门挡的是“没有独立审查记录、审查者就是实现者、审查后又推了新东西”，这几条 GitHub 在共用账号下判断不了。
-6. 开了之后，把“审查之后 main 动了”的文件粒度判断换成 GitHub 的“分支必须是最新的”，并在 0007 后面补一条记录说明换掉了。
+6. 开了之后，把“审查之后 main 动了就拒绝”换成 GitHub 的“分支必须是最新的”加 merge queue（队列会把每个 PR 更新到最新 main 再跑一遍 CI，比重新人工审查便宜），并在 0007 后面补一条记录说明换掉了。
 7. owner 拿到 Enterprise Cloud 时（如果有那一天），用组织审计日志复查“每次合并是哪个应用调的”，那才是 #13 真正能被回答的时候。
 
 ## 后果
 
 - 变容易：每次合并在 main 的 commit message 里都带“审查者 X 在 <sha> 上审查通过（记录链接）”，事后可核查；#15 列的每种拒绝都有测试，改闸门不会悄悄放宽条件；并行会话不会同时合并。
-- 变难：合并多了一步，审查记录写错格式会被拒（但拒绝信息会说缺哪个字段）；main 一动，审查就可能要重做一遍（和 merge queue 的代价是同一笔）。
-- 仍然挡不住：有写权限的会话直接 `gh pr merge` 绕过闸门。闸门不会知道。对应的检查留给夜间复盘：比较 main 上每个合并提交的 message 里有没有“合并闸门”那一段，没有的就是绕过来的。等 A 可用，这一条由服务端接管。
-- 什么时候重新考虑：仓库升级或公开（切到 A）；或者出现“文件不重叠但语义冲突”把 main 搞红的真实案例（那就让闸门在合并结果上跑 `scripts/check.sh`，而不只是比文件名）。
+- 变难：合并多了一步，审查记录写错格式会被拒（但拒绝信息会说缺哪个字段）；**main 一动，排在后面的 PR 都要重新审查**（和 merge queue 的代价是同一笔，只是现在由审查者而不是服务端来付）。一晚上并行 5 条线、一个一个合，意味着每个 PR 平均要审一次以上。真的成为瓶颈时，下一步是让闸门自己在“PR 合到最新 main”的结果上跑一遍 `scripts/check.sh`，跑绿了就算在最新 main 上验证过，不必重新人工审查；那是机械判断，闸门可以做，只是慢（几分钟一个）。
+- 仍然挡不住：有写权限的会话直接 `gh pr merge` 绕过闸门。闸门不会知道。对应的检查留给夜间复盘：**逐个提交**看 message 里有没有“合并闸门”那一段（闸门一律 squash，squash 只有一个 parent，所以不能用 `git log --merges` 找），再逐个 PR 核对审查记录的时间早于合并时间（[prompts/nightly-review.md](../../prompts/nightly-review.md)）。等 A 可用，这一条由服务端接管。
+- 什么时候重新考虑：仓库升级或公开（切到 A）；或者重新审查的开销成为瓶颈（那就让闸门在合并结果上跑 `scripts/check.sh`）。

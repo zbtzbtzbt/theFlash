@@ -12,7 +12,6 @@ PR [#19](https://github.com/zbtzbtzbt/theFlash/pull/19)（Codex 实现的 `front
 | --- | --- | --- |
 | `pull.json` | `repos/zbtzbtzbt/theFlash/pulls/19` | 保留 number、state、draft、title、body、labels、head/base 的 ref 和 sha、mergeable |
 | `commits.json` | `pulls/19/commits` | 保留 sha、message、author/committer 的 name 和 date |
-| `files.json` | `pulls/19/files` | 保留 filename 和增删行数 |
 | `check-runs.json` | `commits/0dbf6fc.../check-runs` | 保留 name、status、conclusion、head_sha、时间 |
 | `main.json` | `commits/293d237...` | 保留 sha、message、committer 的 date |
 | `comments.json` | `issues/19/comments` | 保留 id、user.login、created_at、html_url、body |
@@ -30,7 +29,8 @@ main 从审查时的 `293d237` 走到 `57979b4`（PR #19 自己的合并）之�
 | 文件 | 取自 |
 | --- | --- |
 | `main.json` | `commits/57979b4...` |
-| `compare.json` | `compare/293d237...57979b4...`，保留 status、ahead_by、commits 的 sha 和日期、files 的 filename |
+
+每个文件存的是 `gh api` 打印出来的整段输出，所以一个文件里可以有多页（`--paginate` 的每一页是一个独立的 JSON 值）。`answers_that_came_back_in_several_pages_are_all_read` 就是把这里的单页回答拆成两页再跑。
 
 ## 怎么再取一份
 

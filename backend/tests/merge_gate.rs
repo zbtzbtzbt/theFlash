@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use std::process::Output;
 
 use serde_json::{Value, json};
+use theflash::merge_gate::lock;
 
 /// The reviewed commit of pull request #19, and the main the review ran on.
 const HEAD: &str = "0dbf6fcc0f0b9df91ec77ddf385112b3a50c0a0c";
@@ -82,6 +83,33 @@ impl Case {
         self
     }
 
+    /// Rewrites a saved list answer the way `gh api --paginate` prints a
+    /// list that did not fit on one page: one independent JSON array per
+    /// page, back to back, not one array (`gh api --help`).
+    fn in_pages(&self, name: &str) -> &Case {
+        let path = self.dir.join(name);
+        let list: Vec<Value> =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let (first, rest) = list.split_at(1.min(list.len()));
+        std::fs::write(&path, two_pages(json!(first), json!(rest))).unwrap();
+        self
+    }
+
+    /// The same for an answer whose pages are objects with the list
+    /// inside, which is the shape of `commits/<sha>/check-runs`.
+    fn in_pages_under(&self, name: &str, key: &str) -> &Case {
+        let path = self.dir.join(name);
+        let mut value: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let list = value[key].as_array().unwrap().clone();
+        let (first, rest) = list.split_at(1.min(list.len()));
+        value[key] = json!(rest);
+        let mut page = value.clone();
+        page[key] = json!(first);
+        std::fs::write(&path, two_pages(page, value)).unwrap();
+        self
+    }
+
     fn state(&self) -> PathBuf {
         self.dir.join("state")
     }
@@ -104,6 +132,14 @@ impl Case {
             .output()
             .unwrap()
     }
+}
+
+fn two_pages(first: Value, second: Value) -> String {
+    format!(
+        "{}\n{}\n",
+        serde_json::to_string_pretty(&first).unwrap(),
+        serde_json::to_string_pretty(&second).unwrap()
+    )
 }
 
 fn said(out: &Output) -> String {
@@ -188,7 +224,7 @@ fn a_pr_whose_ci_is_red_is_refused() {
         v["check_runs"][1]["conclusion"] = json!("failure");
     });
     let out = case.check();
-    refused(&out, "CI 是红的");
+    refused(&out, "CI 不是绿的");
     assert!(
         said(&out).contains("check (ubuntu-latest)"),
         "{}",
@@ -228,6 +264,39 @@ fn a_pr_with_ci_on_only_one_platform_is_refused() {
 }
 
 #[test]
+fn a_required_check_that_was_skipped_is_refused() {
+    // A required job GitHub reports as `skipped` did not run, so the
+    // platform it stands for was never covered. `completed` with a
+    // conclusion that is not `success` is not a green run.
+    let case = Case::ready("ci-skipped");
+    case.edit("check-runs.json", |v| {
+        v["check_runs"][0]["conclusion"] = json!("skipped");
+    });
+    let out = case.check();
+    refused(&out, "CI 不是绿的");
+    assert!(
+        said(&out).contains("check (macos-latest)"),
+        "没说是哪个 job：{}",
+        said(&out)
+    );
+}
+
+#[test]
+fn a_required_check_with_a_neutral_conclusion_is_refused() {
+    let case = Case::ready("ci-neutral");
+    case.edit("check-runs.json", |v| {
+        v["check_runs"][1]["conclusion"] = json!("neutral");
+    });
+    let out = case.check();
+    refused(&out, "CI 不是绿的");
+    assert!(
+        said(&out).contains("check (ubuntu-latest)"),
+        "没说是哪个 job：{}",
+        said(&out)
+    );
+}
+
+#[test]
 fn a_review_by_the_implementer_is_refused() {
     let case = Case::ready("self-review");
     case.edit_record(|l| {
@@ -255,6 +324,30 @@ fn a_record_that_asks_for_changes_is_refused() {
             .then(|| "- 结论: 要修改".to_string())
     });
     refused(&case.check(), "要修改");
+}
+
+#[test]
+fn a_verdict_that_says_it_did_not_pass_is_refused() {
+    // 未通过 contains 通过, so a verdict read by looking for 通过 inside
+    // the text reads a refusal as a pass.
+    let case = Case::ready("verdict-unpassed");
+    case.edit_record(|l| {
+        l.starts_with("- 结论")
+            .then(|| "- 结论: 未通过".to_string())
+    });
+    let out = case.check();
+    refused(&out, "不是“通过”");
+    assert!(said(&out).contains("未通过"), "{}", said(&out));
+}
+
+#[test]
+fn a_verdict_that_only_promises_to_pass_after_changes_is_refused() {
+    let case = Case::ready("verdict-conditional");
+    case.edit_record(|l| {
+        l.starts_with("- 结论")
+            .then(|| "- 结论: 要修改，通过后再合并".to_string())
+    });
+    refused(&case.check(), "不是“通过”");
 }
 
 #[test]
@@ -306,40 +399,20 @@ fn a_merged_pr_is_not_merged_again() {
 }
 
 #[test]
-fn main_moving_onto_the_same_files_needs_a_new_review() {
+fn main_moving_after_the_review_needs_a_new_review() {
     // main went from the commit the review ran on to the merge of #19's
-    // sibling, which touched the same frontend files this pull request
-    // changes.
-    let case = Case::ready("main-moved-overlap");
-    case.overlay("main-moved", "main.json")
-        .overlay("main-moved", "compare.json");
-    let out = case.check();
-    refused(&out, "重新审查");
-    assert!(
-        said(&out).contains("frontend/public/index.html"),
-        "没说是哪些文件：{}",
-        said(&out)
-    );
-}
-
-#[test]
-fn main_moving_somewhere_else_does_not_stop_the_merge() {
-    // Same moved main, but what changed on it does not touch any file of
-    // this pull request.
-    let case = Case::ready("main-moved-elsewhere");
-    case.overlay("main-moved", "main.json")
-        .overlay("main-moved", "compare.json")
-        .edit("compare.json", |v| {
-            v["files"] = json!([{"filename": "backend/src/watch/clock.rs", "status": "modified"}]);
-        });
-    ready(&case.check());
-}
-
-#[test]
-fn main_moving_with_no_record_of_what_changed_is_refused() {
-    let case = Case::ready("main-moved-unknown");
+    // sibling. #15 asks for the change to be verified on the latest main,
+    // and a review that ran on an older main did not do that — whichever
+    // files the two sides touched. The gate used to compare the file
+    // names and let a non-overlapping move through, which is how a
+    // commit nobody checked against the current main could land (审查记录
+    // b1b42f0 的第 4 条).
+    let case = Case::ready("main-moved");
     case.overlay("main-moved", "main.json");
-    refused(&case.check(), "没拿到这段时间 main 改了哪些文件");
+    let out = case.check();
+    refused(&out, "没有在最新的 main 上验证过");
+    assert!(said(&out).contains("57979b4"), "{}", said(&out));
+    assert!(said(&out).contains("重新跑一遍检查"), "{}", said(&out));
 }
 
 #[test]
@@ -376,7 +449,7 @@ fn the_newest_record_has_the_last_word() {
         let body = later["body"]
             .as_str()
             .unwrap()
-            .replace("- 结论: 通过", "- 结论: 通过（第二次，上一条是要修改）");
+            .replace("- 结论: 通过", "- 结论: 通过（复查）");
         later["body"] = json!(body);
         later["created_at"] = json!("2026-10-13T18:30:00Z");
         later["html_url"] =
@@ -393,17 +466,47 @@ fn the_newest_record_has_the_last_word() {
 }
 
 #[test]
+fn the_record_format_tonights_dispatched_reviewers_write_is_read() {
+    // The review task #20 dispatches writes `被审查的提交：<sha>` with a
+    // full-width colon. It says the same thing as `被审查的 SHA`, and a
+    // gate that refuses it would reject every record written tonight.
+    let case = Case::ready("dispatcher-format");
+    case.edit_record(|l| {
+        l.starts_with("- 被审查的 SHA")
+            .then(|| format!("- 被审查的提交：{HEAD}"))
+    });
+    ready(&case.check());
+}
+
+#[test]
+fn answers_that_came_back_in_several_pages_are_all_read() {
+    // `gh api --paginate` prints one independent JSON value per page, so
+    // a pull request with more comments, commits or check runs than fit
+    // on one page arrives as several arrays back to back. Reading only
+    // the first page would lose the review record; reading the whole
+    // output as one array fails outright.
+    let case = Case::ready("paged");
+    case.in_pages("commits.json")
+        .in_pages("comments.json")
+        .in_pages_under("check-runs.json", "check_runs");
+    ready(&case.check());
+}
+
+#[test]
 fn a_merge_waits_for_the_one_already_running() {
-    // The lock is held, so this session does not merge at the same time.
+    // A queue run in another session holds the lock, so this session does
+    // not merge at the same time. The holder here is a real lock taken
+    // through the same code, which is also what makes it a live holder:
+    // this test process is the one holding it.
     let case = Case::ready("lock-held");
-    std::fs::create_dir_all(case.state()).unwrap();
-    std::fs::create_dir_all(case.state().join("merge.lock")).unwrap();
-    std::fs::write(case.state().join("merge.lock/holder"), "queue pid 1234\n").unwrap();
+    let held = lock::Lock::acquire_in(&case.state(), "queue").expect("先拿到锁");
     let out = case.dry_merge();
     let said = said(&out);
     assert_eq!(out.status.code(), Some(1), "{said}");
     assert!(said.contains("另一个合并正在跑"), "{said}");
-    assert!(said.contains("queue pid 1234"), "{said}");
+    assert!(said.contains("queue"), "没说谁在跑：{said}");
+    assert!(said.contains("进程还活着"), "{said}");
+    drop(held);
 }
 
 #[test]
@@ -429,7 +532,7 @@ fn a_refused_merge_releases_the_lock_too() {
     case.edit("check-runs.json", |v| {
         v["check_runs"][0]["conclusion"] = json!("failure");
     });
-    refused(&case.dry_merge(), "CI 是红的");
+    refused(&case.dry_merge(), "CI 不是绿的");
     assert!(!case.state().join("merge.lock").exists());
 }
 

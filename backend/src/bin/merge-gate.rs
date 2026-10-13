@@ -161,6 +161,9 @@ fn queue(options: &Options) -> ExitCode {
     }
     let mut merged = 0;
     for pr in pulls {
+        // This run is still going, so the next session leaves the lock
+        // alone instead of reading the lease as a session that stopped.
+        lock.renew();
         if merge_locked(options, pr) == ExitCode::SUCCESS {
             merged += 1;
         }
