@@ -369,6 +369,58 @@ fn wait_for_log(path: &Path) -> String {
 }
 
 #[test]
+fn a_session_that_finished_is_closed_on_the_next_tick() {
+    use std::os::unix::process::CommandExt;
+
+    // A child nobody waits for becomes a zombie, and `kill -0` calls a
+    // zombie alive. Without collecting the children, a session that
+    // finished in a minute would hold its slot until it timed out.
+    let home = Home::new("reap");
+    checkout(&home);
+    real_tool(home.path(), "git");
+    stub(home.path(), "agent-claude", "echo '做完了'");
+    let config = home.config(serde_json::json!({
+        "interval_seconds": 1,
+        "max_sessions": 1,
+        "ignore_issues": [20],
+    }));
+
+    let mut resident = dispatch(home.path())
+        .args([
+            "run",
+            "--config",
+            &config.display().to_string(),
+            "--replay",
+            &fixtures("accept"),
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .process_group(0)
+        .spawn()
+        .unwrap();
+
+    let state_file = home.path().join("state/state.json");
+    let mut outcome = serde_json::Value::Null;
+    for _ in 0..200 {
+        if let Ok(text) = std::fs::read_to_string(&state_file)
+            && let Ok(state) = serde_json::from_str::<serde_json::Value>(&text)
+            && !state["sessions"][0]["outcome"].is_null()
+        {
+            outcome = state["sessions"][0]["outcome"].clone();
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let _ = resident.kill();
+    let _ = resident.wait();
+
+    assert_eq!(
+        outcome, "done",
+        "会话的进程结束了，调度程序就该把它收掉，不要占着名额"
+    );
+}
+
+#[test]
 fn a_session_that_ran_too_long_is_stopped_the_claim_released_and_the_issue_told() {
     use std::os::unix::process::CommandExt;
 

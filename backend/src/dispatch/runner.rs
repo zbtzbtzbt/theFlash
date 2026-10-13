@@ -57,6 +57,45 @@ impl Sessions {
         }
     }
 
+    /// Closes every session of this dispatcher's that has exited, and
+    /// collects it. This has to happen on every tick, not only when a
+    /// session looks gone: a child nobody waits for stays a zombie, and
+    /// `kill -0` says a zombie is alive, so a session that finished
+    /// minutes ago would hold its slot until it timed out. Seen on the
+    /// real run: the agent had already written its report and exited,
+    /// the dispatcher kept saying "1 个候选被跳过".
+    fn reap(&mut self, state: &mut State, config: &Config, now: DateTime<Utc>) -> Vec<String> {
+        let ended: Vec<(String, Outcome)> = self
+            .children
+            .iter_mut()
+            .filter_map(|(id, child)| match child.try_wait() {
+                Ok(Some(status)) if status.success() => Some((id.clone(), Outcome::Done)),
+                Ok(Some(_)) => Some((id.clone(), Outcome::Failed)),
+                _ => None,
+            })
+            .collect();
+        let mut notes = Vec::new();
+        for (id, outcome) in ended {
+            self.children.remove(&id);
+            let Some(session) = state.session_mut(&id) else {
+                continue;
+            };
+            if session.finished_at.is_some() {
+                continue;
+            }
+            let minutes = (now - session.started_at).num_minutes().max(0);
+            session.finished_at = Some(now);
+            session.outcome = Some(outcome);
+            notes.push(format!("{id} {}（{minutes} 分钟）", outcome.name()));
+        }
+        if !notes.is_empty()
+            && let Err(e) = state.write(&config.state)
+        {
+            notes.push(format!("状态写不下去：{e}"));
+        }
+        notes
+    }
+
     fn forget(&mut self, id: &str) {
         self.children.remove(id);
     }
@@ -73,6 +112,9 @@ pub fn run(
     sessions: &mut Sessions,
 ) -> Done {
     let mut done = Done::default();
+    // Collect what has already exited before acting on the plan: a
+    // session closed here frees its slot on the next tick.
+    done.ended.extend(sessions.reap(state, config, now));
     for sweep in &plan.sweep {
         // The exit code, when this dispatcher is the one that started it,
         // says more than "the process is gone".
