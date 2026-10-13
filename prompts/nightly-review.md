@@ -12,7 +12,9 @@ from=$(sed -n 's/^<!-- reviewed-through: \([0-9a-f]*\).*/\1/p' LESSONS.md)
 git log --reverse --format='%h %ad %an%n%B%n----' --date=iso "$from"..origin/main
 git log --format='%h %s' --stat "$from"..origin/main
 git tag --contains "$from" --sort=creatordate
-gh run list --branch main --limit 100 --json headSha,status,conclusion,createdAt,displayTitle
+gh run list --branch main --workflow test.yml --limit 100 --json headSha,status,conclusion,createdAt,displayTitle
+# Releases: a refused gate is the release being stopped, not a red main
+gh run list --workflow release.yml --limit 20 --json headBranch,headSha,event,status,conclusion,createdAt
 gh issue list --state all --search "updated:>=<水位线日期>" --json number,title,state,stateReason,comments
 gh pr list --state merged --search "merged:>=<水位线日期>" --json number,title,headRefOid,mergeCommit,comments
 ```

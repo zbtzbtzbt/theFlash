@@ -11,7 +11,7 @@
 ## 步骤
 
 1. **准备**：`git fetch && git worktree add --detach ../theFlash-accept-<编号> origin/main`。读 issue 正文（尤其是“验收”和“约束”两节）、实现者的汇报、相关 commit（`git log --grep "#<编号>"`），以及它们引用的 `docs/decisions/` 和 `docs/subsystems/` 文档。
-2. **自动检查**：在你的 worktree 里跑 `make check`，必须全部通过；确认实现 commit 上的 CI 是绿的（`gh run list --branch main`）。
+2. **自动检查**：在你的 worktree 里跑 `make check`，必须全部通过；确认实现 commit 上的 CI 是绿的（`gh run list --branch main --workflow test.yml`）。
 3. **逐条验收标准，独立验证**：
    - 按 issue 要求的场景，在真实环境里运行。至少一部分样本要自己重新找，不能只用实现者贴的链接。
    - 用浏览器（computer use）打开同一个真实页面，逐项对照程序的输出。没有浏览器能力时，用 Playwright 打开页面截图对照，并在结论里说明。

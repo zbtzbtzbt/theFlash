@@ -6,8 +6,10 @@
 
 ```sh
 git fetch origin
-gh run list --branch main --limit 5 --json headSha,status,conclusion,displayTitle
+gh run list --branch main --workflow test.yml --limit 5 --json headSha,status,conclusion,displayTitle
 ```
+
+只看 Test 工作流。手动运行的 Release 也会出现在 `--branch main` 下，它的 gate 拒绝发布（例如 commit 上的 CI 还没跑完）是设计好的结果，不代表 main 是红的。
 
 最新跑完的 run 是红的，这一轮就修它：
 
