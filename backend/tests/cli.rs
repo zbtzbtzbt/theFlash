@@ -2,127 +2,15 @@
 //! server that replays real damai.cn responses from testdata/damai. No test
 //! reaches the real damai.cn.
 
-use std::io::{BufRead, BufReader, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::process::{Command, Output};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-use std::thread::JoinHandle;
+mod support;
 
-/// A stand-in for detail.damai.cn. Each route is a substring of the request
-/// target and the fixture served for it; anything else gets a 404. The
-/// server stops and its thread is joined when the value is dropped.
-struct MockDamai {
-    addr: SocketAddr,
-    hits: Arc<Mutex<Vec<String>>>,
-    stop: Arc<AtomicBool>,
-    thread: Option<JoinHandle<()>>,
-}
+use std::net::TcpListener;
+use std::process::Output;
 
-impl MockDamai {
-    fn start(routes: &[(&'static str, &'static str)]) -> Self {
-        Self::start_bodies(
-            routes
-                .iter()
-                .map(|(route, name)| (route.to_string(), fixture(name)))
-                .collect(),
-        )
-    }
-
-    fn start_bodies(routes: Vec<(String, String)>) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        let hits = Arc::new(Mutex::new(Vec::new()));
-        let stop = Arc::new(AtomicBool::new(false));
-        let thread = {
-            let hits = hits.clone();
-            let stop = stop.clone();
-            std::thread::spawn(move || {
-                for stream in listener.incoming() {
-                    if stop.load(Ordering::SeqCst) {
-                        break;
-                    }
-                    let Ok(stream) = stream else { continue };
-                    serve(stream, &routes, &hits);
-                }
-            })
-        };
-        MockDamai {
-            addr,
-            hits,
-            stop,
-            thread: Some(thread),
-        }
-    }
-
-    fn base_url(&self) -> String {
-        format!("http://{}", self.addr)
-    }
-
-    fn hits(&self) -> Vec<String> {
-        self.hits.lock().unwrap().clone()
-    }
-}
-
-impl Drop for MockDamai {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::SeqCst);
-        let _ = TcpStream::connect(self.addr);
-        if let Some(t) = self.thread.take() {
-            let _ = t.join();
-        }
-    }
-}
-
-fn serve(mut stream: TcpStream, routes: &[(String, String)], hits: &Mutex<Vec<String>>) {
-    let mut reader = BufReader::new(stream.try_clone().unwrap());
-    let mut request_line = String::new();
-    if reader.read_line(&mut request_line).is_err() {
-        return;
-    }
-    loop {
-        let mut line = String::new();
-        match reader.read_line(&mut line) {
-            Ok(0) => break,
-            Ok(_) if line == "\r\n" => break,
-            Ok(_) => {}
-            Err(_) => return,
-        }
-    }
-    let target = request_line
-        .split_whitespace()
-        .nth(1)
-        .unwrap_or("")
-        .to_string();
-    hits.lock().unwrap().push(target.clone());
-    let (status, body) = match routes.iter().find(|(m, _)| target.contains(m.as_str())) {
-        Some((_, body)) => ("200 OK", body.as_str()),
-        None => ("404 Not Found", "not found"),
-    };
-    let _ = write!(
-        stream,
-        "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-        body.len()
-    );
-}
-
-fn fixture(name: &str) -> String {
-    let path = format!("{}/testdata/damai/{name}", env!("CARGO_MANIFEST_DIR"));
-    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"))
-}
+use support::{MockDamai, fixture};
 
 fn theflash(base_url: &str, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_theflash"))
-        .args(args)
-        .env("THEFLASH_DAMAI_BASE_URL", base_url)
-        .env_remove("HTTP_PROXY")
-        .env_remove("http_proxy")
-        .env_remove("HTTPS_PROXY")
-        .env_remove("https_proxy")
-        .env_remove("ALL_PROXY")
-        .env_remove("all_proxy")
-        .output()
-        .unwrap()
+    support::theflash(base_url).args(args).output().unwrap()
 }
 
 fn stdout(o: &Output) -> String {

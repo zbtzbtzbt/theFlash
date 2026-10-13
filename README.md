@@ -29,6 +29,12 @@ cd backend && cargo build --release
 
 输出演出名称、城市、场馆、售卖状态（未开售时附开售时间），以及每个场次的每个票档的价格和状态。只查询，不登录，不下单。细节见 [docs/subsystems/damai-event.md](docs/subsystems/damai-event.md)。
 
+```sh
+./target/release/theflash watch "https://detail.damai.cn/item.htm?id=1086791513717" --session 10-17 --tier 380
+```
+
+盯住一场演出：未开售时按大麦的时钟倒计时，开售那一刻提醒；之后每 30 秒查一次，盯的票档有票时提醒（终端和系统通知）。Ctrl-C 停止。细节见 [docs/subsystems/damai-watch.md](docs/subsystems/damai-watch.md)。
+
 ## 开发命令
 
 ```sh

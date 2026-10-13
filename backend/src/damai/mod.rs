@@ -8,7 +8,7 @@ mod page;
 mod sku;
 mod text;
 
-pub use client::{Client, DEFAULT_BASE_URL, parse_item_id};
+pub use client::{Client, ClockReading, DEFAULT_BASE_URL, parse_item_id};
 pub use event::{Event, SaleState, Session, Tier, TierStatus};
 
 #[derive(Debug, thiserror::Error)]

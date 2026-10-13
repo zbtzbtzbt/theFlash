@@ -1,4 +1,6 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+use chrono::DateTime;
 
 use super::Error;
 use super::event::{Event, Session, Tier, sale_state, tier_status};
@@ -13,6 +15,14 @@ const USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleW
 /// 1084537866279), and damai.cn's search answered its first request with a
 /// slider challenge, so a query paces itself.
 const TIER_REQUEST_GAP: Duration = Duration::from_millis(300);
+
+#[derive(Debug, Clone, Copy)]
+pub struct ClockReading {
+    pub sent: Instant,
+    pub received: Instant,
+    /// damai.cn's Date header, ms since the epoch, milliseconds dropped.
+    pub date_ms: i64,
+}
 
 /// Reads events from damai.cn without signing in. Requests go one at a time:
 /// a query has no reason to burst at damai.cn.
@@ -43,6 +53,16 @@ impl Client {
     /// anywhere stops the whole query; any other failure on one session's
     /// tiers is reported on that session.
     pub async fn event(&self, item_id: u64) -> Result<Event, Error> {
+        self.event_where(item_id, |_| true).await
+    }
+
+    /// The event with only the sessions `keep` takes, by session name; the
+    /// others' tiers aren't requested. `keep` is asked about every session.
+    pub async fn event_where(
+        &self,
+        item_id: u64,
+        keep: impl Fn(Option<&str>) -> bool,
+    ) -> Result<Event, Error> {
         let page_url = format!("{}/item.htm?id={item_id}", self.base);
         let html = self.get(&page_url, None).await?;
         let page = parse_item_page(&html)
@@ -53,8 +73,13 @@ impl Client {
             .ok_or(Error::NotFound(item_id))?;
         let sale = sale_state(page.buy_button.as_ref());
 
-        let mut sessions = Vec::with_capacity(page.performs.len());
-        for (i, perform) in page.performs.iter().enumerate() {
+        let kept: Vec<_> = page
+            .performs
+            .iter()
+            .filter(|p| keep(p.name.as_deref()))
+            .collect();
+        let mut sessions = Vec::with_capacity(kept.len());
+        for (i, perform) in kept.into_iter().enumerate() {
             if i > 0 {
                 tokio::time::sleep(TIER_REQUEST_GAP).await;
             }
@@ -99,6 +124,48 @@ impl Client {
             sale,
             sell_start_ms: page.sell_start_ms,
             sessions,
+        })
+    }
+
+    /// One reading of damai.cn's clock: a HEAD of the event's page, with the
+    /// response's Date header (whole seconds) and when, on this machine's
+    /// monotonic clock, the request went out and the answer came back.
+    pub async fn clock_reading(&self, item_id: u64) -> Result<ClockReading, Error> {
+        let url = format!("{}/item.htm?id={item_id}", self.base);
+        let network = |e: reqwest::Error| Error::Network {
+            url: url.clone(),
+            reason: chain(&e),
+        };
+        let sent = Instant::now();
+        let resp = self.http.head(&url).send().await.map_err(network)?;
+        let received = Instant::now();
+        if is_risk_control(resp.url().as_str()) {
+            return Err(Error::RiskControl(url));
+        }
+        if !resp.status().is_success() {
+            return Err(Error::Http {
+                url,
+                status: resp.status().as_u16(),
+            });
+        }
+        let date = resp
+            .headers()
+            .get(reqwest::header::DATE)
+            .and_then(|v| v.to_str().ok())
+            .ok_or(Error::Parse {
+                what: "响应头",
+                reason: "没有 Date".into(),
+            })?;
+        let date_ms = DateTime::parse_from_rfc2822(date)
+            .map_err(|e| Error::Parse {
+                what: "响应头 Date",
+                reason: format!("{date}：{e}"),
+            })?
+            .timestamp_millis();
+        Ok(ClockReading {
+            sent,
+            received,
+            date_ms,
         })
     }
 

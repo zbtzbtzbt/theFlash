@@ -2,6 +2,7 @@
 
 pub mod damai;
 pub mod report;
+pub mod watch;
 
 /// 后端版本，取自 Cargo.toml。
 pub fn version() -> &'static str {

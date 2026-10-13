@@ -45,11 +45,7 @@ pub fn render(e: &Event) -> String {
             Ok(Some(tiers)) if tiers.is_empty() => out.push_str("  票档：没有票档\n"),
             Ok(Some(tiers)) => {
                 for t in tiers {
-                    let price = t
-                        .price
-                        .as_ref()
-                        .map(|p| format!("¥{p}"))
-                        .unwrap_or_else(|| UNKNOWN.into());
+                    let price = price_text(t.price.as_deref());
                     let _ = writeln!(
                         out,
                         "  {} · {price} · {}",
@@ -63,7 +59,13 @@ pub fn render(e: &Event) -> String {
     out
 }
 
-fn sale_label(s: &SaleState) -> String {
+pub(crate) fn price_text(price: Option<&str>) -> String {
+    price
+        .map(|p| format!("¥{p}"))
+        .unwrap_or_else(|| UNKNOWN.into())
+}
+
+pub(crate) fn sale_label(s: &SaleState) -> String {
     match s {
         SaleState::OnSale => "在售".into(),
         SaleState::NotYetOnSale => "未开售".into(),
@@ -73,7 +75,7 @@ fn sale_label(s: &SaleState) -> String {
     }
 }
 
-fn tier_label(s: &TierStatus) -> String {
+pub(crate) fn tier_label(s: &TierStatus) -> String {
     match s {
         TierStatus::Available => "可售".into(),
         TierStatus::OutOfStock => "缺货".into(),
