@@ -13,9 +13,11 @@ const assets: Record<string, [string, URL]> = {
   "/app.js": ["text/javascript; charset=utf-8", new URL("../dist/app.js", import.meta.url)],
 };
 
+// Risk control is not this service's state: the Rust access layer records
+// it under the user's state directory, so every theFlash process stops,
+// and only `theflash risk resume --yes` clears it (#4, decision 0005).
 export function localServer(query: Query = loadEvent): Server {
   let busy = false;
-  let riskStopped = false;
   return createServer(async (req, res) => {
     res.setHeader("Cache-Control", "no-store");
     res.setHeader("X-Content-Type-Options", "nosniff");
@@ -40,16 +42,6 @@ export function localServer(query: Query = loadEvent): Server {
         req.headers["content-type"] !== "application/json"
       ) {
         json(403, { error: { code: "forbidden", message: "请在本地查询页面中发起查询。" } });
-        return;
-      }
-      if (riskStopped) {
-        json(403, {
-          error: {
-            code: "risk-control",
-            message:
-              "之前的查询触发了风控，本地服务已停止查询，没有重试。请报告 owner，由 owner 决定下一步。",
-          },
-        });
         return;
       }
       if (busy) {
@@ -80,16 +72,8 @@ export function localServer(query: Query = loadEvent): Server {
           error instanceof EventError
             ? error
             : new EventError("invalid-input", "无法读取查询内容，请输入演出链接或 ID。");
-        if (e.code === "risk-control") riskStopped = true;
-        const status =
-          e.code === "invalid-input"
-            ? 400
-            : e.code === "not-found"
-              ? 404
-              : e.code === "risk-control"
-                ? 403
-                : 502;
-        if (!res.destroyed) json(status, { error: { code: e.code, message: e.message } });
+        if (!res.destroyed)
+          json(statusFor(e.code), { error: { code: e.code, message: e.message } });
       } finally {
         busy = false;
       }
@@ -110,6 +94,26 @@ export function localServer(query: Query = loadEvent): Server {
       });
     }
   });
+}
+
+// The codes the Rust query reports (backend/src/presentation.rs), with
+// `risk-stopped` for a breaker another theFlash process tripped and
+// `risk-state` for a breaker this machine cannot read; with both, no
+// request went out.
+function statusFor(code: string): number {
+  switch (code) {
+    case "invalid-input":
+      return 400;
+    case "not-found":
+      return 404;
+    case "risk-control":
+    case "risk-stopped":
+      return 403;
+    case "risk-state":
+      return 500;
+    default:
+      return 502;
+  }
 }
 
 function readBody(req: IncomingMessage): Promise<string> {

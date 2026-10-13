@@ -389,14 +389,23 @@ async fn sync<E: Env>(env: &mut E) -> Result<ServerClock, WatchError> {
     }
 }
 
-/// A risk-control page or a vanished event ends the watch.
+/// Risk control (this watch's or another process's), not being able to tell
+/// whether it is in effect, or a vanished event ends the watch.
 fn fatal(e: &damai::Error) -> bool {
-    matches!(e, damai::Error::RiskControl(_) | damai::Error::NotFound(_))
+    e.stops_damai_access() || matches!(e, damai::Error::NotFound(_))
 }
 
 fn stop<E: Env>(env: &mut E, e: damai::Error) -> WatchError {
-    if let damai::Error::RiskControl(_) = e {
-        env.alert("触发风控，已停止盯票", &[e.to_string()]);
+    let title = match &e {
+        damai::Error::RiskControl(_) | damai::Error::RiskNotRecorded { .. } => {
+            Some("触发风控，已停止盯票")
+        }
+        damai::Error::RiskStopped(_) => Some("风控熔断生效，已停止盯票"),
+        damai::Error::RiskState { .. } => Some("读不到风控熔断状态，已停止盯票"),
+        _ => None,
+    };
+    if let Some(title) = title {
+        env.alert(title, &[e.to_string()]);
     }
     WatchError::Damai(e)
 }

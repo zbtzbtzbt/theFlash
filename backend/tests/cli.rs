@@ -13,6 +13,13 @@ fn theflash(base_url: &str, args: &[&str]) -> Output {
     support::theflash(base_url).args(args).output().unwrap()
 }
 
+/// For the risk-control cases: tripping the breaker stops every process
+/// sharing a HOME, so each takes one of its own. What the breaker does
+/// across processes is checked in tests/access.rs.
+fn theflash_at(home: &support::Home, base_url: &str, args: &[&str]) -> Output {
+    home.theflash(base_url).args(args).output().unwrap()
+}
+
 fn stdout(o: &Output) -> String {
     String::from_utf8_lossy(&o.stdout).into_owned()
 }
@@ -241,8 +248,9 @@ fn network_failure_is_explained() {
 
 #[test]
 fn risk_control_on_the_page_stops_after_one_request() {
+    let home = support::Home::new("risk-on-page");
     let damai = MockDamai::start(&[("/item.htm?id=1086791513717", "risk_control.html")]);
-    let out = theflash(&damai.base_url(), &["event", "1086791513717"]);
+    let out = theflash_at(&home, &damai.base_url(), &["event", "1086791513717"]);
     assert!(!out.status.success());
     assert!(stderr(&out).contains("风控"), "stderr: {}", stderr(&out));
     assert_eq!(damai.hits().len(), 1, "requests: {:?}", damai.hits());
@@ -250,11 +258,12 @@ fn risk_control_on_the_page_stops_after_one_request() {
 
 #[test]
 fn risk_control_on_a_tier_request_stops_the_rest() {
+    let home = support::Home::new("risk-on-tier");
     let damai = MockDamai::start(&[
         ("/item.htm?id=1086791513717", "item_on_sale.html"),
         ("dataId=", "risk_control.html"),
     ]);
-    let out = theflash(&damai.base_url(), &["event", "1086791513717"]);
+    let out = theflash_at(&home, &damai.base_url(), &["event", "1086791513717"]);
     assert!(!out.status.success());
     assert!(stderr(&out).contains("风控"), "stderr: {}", stderr(&out));
     assert_eq!(damai.hits().len(), 2, "requests: {:?}", damai.hits());

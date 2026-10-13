@@ -52,7 +52,13 @@ pub fn error(e: &Error) -> Value {
     let code = match e {
         Error::InvalidInput(_) => "invalid-input",
         Error::NotFound(_) => "not-found",
-        Error::RiskControl(_) => "risk-control",
+        // This query ran into risk control. Nothing retries it.
+        Error::RiskControl(_) | Error::RiskNotRecorded { .. } => "risk-control",
+        // Some theFlash process ran into risk control earlier and the
+        // breaker is still in effect, so this request never went out.
+        Error::RiskStopped(_) => "risk-stopped",
+        // The breaker itself could not be read, which also stops queries.
+        Error::RiskState { .. } => "risk-state",
         Error::Network { .. } | Error::Http { .. } => "network",
         // This machine can't send a request at all; none was sent.
         Error::NoCaCertificates | Error::ClientSetup(_) => "setup",

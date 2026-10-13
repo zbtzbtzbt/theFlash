@@ -9,14 +9,17 @@ use std::process::Command;
 const PROBE: &str = "forgot_the_mock_server_probe";
 
 /// What a test that forgot THEFLASH_DAMAI_BASE_URL does: starts the binary
-/// through `support::theflash`, as every test does (tests/repo_guard.rs
+/// through a `support` helper, as every test does (tests/repo_guard.rs
 /// checks that), with no base URL. Ignored so a plain `cargo test` does not
 /// run it; the test below runs it in a process of its own, because the
 /// tripwire ends the process it fires in.
 #[test]
 #[ignore = "run by a_test_that_forgot_the_mock_server_fails_and_says_so"]
 fn forgot_the_mock_server_probe() {
-    let mut cmd = support::theflash("");
+    let home = support::Home::new("forgot-the-mock-server");
+    let mut cmd = home.theflash("");
+    // What a forgetful test leaves out, while keeping the test's own HOME:
+    // a probe must not write the real user's state directory either.
     // Removed rather than left unset, so a value in the environment of
     // whoever runs the tests cannot stand in for the mock server.
     cmd.env_remove("THEFLASH_DAMAI_BASE_URL");

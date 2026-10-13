@@ -26,6 +26,8 @@ const USAGE: &str = "用法：
       --dir <目录>                    写到哪里，默认 backend/testdata/damai
       --sessions <场次数>             录几个场次的票档，默认 2
       --gap <秒>                      相邻请求至少隔几秒，默认 2
+  theflash risk                       显示大麦风控熔断状态（熔断生效时退出码 1）
+  theflash risk resume --yes          解除熔断，先确认 owner 已经看过这次风控
   theflash version                    显示版本";
 
 #[tokio::main]
@@ -37,6 +39,7 @@ async fn main() -> ExitCode {
         ["event-json", input] => event(input, true).await,
         ["watch", rest @ ..] => watch_command(rest).await,
         ["inspect", rest @ ..] => inspect_command(rest).await,
+        ["risk", rest @ ..] => risk_command(rest),
         ["version" | "--version"] => {
             println!("theflash {}", theflash::version());
             ExitCode::SUCCESS
@@ -361,6 +364,75 @@ async fn inspect_record(args: &[&str]) -> ExitCode {
             eprintln!("{e}");
             ExitCode::FAILURE
         }
+    }
+}
+
+/// The risk-control breaker every theFlash process shares. It never clears
+/// itself: the owner decides what to do after risk control, so clearing it
+/// is a command the user runs on purpose.
+fn risk_command(args: &[&str]) -> ExitCode {
+    let gate = match damai::Gate::for_user() {
+        Ok(g) => g,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let show = |stop: &damai::RiskStop| {
+        println!("大麦风控熔断生效中：");
+        println!("  {stop}");
+        println!("所有 theFlash 进程都不会向大麦发请求。");
+    };
+    match args {
+        [] => match gate.stop() {
+            Ok(None) => {
+                println!("没有大麦风控熔断，查询正常。");
+                ExitCode::SUCCESS
+            }
+            Ok(Some(stop)) => {
+                show(&stop);
+                println!("确认 owner 已经看过这次风控后，运行 `theflash risk resume --yes` 解除。");
+                ExitCode::FAILURE
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                ExitCode::FAILURE
+            }
+        },
+        ["resume"] => match gate.stop() {
+            Ok(None) => {
+                println!("没有大麦风控熔断，不用解除。");
+                ExitCode::SUCCESS
+            }
+            Ok(Some(stop)) => {
+                show(&stop);
+                eprintln!(
+                    "没有解除：请先确认 owner 已经看过这次风控并同意继续，再运行 `theflash risk resume --yes`。"
+                );
+                ExitCode::from(2)
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                ExitCode::FAILURE
+            }
+        },
+        ["resume", "--yes"] => match gate.resume() {
+            Ok(None) => {
+                println!("没有大麦风控熔断，不用解除。");
+                ExitCode::SUCCESS
+            }
+            Ok(Some(stop)) => {
+                println!("已解除这次熔断：");
+                println!("  {stop}");
+                println!("只有在 owner 看过这次风控并同意继续时才应该这么做。");
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                ExitCode::FAILURE
+            }
+        },
+        _ => usage(),
     }
 }
 

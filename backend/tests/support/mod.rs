@@ -5,6 +5,7 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -91,6 +92,15 @@ impl MockDamai {
     pub fn gaps(&self) -> Vec<std::time::Duration> {
         let hits = self.hits.lock().unwrap();
         hits.windows(2).map(|w| w[1].1 - w[0].1).collect()
+    }
+
+    /// ms between the arrivals of each two requests in a row, for checking
+    /// that the caller paced itself.
+    pub fn arrival_gaps_ms(&self) -> Vec<i64> {
+        self.timed_hits()
+            .windows(2)
+            .map(|w| w[1].1.saturating_duration_since(w[0].1).as_millis() as i64)
+            .collect()
     }
 }
 
@@ -203,13 +213,80 @@ pub fn output_within(mut cmd: Command, secs: u64) -> std::process::Output {
     }
 }
 
-/// The theflash binary with its damai.cn requests sent to `base_url`, and
-/// every request that is not for this machine caught by `offline`.
+/// The theflash binary with its damai.cn requests sent to `base_url`,
+/// every request that is not for this machine caught by `offline`, and a
+/// HOME of this test binary's own, so nothing reads or writes the real
+/// user's state directory.
 pub fn theflash(base_url: &str) -> Command {
+    at_home(base_url, shared_home())
+}
+
+fn at_home(base_url: &str, home: &Path) -> Command {
     let mut c = Command::new(env!("CARGO_BIN_EXE_theflash"));
     c.env("THEFLASH_DAMAI_BASE_URL", base_url);
+    // theflash keeps the risk-control breaker under HOME (on Linux under
+    // XDG_STATE_HOME when it is set), so both are pointed at the test's
+    // own directory. See src/damai/access.rs.
+    c.env("HOME", home);
+    c.env_remove("XDG_STATE_HOME");
     offline(&mut c);
     c
+}
+
+/// One directory for every test in this binary that does not touch the
+/// risk-control breaker. Emptied when the binary first uses it.
+fn shared_home() -> &'static Path {
+    static DIR: OnceLock<PathBuf> = OnceLock::new();
+    DIR.get_or_init(|| {
+        let dir = std::env::temp_dir().join(format!("theflash-test-home-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    })
+}
+
+/// A HOME of one test's own, removed when the test ends. A test that trips
+/// the risk-control breaker needs one: the breaker stops every process
+/// that shares a HOME, which would stop other tests' queries too.
+pub struct Home(PathBuf);
+
+impl Home {
+    pub fn new(name: &str) -> Home {
+        let dir =
+            std::env::temp_dir().join(format!("theflash-test-home-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        Home(dir)
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.0
+    }
+
+    /// `support::theflash`, with this directory as HOME.
+    pub fn theflash(&self, base_url: &str) -> Command {
+        at_home(base_url, &self.0)
+    }
+
+    /// Where theFlash keeps its state on this platform, spelled out here so
+    /// a test fails if the directory moves. macOS and Linux differ.
+    pub fn state_dir(&self) -> PathBuf {
+        if cfg!(target_os = "macos") {
+            self.0.join("Library/Application Support/theFlash")
+        } else {
+            self.0.join(".local/state/theflash")
+        }
+    }
+
+    pub fn risk_stop_file(&self) -> PathBuf {
+        self.state_dir().join("risk-stop.json")
+    }
+}
+
+impl Drop for Home {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }
 
 /// Makes `cmd` unable to reach the real damai.cn: its proxies become a

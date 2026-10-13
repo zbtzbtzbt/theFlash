@@ -217,17 +217,20 @@ it.each([
   expect(root.querySelector(".error")?.hasAttribute("hidden")).toBe(false);
   expect(root.querySelector("button")?.disabled).toBe(false);
 });
-it("stops after risk control without another request", async () => {
-  const fetcher = vi.fn(async () =>
-    Response.json(
-      { error: { code: "risk-control", message: "大麦触发了风控，已停止查询，没有重试" } },
-      { status: 403 },
-    ),
-  );
+// Both codes mean no request went out and nothing retries: risk-control is
+// this query running into it, risk-stopped is the machine-wide breaker any
+// theFlash process may have tripped (#4).
+it.each([
+  ["risk-control", "大麦触发了风控，已停止查询，没有重试"],
+  ["risk-stopped", "大麦风控熔断生效中，这次请求没有发出"],
+])("stops after %s without another request and says how to resume", async (code, message) => {
+  const fetcher = vi.fn(async () => Response.json({ error: { code, message } }, { status: 403 }));
   const { root, submit } = page(fetcher);
   submit();
   await vi.waitFor(() => expect(root.querySelector("button")?.disabled).toBe(true));
-  await vi.waitFor(() => expect(root.textContent).toContain("由 owner 决定下一步"));
+  await vi.waitFor(() => expect(root.textContent).toContain(message));
+  expect(root.textContent).toContain("由 owner 决定下一步");
+  expect(root.textContent).toContain("theflash risk resume --yes");
   submit();
   expect(fetcher).toHaveBeenCalledTimes(1);
 });
