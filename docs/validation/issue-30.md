@@ -34,6 +34,10 @@ PATH="$HOME/.cargo/bin:$PATH" CARGO_HOME="$HOME/.cargo" RUSTUP_HOME="$HOME/.rust
 
 初次检查（`c1bbdcd` 基线）通过：`cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test`（47 单元、18 CLI、7 hosts、2 offline、16 repo guard、5 watch；另一个 ignored 探针由 offline 驱动测试单独运行）、`cargo build`、Biome、`tsc --noEmit`、前端构建、Vitest 4 文件 31 项。新测试已暂存后运行，仓库扫描包括这些文件。push 前 rebase 到包含 #5 的 `ab462a6` 后再次完整检查：Rust 115 项（46 单元、18 CLI、7 hosts、2 offline、20 release、16 repo guard、1 version、5 watch）和 Vitest 31 项均通过，其余构建/格式/lint/类型检查也通过。
 
+## CI 同版本的测试隔离修复
+
+首轮 PR CI `38456076570` 在两个平台的第二个取消用例失败，发生在取消动作之前。CI 为 Node 26.11.1，而此前本机为 26.8.1。将 CI 使用的官方 Node 构建下载到本 worktree，仅用其运行现有 `query.test.ts`，确定重现：直接 abort PASS，浏览器断开 FAIL `fixture must suspend the first tier response before cancellation`。原因是前一个用例在清理时整体替换 `process.env`，后续子进程没有使用新 fixture 环境。改为在原有 env 对象上逐项删除新增键并恢复原值后，同一 Node 26.11.1 的两个真实取消用例 PASS；不改变产品代码、Node 版本配置或 CI 策略。
+
 ## 浏览器走查与当前文案
 
 使用 `agent-browser` 的独立 `issue30-lane5` 会话，打开 `127.0.0.1` 上的正式本地服务，上游为已保存原始响应的本机回放。没有打开真实大麦。

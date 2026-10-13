@@ -97,7 +97,11 @@ it.each(["loadEvent abort", "browser disconnect"])(
       release();
       await pending;
       for (const server of servers.reverse()) await close(server);
-      process.env = savedEnv;
+      // Preserve the native process.env object used by child_process.
+      for (const key of Object.keys(process.env)) {
+        if (!(key in savedEnv)) delete process.env[key];
+      }
+      Object.assign(process.env, savedEnv);
       rmSync(home, { recursive: true, force: true });
     }
   },
