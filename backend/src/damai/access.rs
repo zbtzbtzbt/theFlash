@@ -63,6 +63,17 @@ impl std::fmt::Display for RiskStop {
     }
 }
 
+/// What `Gate::resume` cleared.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Resumed {
+    /// There was no breaker.
+    Nothing,
+    Cleared(Box<RiskStop>),
+    /// The breaker was there but unreadable, so what it said is lost. Its
+    /// path, for telling the user which file went away.
+    ClearedUnreadable(String),
+}
+
 /// What the gate needs from time. Tests inject a virtual clock so pacing is
 /// checked without waiting on the wall clock.
 pub trait Clock: Send + Sync {
@@ -207,15 +218,20 @@ impl Gate {
             .map_err(|e| state_error(&path, "熔断状态文件的内容不是它该有的样子", &e))
     }
 
-    /// Clears the breaker, returning what it said. Reading and removing
-    /// are under the lock, so the caller is told exactly what it cleared.
-    pub fn resume(&self) -> Result<Option<RiskStop>, Error> {
+    /// Clears the breaker, saying what it cleared. Reading and removing are
+    /// under the lock, so the answer is exactly what went away. An
+    /// unreadable breaker is cleared too — it is what stops queries — and
+    /// reported as unreadable rather than as nothing.
+    pub fn resume(&self) -> Result<Resumed, Error> {
         let lock = lock_file(&self.dir)?;
         lock.lock().map_err(|e| lock_error(&self.dir, &e))?;
         let path = self.stop_path();
         let was = match fs::read_to_string(&path) {
-            Ok(t) => serde_json::from_str(&t).ok(),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Ok(text) => match serde_json::from_str(&text) {
+                Ok(stop) => Resumed::Cleared(Box::new(stop)),
+                Err(_) => Resumed::ClearedUnreadable(path.display().to_string()),
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Resumed::Nothing),
             Err(e) => return Err(state_error(&path, "读不了熔断状态文件", &e)),
         };
         fs::remove_file(&path).map_err(|e| state_error(&path, "删不掉熔断状态文件", &e))?;
@@ -534,11 +550,14 @@ mod tests {
             "{stopped}"
         );
 
-        let cleared = two.resume().unwrap().expect("解除时没报告清掉了什么");
-        assert_eq!(cleared, *stop.as_ref());
+        assert_eq!(two.resume().unwrap(), Resumed::Cleared(stop.clone()));
         clock.set(20_000);
         assert!(two.enter().await.is_ok(), "解除后仍然不放行");
-        assert!(two.resume().unwrap().is_none(), "解除后还有熔断状态");
+        assert_eq!(
+            two.resume().unwrap(),
+            Resumed::Nothing,
+            "解除后还有熔断状态"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -556,6 +575,14 @@ mod tests {
                 .expect_err(&format!("内容 {broken:?} 被当成没有熔断"));
             assert!(matches!(e, Error::RiskState { .. }), "{e}");
             assert!(e.to_string().contains(STOP_FILE), "{e}");
+            // Clearing it says the breaker was unreadable rather than
+            // claiming there was none, and queries work again.
+            assert!(matches!(
+                gate.resume().unwrap(),
+                Resumed::ClearedUnreadable(_)
+            ));
+            clock.set(clock.now_ms() + 10_000);
+            assert!(gate.enter().await.is_ok(), "删掉坏文件后仍然不放行");
         }
         let _ = fs::remove_dir_all(&dir);
     }

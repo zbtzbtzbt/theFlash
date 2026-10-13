@@ -166,8 +166,10 @@ fn the_breaker_says_what_happened_and_only_resume_yes_clears_it() {
 
 #[test]
 fn a_breaker_file_that_cannot_be_read_stops_queries_and_says_why() {
-    let damai = on_sale();
     for broken in ["", "{", "{\"at\": \"2026-10-14\"}", "not json at all"] {
+        // A damai of its own each round: the query after `resume --yes`
+        // leaves requests behind, and the next round counts from zero.
+        let damai = on_sale();
         let home = Home::new("corrupt");
         std::fs::create_dir_all(home.state_dir()).unwrap();
         std::fs::write(home.risk_stop_file(), broken).unwrap();
@@ -188,6 +190,18 @@ fn a_breaker_file_that_cannot_be_read_stops_queries_and_says_why() {
             "状态文件读不懂还在请求大麦：{:?}",
             damai.hits()
         );
+
+        // Clearing it says the breaker was unreadable instead of "there
+        // was none", because queries were stopped by it.
+        let cleared = run(&home, &damai.base_url(), &["risk", "resume", "--yes"]);
+        assert!(cleared.status.success(), "{}", out(&cleared));
+        assert!(
+            out(&cleared).contains("已删掉读不懂的熔断状态文件"),
+            "{}",
+            out(&cleared)
+        );
+        let ok = run(&home, &damai.base_url(), &["event", "1086791513717"]);
+        assert!(ok.status.success(), "{}", out(&ok));
     }
 }
 

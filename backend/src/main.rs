@@ -417,14 +417,21 @@ fn risk_command(args: &[&str]) -> ExitCode {
             }
         },
         ["resume", "--yes"] => match gate.resume() {
-            Ok(None) => {
+            Ok(damai::Resumed::Nothing) => {
                 println!("没有大麦风控熔断，不用解除。");
                 ExitCode::SUCCESS
             }
-            Ok(Some(stop)) => {
+            Ok(damai::Resumed::Cleared(stop)) => {
                 println!("已解除这次熔断：");
                 println!("  {stop}");
                 println!("只有在 owner 看过这次风控并同意继续时才应该这么做。");
+                ExitCode::SUCCESS
+            }
+            Ok(damai::Resumed::ClearedUnreadable(path)) => {
+                println!("已删掉读不懂的熔断状态文件（{path}），查询恢复。");
+                println!(
+                    "文件里原来记的是哪一次风控已经没了；如果不确定是不是真的发生过风控，先问 owner。"
+                );
                 ExitCode::SUCCESS
             }
             Err(e) => {
