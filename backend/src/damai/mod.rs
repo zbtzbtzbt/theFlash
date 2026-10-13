@@ -23,6 +23,16 @@ pub enum Error {
     RiskControl(String),
     #[error("网络请求失败（{url}）：{reason}")]
     Network { url: String, reason: String },
+    /// This machine has no CA certificate to check damai.cn's with: a Linux
+    /// without the ca-certificates package. Nothing was sent.
+    #[error(
+        "本机没有 CA 证书，HTTPS 没法验证大麦的证书，所以没有发出任何请求。先装 ca-certificates 这个包再运行：Debian/Ubuntu 上是 sudo apt-get update && sudo apt-get install -y ca-certificates（在容器里用 root 运行时去掉 sudo）。设置了 SSL_CERT_FILE 或 SSL_CERT_DIR 时，程序只从它们指向的位置读证书"
+    )]
+    NoCaCertificates,
+    /// The HTTP client could not be built for another reason. Nothing was
+    /// sent either.
+    #[error("没法创建发请求用的 HTTP 客户端，所以没有发出任何请求：{0}")]
+    ClientSetup(String),
     #[error("大麦返回了 HTTP {status}（{url}）")]
     Http { url: String, status: u16 },
     #[error("看不懂大麦返回的{what}：{reason}")]
