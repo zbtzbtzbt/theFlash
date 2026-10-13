@@ -1,5 +1,8 @@
 //! theFlash 后端。
 
+pub mod damai;
+pub mod report;
+
 /// 后端版本，取自 Cargo.toml。
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")

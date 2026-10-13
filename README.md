@@ -19,6 +19,15 @@ theFlash 从架构设计到编码、测试、审查、发布，全部由 AI agen
 
 这套做法参考了 [yetone/magpie](https://github.com/yetone/magpie)，分析见 [docs/magpie-study.md](docs/magpie-study.md)。agent 的工作规则见 [AGENTS.md](AGENTS.md)。
 
+## 用法
+
+```sh
+cd backend && cargo build --release
+./target/release/theflash event "https://detail.damai.cn/item.htm?id=1086791513717"
+```
+
+输出演出名称、城市、场馆、售卖状态（未开售时附开售时间），以及每个场次的每个票档的价格和状态。只查询，不登录，不下单。细节见 [docs/subsystems/damai-event.md](docs/subsystems/damai-event.md)。
+
 ## 开发命令
 
 ```sh

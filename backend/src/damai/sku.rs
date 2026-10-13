@@ -1,0 +1,135 @@
+//! The per-session tier endpoint the detail page calls through JSONP:
+//! https://detail.damai.cn/subpage?...&scenario=itemsku&dataType=2&dataId=<performId>.
+
+use serde_json::Value;
+
+use super::page::BuyButton;
+use super::text::{integer, string};
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SkuRaw {
+    pub name: Option<String>,
+    pub price: Option<String>,
+    /// "1", "2", "4" seen so far; see docs/subsystems/damai-event.md.
+    pub front_end_status: Option<String>,
+    pub salable: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PerformSkus {
+    pub perform_id: Option<u64>,
+    /// The buy button for this session, which can differ from the page's.
+    pub buy_button: Option<BuyButton>,
+    pub skus: Vec<SkuRaw>,
+}
+
+pub(crate) fn tier_url(base: &str, item_id: u64, perform_id: u64) -> String {
+    format!(
+        "{base}/subpage?itemId={item_id}&apiVersion=2.0&dmChannel=pc@damai_pc&bizCode=ali.china.damai&scenario=itemsku&dataType=2&dataId={perform_id}&privilegeActId=&callback=__jp0"
+    )
+}
+
+pub(crate) fn parse_sku_jsonp(body: &str) -> Result<PerformSkus, String> {
+    let (Some(open), Some(close)) = (body.find('('), body.rfind(')')) else {
+        return Err(format!("不是 JSONP：{}", head(body)));
+    };
+    if close <= open {
+        return Err(format!("不是 JSONP：{}", head(body)));
+    }
+    let data: Value =
+        serde_json::from_str(&body[open + 1..close]).map_err(|e| format!("JSON 无效：{e}"))?;
+
+    let info = &data["responseInfo"];
+    if info["responseSuccess"].as_str() == Some("false") {
+        return Err(format!(
+            "接口返回失败（responseCode {}）",
+            string(&info["responseCode"]).unwrap_or_else(|| "空".into())
+        ));
+    }
+
+    let perform = &data["perform"];
+    let buy_button = {
+        let b = &data["itemBuyBtn"];
+        let status = integer(&b["btnStatus"]);
+        let text = string(&b["btnText"]);
+        (status.is_some() || text.is_some()).then_some(BuyButton { status, text })
+    };
+    let skus = perform["skuList"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|s| SkuRaw {
+            name: string(&s["priceName"]),
+            price: string(&s["price"]),
+            front_end_status: string(&s["frontEndStatus"]),
+            salable: match s["skuSalable"].as_str() {
+                Some("true") => Some(true),
+                Some("false") => Some(false),
+                _ => s["skuSalable"].as_bool(),
+            },
+        })
+        .collect();
+
+    Ok(PerformSkus {
+        perform_id: integer(&perform["performId"]).and_then(|i| u64::try_from(i).ok()),
+        buy_button,
+        skus,
+    })
+}
+
+fn head(s: &str) -> String {
+    s.chars().take(80).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixture(name: &str) -> String {
+        std::fs::read_to_string(format!(
+            "{}/testdata/damai/{name}",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn tiers_of_the_session_asked_for() {
+        let p = parse_sku_jsonp(&fixture("sku_on_sale_286937790.jsonp")).unwrap();
+        assert_eq!(p.perform_id, Some(286937790));
+        assert_eq!(p.buy_button.as_ref().and_then(|b| b.status), Some(204));
+        assert_eq!(p.skus.len(), 5);
+        assert_eq!(
+            p.skus[0],
+            SkuRaw {
+                name: Some("D-118元".into()),
+                price: Some("118.00".into()),
+                front_end_status: Some("2".into()),
+                salable: Some(false),
+            }
+        );
+    }
+
+    #[test]
+    fn sold_out_session_has_its_own_button() {
+        let p = parse_sku_jsonp(&fixture("sku_sold_out_284490009.jsonp")).unwrap();
+        assert_eq!(p.buy_button.as_ref().and_then(|b| b.status), Some(92));
+        assert!(
+            p.skus
+                .iter()
+                .all(|s| s.front_end_status.as_deref() == Some("4"))
+        );
+    }
+
+    #[test]
+    fn a_failed_response_is_an_error() {
+        let body = r#"__jp0({"responseInfo":{"responseSuccess":"false","responseCode":"X1"}})"#;
+        let err = parse_sku_jsonp(body).unwrap_err();
+        assert!(err.contains("X1"), "{err}");
+    }
+
+    #[test]
+    fn a_page_that_is_not_jsonp_is_an_error() {
+        assert!(parse_sku_jsonp("<html>oops</html>").is_err());
+    }
+}
