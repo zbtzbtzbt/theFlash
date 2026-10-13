@@ -474,3 +474,57 @@ fn explicit_validation_gap_paces_every_get_and_preserves_default_output() {
         );
     }
 }
+
+// A Linux without the ca-certificates package, like the ubuntu:24.04
+// container in #37. rustls-platform-verifier finds no CA certificate while
+// the client is being built, before any request, and every command stops
+// there. It reads the system's certificates through rustls-native-certs,
+// which reads only SSL_CERT_FILE and SSL_CERT_DIR when either is set, so
+// an empty SSL_CERT_FILE and no SSL_CERT_DIR is a system with none. macOS
+// verifies with its keychain, which can't be emptied like this, and always
+// has certificates.
+#[cfg(target_os = "linux")]
+#[test]
+fn without_ca_certificates_every_command_says_to_install_them_and_sends_nothing() {
+    let damai = MockDamai::start(&[
+        ("/item.htm?id=1077137031347", "item_sold_out.html"),
+        (
+            "dataType=2&dataId=284490009",
+            "sku_sold_out_284490009.jsonp",
+        ),
+    ]);
+    let run = |args: &[&str]| {
+        let mut cmd = support::theflash(&damai.base_url());
+        cmd.args(args)
+            .env("SSL_CERT_FILE", "/dev/null")
+            .env_remove("SSL_CERT_DIR");
+        support::output_within(cmd, 15)
+    };
+    let says_to_install = |args: &[&str], said: &str| {
+        for needle in ["没有 CA 证书", "ca-certificates", "apt-get install"] {
+            assert!(said.contains(needle), "{args:?} 没有提到“{needle}”：{said}");
+        }
+        for wrong in ["（）", "网络请求失败", "builder error"] {
+            assert!(!said.contains(wrong), "{args:?} 出现了“{wrong}”：{said}");
+        }
+    };
+
+    for args in [
+        &["event", "1077137031347"][..],
+        &["watch", "1077137031347", "--no-system-notify"],
+    ] {
+        let out = run(args);
+        assert_eq!(out.status.code(), Some(1), "{args:?}: {}", stderr(&out));
+        says_to_install(args, &stderr(&out));
+    }
+
+    // The browser's query shows the message as it is (event-ui.md).
+    let args = &["event-json", "1077137031347"][..];
+    let out = run(args);
+    assert_eq!(out.status.code(), Some(1), "{args:?}: {}", stdout(&out));
+    let error: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
+    assert_eq!(error["error"]["code"], "setup", "{error}");
+    says_to_install(args, error["error"]["message"].as_str().unwrap_or_default());
+
+    assert!(damai.hits().is_empty(), "requests: {:?}", damai.hits());
+}

@@ -49,10 +49,7 @@ impl Client {
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(20))
             .build()
-            .map_err(|e| Error::Network {
-                url: String::new(),
-                reason: chain(&e),
-            })?;
+            .map_err(|e| setup_error(&e))?;
         Ok(Client {
             http,
             base: base.into().trim_end_matches('/').to_string(),
@@ -257,6 +254,23 @@ fn chain(e: &dyn std::error::Error) -> String {
     s
 }
 
+/// rustls-platform-verifier's words when Linux has no CA certificate (no
+/// ca-certificates package, as in a minimal container image), under
+/// reqwest's "builder error". tests/cli.rs runs into it for real on Linux,
+/// so a dependency update that rewords it fails there.
+const NO_CA_CERTIFICATES: &str = "No CA certificates were loaded from the system";
+
+/// Building the client fails before any request goes out, so it is never
+/// a network failure, and there is no URL to name.
+fn setup_error(e: &dyn std::error::Error) -> Error {
+    let reason = chain(e);
+    if reason.contains(NO_CA_CERTIFICATES) {
+        Error::NoCaCertificates
+    } else {
+        Error::ClientSetup(reason)
+    }
+}
+
 /// The item id in a detail page link (`id=` on detail.damai.cn, `itemId=`
 /// on m.damai.cn), or a bare id.
 pub fn parse_item_id(input: &str) -> Result<u64, Error> {
@@ -356,6 +370,53 @@ mod tests {
         ] {
             assert_eq!(parse_item_id(input).ok(), Some(want), "{input}");
         }
+    }
+
+    /// An error and the one that caused it, the way reqwest nests them.
+    #[derive(Debug)]
+    struct Caused(&'static str, Option<Box<Caused>>);
+
+    impl std::fmt::Display for Caused {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(self.0)
+        }
+    }
+
+    impl std::error::Error for Caused {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            self.1.as_deref().map(|c| c as _)
+        }
+    }
+
+    // What building the client returned in ubuntu:24.04 without
+    // ca-certificates (#37), cause by cause. tests/cli.rs runs into the real
+    // one on Linux; this keeps the mapping checked on macOS as well.
+    #[test]
+    fn missing_ca_certificates_are_told_apart_from_other_setup_failures() {
+        let no_ca = Caused(
+            "builder error",
+            Some(Box::new(Caused(
+                "unexpected error: No CA certificates were loaded from the system",
+                None,
+            ))),
+        );
+        let e = setup_error(&no_ca);
+        assert!(matches!(e, Error::NoCaCertificates), "{e:?}");
+        let said = e.to_string();
+        assert!(said.contains("没有 CA 证书"), "{said}");
+        assert!(
+            said.contains("apt-get install -y ca-certificates"),
+            "{said}"
+        );
+
+        let other = Caused(
+            "builder error",
+            Some(Box::new(Caused("invalid TLS versions", None))),
+        );
+        assert_eq!(
+            setup_error(&other).to_string(),
+            "没法创建发请求用的 HTTP 客户端，所以没有发出任何请求：builder error：invalid TLS versions"
+        );
     }
 
     #[test]

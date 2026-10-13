@@ -54,6 +54,8 @@ pub fn error(e: &Error) -> Value {
         Error::NotFound(_) => "not-found",
         Error::RiskControl(_) => "risk-control",
         Error::Network { .. } | Error::Http { .. } => "network",
+        // This machine can't send a request at all; none was sent.
+        Error::NoCaCertificates | Error::ClientSetup(_) => "setup",
         Error::Parse { .. } => "parse",
     };
     json!({"error": {"code": code, "message": e.to_string()}})
