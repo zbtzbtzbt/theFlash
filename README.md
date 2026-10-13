@@ -35,6 +35,18 @@ cd backend && cargo build --release
 
 盯住一场演出：未开售时按大麦的时钟倒计时，开售那一刻提醒；之后每 30 秒查一次，盯的票档有票时提醒（终端和系统通知）。Ctrl-C 停止。细节见 [docs/subsystems/damai-watch.md](docs/subsystems/damai-watch.md)。
 
+## 在浏览器里查询演出
+
+安装根目录指定版本的 Node.js 和 Rust 后，在仓库根目录运行：
+
+```sh
+make serve
+```
+
+终端会打印一个 `http://127.0.0.1:<端口>` 地址，用 Chrome 或 Safari 打开。粘贴大麦演出链接或 ID，即可查看演出信息、所有场次及票档。只允许本机访问，只查询、不登录、不下单；查询中会显示加载状态，遇到风控就停止，不自动重试。按 Ctrl+C 停止服务。
+
+命令行查询照常使用：`cd backend && cargo run -- event "<链接或ID>"`。界面和 CLI 共用 Rust 查询及显示规则，详见 [本地界面设计](docs/subsystems/event-ui.md)。
+
 ## 开发命令
 
 ```sh

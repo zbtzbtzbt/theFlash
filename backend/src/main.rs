@@ -2,7 +2,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use theflash::watch::{self, Filter, Options, WatchError};
-use theflash::{damai, report};
+use theflash::{damai, presentation, report};
 
 const USAGE: &str = "用法：
   theflash event <大麦演出链接或ID>   查询演出的场次、票档和售卖状态
@@ -19,7 +19,8 @@ async fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     match args.as_slice() {
-        ["event", input] => event(input).await,
+        ["event", input] => event(input, false).await,
+        ["event-json", input] => event(input, true).await,
         ["watch", rest @ ..] => watch_command(rest).await,
         ["version" | "--version"] => {
             println!("theflash {}", theflash::version());
@@ -41,11 +42,11 @@ fn client() -> Result<damai::Client, damai::Error> {
     damai::Client::new(base)
 }
 
-async fn event(input: &str) -> ExitCode {
+async fn event(input: &str, json: bool) -> ExitCode {
     let item_id = match damai::parse_item_id(input) {
         Ok(id) => id,
         Err(e) => {
-            eprintln!("{e}");
+            print_error(&e, json);
             return ExitCode::from(2);
         }
     };
@@ -55,11 +56,15 @@ async fn event(input: &str) -> ExitCode {
     };
     match result {
         Ok(e) => {
-            print!("{}", report::render(&e));
+            if json {
+                println!("{}", presentation::event(&e));
+            } else {
+                print!("{}", report::render(&e));
+            }
             ExitCode::SUCCESS
         }
         Err(e) => {
-            eprintln!("{e}");
+            print_error(&e, json);
             ExitCode::FAILURE
         }
     }
@@ -135,5 +140,13 @@ async fn watch_command(args: &[&str]) -> ExitCode {
             println!("\n已停止盯票");
             ExitCode::SUCCESS
         }
+    }
+}
+
+fn print_error(error: &damai::Error, json: bool) {
+    if json {
+        println!("{}", presentation::error(error));
+    } else {
+        eprintln!("{error}");
     }
 }

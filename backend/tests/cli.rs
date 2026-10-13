@@ -404,3 +404,29 @@ fn supported_links_and_numeric_ids_query_the_same_event() {
     }
     assert_eq!(damai.hits().len(), 10);
 }
+
+#[test]
+fn browser_event_json_preserves_cli_content() {
+    let damai = MockDamai::start(&[
+        ("/item.htm?id=1092337348536", "item_not_yet_on_sale.html"),
+        (
+            "dataType=2&dataId=286966465",
+            "sku_not_yet_on_sale_286966465.jsonp",
+        ),
+    ]);
+    let text = theflash(&damai.base_url(), &["event", "1092337348536"]);
+    let json = theflash(&damai.base_url(), &["event-json", "1092337348536"]);
+    assert!(
+        json.status.success(),
+        "浏览器查询没有返回演出：{}",
+        stderr(&json)
+    );
+    let event: serde_json::Value = serde_json::from_str(&stdout(&json)).unwrap();
+    assert_eq!(event["report"].as_str(), Some(stdout(&text).as_str()));
+    assert_eq!(event["sale"]["kind"], "not-yet-on-sale");
+    assert_eq!(event["sellStart"], "2026-10-14 10:18（北京时间）");
+    assert_eq!(
+        event["sessions"][0]["tiers"][0]["status"]["label"],
+        "未开售"
+    );
+}

@@ -81,3 +81,7 @@
 - `make check`。
 - [`backend/tests/cli.rs`](../../backend/tests/cli.rs) 用本地假服务器回放 [`backend/testdata/damai/`](../../backend/testdata/damai/) 里的真实响应，运行编译出的程序；不访问真实大麦。`THEFLASH_DAMAI_BASE_URL` 只给测试用，用来把请求指向假服务器。
 - 大麦改版后，用 `curl` 匿名请求详情页和票档接口，和 `testdata/` 里的旧响应对比结构；再用浏览器打开同一场演出，核对场次和票档的显示。
+
+## 浏览器展示
+
+[本地演出查询界面](event-ui.md) 通过内部 `event-json` 命令复用同一个 `Client::event`。普通 `event` 命令的文本和退出码保持原有行为。
