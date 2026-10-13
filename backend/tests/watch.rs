@@ -22,7 +22,16 @@ struct Watch {
 
 impl Watch {
     fn start(damai: &MockDamai, args: &[&str]) -> Self {
-        let mut child = support::theflash(&damai.base_url())
+        Self::start_with_gap(damai, args, None)
+    }
+
+    fn start_with_gap(damai: &MockDamai, args: &[&str], gap: Option<&str>) -> Self {
+        let mut command = support::theflash(&damai.base_url());
+        command.env_remove("THEFLASH_REQUEST_GAP_MS");
+        if let Some(gap) = gap {
+            command.env("THEFLASH_REQUEST_GAP_MS", gap);
+        }
+        let mut child = command
             .arg("watch")
             .args(args)
             .stdout(Stdio::piped())
@@ -238,4 +247,50 @@ fn the_countdown_runs_on_damai_time_not_this_machines() {
         "{:?}",
         damai.hits()
     );
+}
+
+#[test]
+fn explicit_validation_gap_paces_heads_and_the_get_to_head_transition() {
+    const SALE: i64 = 1_791_944_280_000;
+    let damai = MockDamai::start_with_clock(
+        &[
+            ("/item.htm?id=1092337348536", "item_not_yet_on_sale.html"),
+            (
+                "dataType=2&dataId=286966465",
+                "sku_not_yet_on_sale_286966465.jsonp",
+            ),
+        ],
+        SALE - 2 * 3600 * 1000,
+    );
+    let mut watch = Watch::start_with_gap(
+        &damai,
+        &["1092337348536", "--no-system-notify"],
+        Some("1000"),
+    );
+    assert!(watch.wait_for(&["距离开售"]), "{:#?}", watch.seen);
+    let (status, _, err) = watch.interrupt();
+    assert!(status.success(), "{status:?} {err}");
+    let hits = damai.timed_hits();
+    assert_eq!(hits.len(), 7, "{hits:?}");
+    assert!(
+        hits[..2]
+            .iter()
+            .all(|(request, _)| request.starts_with("GET "))
+    );
+    assert!(
+        hits[2..]
+            .iter()
+            .all(|(request, _)| request.starts_with("HEAD "))
+    );
+    // Check the shared budget at GET -> HEAD as well as all five HEADs.
+    // No upper bound; scheduling jitter gets 150 ms of lower-bound margin.
+    for pair in hits[1..].windows(2) {
+        let elapsed = pair[1].1.duration_since(pair[0].1);
+        assert!(
+            elapsed >= Duration::from_millis(850),
+            "HEAD request gap missing: {} -> {} took {elapsed:?}",
+            pair[0].0,
+            pair[1].0
+        );
+    }
 }

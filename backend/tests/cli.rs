@@ -430,3 +430,47 @@ fn browser_event_json_preserves_cli_content() {
         "未开售"
     );
 }
+
+// Exercise the CLI environment wiring and every GET, including page -> first
+// tier (which has no legacy 300 ms wait). Preserve the original fixture bytes.
+#[test]
+fn explicit_validation_gap_paces_every_get_and_preserves_default_output() {
+    use std::time::Duration;
+    let damai = MockDamai::start(&[
+        ("/item.htm?id=1086791513717", "item_on_sale.html"),
+        ("dataType=2&dataId=286937789", "sku_on_sale_286937789.jsonp"),
+        ("dataType=2&dataId=286937790", "sku_on_sale_286937790.jsonp"),
+        ("dataType=2&dataId=286937788", "sku_on_sale_286937788.jsonp"),
+    ]);
+    let run = |gap: Option<&str>| {
+        let mut command = support::theflash(&damai.base_url());
+        command.args(["event", "1086791513717"]);
+        command.env_remove("THEFLASH_REQUEST_GAP_MS");
+        if let Some(gap) = gap {
+            command.env("THEFLASH_REQUEST_GAP_MS", gap);
+        }
+        support::output_within(command, 30)
+    };
+    let default = run(None);
+    let zero = run(Some("0"));
+    let paced = run(Some("1000"));
+    for out in [&default, &zero, &paced] {
+        assert!(out.status.success(), "{}", stderr(out));
+        assert_eq!(stdout(out), stdout(&default));
+    }
+    let hits = damai.timed_hits();
+    assert_eq!(hits.len(), 12, "{hits:?}");
+    assert_eq!(damai.hits()[..4], damai.hits()[4..8]);
+    assert_eq!(damai.hits()[..4], damai.hits()[8..]);
+    // Only a lower bound; allow 150 ms for observation/scheduling jitter.
+    // This remains far above the pre-existing 300 ms tier-only wait.
+    for pair in hits[8..].windows(2) {
+        let elapsed = pair[1].1.duration_since(pair[0].1);
+        assert!(
+            elapsed >= Duration::from_millis(850),
+            "GET request gap missing: {} -> {} took {elapsed:?}",
+            pair[0].0,
+            pair[1].0
+        );
+    }
+}

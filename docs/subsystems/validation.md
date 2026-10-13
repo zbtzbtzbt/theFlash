@@ -33,6 +33,6 @@ python3 scripts/validation.py uninstall <任务ID>
 
 ## 验证与安全边界
 
-`make check` 包括 [`scripts/tests/test_validation.py`](../../scripts/tests/test_validation.py)：临时 HOME/任务目录、假的 launchctl 和 GitHub、注入时钟、登记、到点启动、超时/取消 SIGINT、摘要、失败重试、崩溃不重放和敏感输出省略。不会访问真实服务。
+`make check` 包括 [`scripts/tests/test_validation.py`](../../scripts/tests/test_validation.py)：临时 HOME/任务目录、假的 launchctl 和 GitHub、注入时钟、登记、到点启动、超时/取消 SIGINT、摘要、失败重试、崩溃不重放和敏感输出省略。不会访问真实服务。实际请求节奏由 [`tests/cli.rs`](../../backend/tests/cli.rs) 的 `explicit_validation_gap_paces_every_get_and_preserves_default_output` 和 [`tests/watch.rs`](../../backend/tests/watch.rs) 的 `explicit_validation_gap_paces_heads_and_the_get_to_head_transition` 守护：只对本地假服务器发请求，分别覆盖详情页/各票档 GET、GET→HEAD 和连续 HEAD；环境参数仅在被测子进程中设置，按服务器到达时间检查下界，无耗时上界断言。
 
 登记真实大麦任务前，调用方必须按 #20 拿共享锁，并核对风控停止文件；停止并发访问、凭据和账号规则保持不变。runner 是通用命令监督工具，不自动取得夜间专用锁，也不替 owner 裁决风险。今晚演示持锁从登记前直到任务完成且自动评论成功，最后卸载演示项。
