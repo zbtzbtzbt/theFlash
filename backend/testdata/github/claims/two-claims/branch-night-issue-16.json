@@ -1,0 +1,12 @@
+[
+  {
+    "sha": "09fa0cacc396f7000688e15e9aebc8591b6f66ec",
+    "commit": {
+      "message": "claim: 一条命令就能看到谁在做哪个 issue、改哪些模块、过期了没有（#16）\n\nWhat changed:\n- 认领原来是一条散文评论：会话挂掉之后 issue 一直显示有人在做，没有收回机制；\n  要知道两个 agent 会不会改到同一批文件，只能读评论和代码。\n- 新子系统 backend/src/claim：认领评论变成机器能读的租约（agent、改动模块、\n  分支、预计完成），心跳或推分支算一次活着，超过 120 分钟没有更新就算过期，\n  任何 agent 都可以收回；`指派:<agent>` 标签代替正文里手写的“负责：某个 agent”。\n- 命令 scripts/claims：list / claim / heartbeat / reclaim，事实全部来自 gh api 的\n  GitHub 响应，`--replay <目录>` 用保存的响应判断，`--now <时间>` 说的是某个时刻的样子。\n\nAgent: Claude",
+      "committer": {
+        "name": "bintaozhou",
+        "date": "2026-10-13T19:07:27Z"
+      }
+    }
+  }
+]

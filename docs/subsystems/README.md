@@ -17,6 +17,7 @@
 | Mac 上独立于终端的定时验证及 issue 摘要 | [launchd 验证任务](validation.md) |
 <!-- docs-index:end -->
 | 发现大麦改了页面或接口的结构 | [大麦改版巡检](damai-inspect.md) |
+| 谁在做哪个 issue、改哪些模块、认领什么时候过期 | [认领租约](claim-lease.md) |
 
 ## 维护参考文档
 

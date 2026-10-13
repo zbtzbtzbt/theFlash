@@ -1,5 +1,6 @@
 //! theFlash 后端。
 
+pub mod claim;
 pub mod damai;
 pub mod inspect;
 pub mod merge_gate;
