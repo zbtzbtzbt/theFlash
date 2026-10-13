@@ -708,7 +708,9 @@ fn frontend_tests_run_theflash_only_under_a_temporary_home() {
     assert!(
         without.is_empty(),
         "这些前端测试会运行 theflash，但没有用 test-support 的 tempHome()，\
-         会读写真实用户的状态目录（风控熔断就在那里）：{without:?}"
+         可能读写真实用户的状态目录（风控熔断就在那里）。自己拼一个临时 HOME \
+         也不行：状态目录在哪只写在 tempHome() 一处，否则下次改路径会漏掉这里。\
+         {without:?}"
     );
 }
 
