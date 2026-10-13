@@ -12,10 +12,18 @@ mod support;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// The recorded not-yet-on-sale event opens at 2026-10-14 10:18, which
+/// every run after that reads as "this sample is about to stop being
+/// 未开售" — a finding (#39), and one that would arrive at a different
+/// moment on every machine. The routes below serve that page with its
+/// sale far enough out that a run's verdict does not depend on when the
+/// test runs; the tests about expiry set the time they need themselves.
+const SELL_START_FAR_OUT: &str = "\"sellStartTime\":4102416000000";
+
 /// The five seed samples and the first session of each, which is what a
 /// run with nothing stale asks for.
 fn unchanged_routes() -> Vec<(String, String)> {
-    [
+    let routes: Vec<(String, String)> = [
         ("/item.htm?id=1086791513717", "item_on_sale.html"),
         ("/item.htm?id=1092337348536", "item_not_yet_on_sale.html"),
         ("/item.htm?id=1077137031347", "item_sold_out.html"),
@@ -28,7 +36,10 @@ fn unchanged_routes() -> Vec<(String, String)> {
     ]
     .into_iter()
     .map(|(target, fixture)| (target.to_string(), support::fixture(fixture)))
-    .collect()
+    .collect();
+    changed(routes, "/item.htm?id=1092337348536", |body| {
+        body.replace("\"sellStartTime\":1791944280000", SELL_START_FAR_OUT)
+    })
 }
 
 /// A home page with one link, in the shape damai.cn writes them. The run
@@ -54,16 +65,23 @@ fn changed(
     target: &str,
     change: impl Fn(&str) -> String,
 ) -> Vec<(String, String)> {
-    routes
+    let mut hit = false;
+    let changed: Vec<(String, String)> = routes
         .into_iter()
         .map(|(t, body)| {
-            if t == target {
-                (t, change(&body))
-            } else {
-                (t, body)
+            if t != target {
+                return (t, body);
             }
+            let after = change(&body);
+            // A replacement that matched nothing would leave the test
+            // asserting about a page damai.cn never changed.
+            assert_ne!(after, body, "{target} 没有被改到");
+            hit = true;
+            (t, after)
         })
-        .collect()
+        .collect();
+    assert!(hit, "{target} 不在这组路由里");
+    changed
 }
 
 /// A HOME of this test's own: the sample set is kept in the user's state
@@ -235,11 +253,11 @@ fn a_tier_status_code_nobody_has_mapped_is_reported_with_its_tag() {
     assert_eq!(out.status.code(), Some(1), "{text}");
 }
 
-/// Samples go stale. A saved sample that no longer shows its situation is
-/// replaced with one from the home page, and the new set is saved for the
-/// next run.
+/// Samples go stale. damai.cn has no anonymous listing to take a new one
+/// from (#39), so a stale sample is replaced out of the pool kept in the
+/// repository, without asking the home page at all.
 #[test]
-fn a_stale_sample_is_replaced_from_the_home_page_and_saved() {
+fn a_stale_sample_is_replaced_from_the_pool_without_asking_the_home_page() {
     let home = Home::new("stale-sample");
     let samples = home.path().join("samples.json");
     std::fs::write(
@@ -264,8 +282,8 @@ fn a_stale_sample_is_replaced_from_the_home_page_and_saved() {
     assert!(text.contains("换掉了过期的样本 1077137031347"), "{text}");
     assert!(text.contains("[已开售] 1086791513717"), "{text}");
     assert!(
-        damai.hits().iter().any(|h| h == "GET /"),
-        "没去首页找新样本：{:?}",
+        !damai.hits().iter().any(|h| h == "GET /"),
+        "候选池里还有样本，不该去首页：{:?}",
         damai.hits()
     );
     let saved = std::fs::read_to_string(&samples).unwrap();
@@ -275,6 +293,131 @@ fn a_stale_sample_is_replaced_from_the_home_page_and_saved() {
         "新样本没有按状态存下来：{saved}"
     );
     assert_eq!(out.status.code(), Some(0), "换样本本身不算发现：{text}");
+}
+
+/// An event that moved on — the sale opened — is filed under the
+/// situation it shows now, so 已开售 refills itself from the sample that
+/// used to be 未开售, with nothing to look it up in.
+#[test]
+fn an_event_whose_sale_opened_becomes_the_on_sale_sample() {
+    let home = Home::new("moved-on");
+    let samples = home.path().join("samples.json");
+    // 1086791513717 is on sale; saved here as the 未开售 sample, as if its
+    // sale had opened since the last run.
+    std::fs::write(
+        &samples,
+        r#"{"updatedAt":"2026-10-14 03:00（北京时间）","samples":[
+             {"itemId":1077137031347,"category":"onSale"},
+             {"itemId":1086791513717,"category":"notYetOnSale"},
+             {"itemId":1077137031347,"category":"soldOut"},
+             {"itemId":1084537866279,"category":"calendar"},
+             {"itemId":1080486727522,"category":"notOnPcChannel"}]}"#,
+    )
+    .unwrap();
+    let damai = support::MockDamai::start_bodies(unchanged_routes());
+    let out = run(
+        &home,
+        &damai,
+        &["--samples", samples.to_str().unwrap(), "--max-events", "8"],
+    );
+    let text = stdout(&out);
+    assert!(text.contains("[已开售] 1086791513717"), "{text}");
+    let saved: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&samples).unwrap()).unwrap();
+    let on_sale: Vec<&serde_json::Value> = saved["samples"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|s| s["category"] == "onSale")
+        .collect();
+    assert_eq!(
+        on_sale.first().map(|s| s["itemId"].as_u64()),
+        Some(Some(1086791513717)),
+        "开售了的那一场没有被存成已开售的样本：{saved}"
+    );
+}
+
+/// What #39 is about: when a situation has no candidate left anywhere,
+/// the inspection stops being able to see that situation. It says so,
+/// says what to put where, and fails, so a scheduled run is noticed
+/// instead of passing green while half blind.
+#[test]
+fn a_situation_with_no_candidate_left_is_a_finding_that_says_what_to_do() {
+    let home = Home::new("no-candidate");
+    let samples = home.path().join("samples.json");
+    // Every candidate for 已售罄 — the saved one and the pool's — is the
+    // same event, and it is on sale, so nothing covers 已售罄.
+    std::fs::write(
+        &samples,
+        r#"{"updatedAt":"2026-10-14 03:00（北京时间）","samples":[
+             {"itemId":1086791513717,"category":"onSale"},
+             {"itemId":1092337348536,"category":"notYetOnSale"},
+             {"itemId":1086791513717,"category":"soldOut"},
+             {"itemId":1084537866279,"category":"calendar"},
+             {"itemId":1080486727522,"category":"notOnPcChannel"}]}"#,
+    )
+    .unwrap();
+    // The pool's 已售罄 event answers as an on-sale page too, so no
+    // candidate anywhere shows 已售罄.
+    let routes = changed(unchanged_routes(), "/item.htm?id=1077137031347", |_| {
+        support::fixture("item_on_sale.html")
+    });
+    let damai = support::MockDamai::start_bodies(with_route(routes, home_with(1086791513717)));
+    let out = run(
+        &home,
+        &damai,
+        &["--samples", samples.to_str().unwrap(), "--max-events", "8"],
+    );
+    let text = stdout(&out);
+    assert!(text.contains("样本缺口：没有已售罄的样本了"), "{text}");
+    assert!(
+        text.contains(samples.to_str().unwrap()),
+        "没说要改哪个文件：{text}"
+    );
+    assert!(
+        text.contains("1 类样本补不上"),
+        "结论里没说巡检看不见这一类了：{text}"
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "补不上样本的巡检必须失败，否则定时任务看不到：{text}"
+    );
+    assert!(
+        damai.hits().iter().any(|h| h == "GET /"),
+        "候选池用完了，首页是最后一搏：{:?}",
+        damai.hits()
+    );
+}
+
+/// Finding a replacement takes a person or an agent (0014), so a sample
+/// that is about to stop showing its situation is reported before it
+/// does, not after.
+#[test]
+fn a_sample_that_opens_in_two_days_is_reported_before_its_situation_is_lost() {
+    let home = Home::new("expiring");
+    let in_two_days = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64
+        + 2 * 24 * 3600 * 1000;
+    let routes = changed(unchanged_routes(), "/item.htm?id=1092337348536", |body| {
+        body.replace(
+            SELL_START_FAR_OUT,
+            &format!("\"sellStartTime\":{in_two_days}"),
+        )
+    });
+    let damai = support::MockDamai::start_bodies(routes);
+    let out = run(&home, &damai, &[]);
+    let text = stdout(&out);
+    assert!(text.contains("样本快过期：1092337348536"), "{text}");
+    assert!(text.contains("之后就不是未开售了"), "{text}");
+    assert!(text.contains("1 个样本快过期"), "{text}");
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "快过期的样本要在还来得及的时候报出来：{text}"
+    );
 }
 
 /// The sample set is kept in this user's state directory, so a run on a
@@ -318,7 +461,9 @@ fn a_run_asks_about_at_most_as_many_events_as_it_was_allowed() {
         .filter(|h| h.contains("/item.htm"))
         .count();
     assert_eq!(pages, 2, "{:?}", damai.hits());
-    assert!(text.contains("这次没有已售罄的样本"), "{text}");
+    // A situation the budget did not reach is not a finding: the next run
+    // with a bigger budget covers it.
+    assert!(text.contains("这次没查已售罄：--max-events"), "{text}");
     assert_eq!(out.status.code(), Some(0), "{text}");
 }
 
@@ -411,8 +556,8 @@ fn the_default_run_has_room_to_replace_a_stale_sample() {
     let out = run(&home, &damai, &["--samples", samples.to_str().unwrap()]);
     let text = stdout(&out);
     assert!(
-        damai.hits().iter().any(|h| h == "GET /"),
-        "默认预算下没去首页找新样本：{:?}",
+        damai.hits().iter().any(|h| h.contains("id=1086791513717")),
+        "默认预算下没去读候选，没换成新样本：{:?}",
         damai.hits()
     );
     assert_eq!(
@@ -469,22 +614,30 @@ fn the_default_budget_leaves_room_to_replace_one_of_five_separate_samples() {
     let out = run(&home, &damai, &["--samples", samples.to_str().unwrap()]);
     let text = stdout(&out);
     assert!(
-        damai.hits().iter().any(|h| h == "GET /"),
-        "五个样本就把预算花光了，没去首页找替代：{:?}",
+        damai.hits().iter().any(|h| h.contains("id=1086791513717")),
+        "五个样本就把预算花光了，没去读替代的候选：{:?}",
         damai.hits()
     );
     assert!(text.contains("[已开售] 1086791513717"), "{text}");
-    let saved = std::fs::read_to_string(&samples).unwrap();
-    assert!(saved.contains("1086791513717"), "{saved}");
-    assert!(
-        !saved.contains("1090000000001"),
-        "下架的那场还留在样本集里：{saved}"
+    let saved: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&samples).unwrap()).unwrap();
+    let on_sale: Vec<&serde_json::Value> = saved["samples"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|s| s["category"] == "onSale")
+        .collect();
+    assert_eq!(
+        on_sale.first().map(|s| s["itemId"].as_u64()),
+        Some(Some(1086791513717)),
+        "下架的那场还排在已开售的第一位，下次又要先读它：{saved}"
     );
 }
 
 /// A situation left without a sample is not a healthy run: nobody is
-/// watching it until an agent hands it a new event. The old sample stays
-/// in the file, so the next run still inspects as much as this one did.
+/// watching it until an agent hands it a new event. A sample that could
+/// not be read stays in the file — one failed request is not proof the
+/// event is gone — so the next run still inspects as much as this one did.
 #[test]
 fn a_situation_left_without_a_sample_fails_and_keeps_the_sample_it_had() {
     let home = Home::new("coverage-lost");
@@ -492,31 +645,48 @@ fn a_situation_left_without_a_sample_fails_and_keeps_the_sample_it_had() {
     std::fs::write(
         &samples,
         r#"{"updatedAt":"2026-10-14 03:00（北京时间）","samples":[
-             {"itemId":1077137031347,"category":"onSale"},
+             {"itemId":1090000000001,"category":"onSale"},
              {"itemId":1092337348536,"category":"notYetOnSale"},
              {"itemId":1077137031347,"category":"soldOut"},
              {"itemId":1084537866279,"category":"calendar"},
              {"itemId":1080486727522,"category":"notOnPcChannel"}]}"#,
     )
     .unwrap();
-    // The home page as damai.cn really serves it today: no detail link, so
-    // there is no replacement to be had (#39).
+    // The 已开售 sample was taken down, the pool's 已开售 event is sold
+    // out by now, and the home page is as damai.cn really serves it
+    // today: no detail link. So nothing anywhere covers 已开售 (#39).
+    let gone = (
+        "/item.htm?id=1090000000001".to_string(),
+        support::fixture("item_not_found.html"),
+    );
+    let routes = changed(unchanged_routes(), "/item.htm?id=1086791513717", |_| {
+        support::fixture("item_sold_out.html")
+    });
     let no_candidates = (
         "/".to_string(),
         "<html><body>没有演出链接</body></html>".to_string(),
     );
-    let damai = support::MockDamai::start_bodies(with_route(unchanged_routes(), no_candidates));
+    let damai =
+        support::MockDamai::start_bodies(with_route(with_route(routes, gone), no_candidates));
     let out = run(&home, &damai, &["--samples", samples.to_str().unwrap()]);
     let text = stdout(&out);
-    assert!(text.contains("缺样本：已开售"), "{text}");
-    assert!(text.contains("1 类没有样本了"), "{text}");
+    assert!(text.contains("样本缺口：没有已开售的样本了"), "{text}");
+    assert!(text.contains("1 类样本补不上"), "{text}");
     assert_eq!(out.status.code(), Some(1), "{text}");
     let saved = std::fs::read_to_string(&samples).unwrap();
     assert!(
-        saved.contains("\"onSale\""),
-        "丢了的那一类被从样本文件里删掉了，下次就不查了：{saved}"
+        saved.contains("\"onSale\"") && saved.contains("1090000000001"),
+        "读不了的那一类被从样本文件里删掉了，下次就不查了：{saved}"
     );
-    assert_eq!(saved.matches("itemId").count(), 5, "样本集缩水了：{saved}");
+    for category in [
+        "onSale",
+        "notYetOnSale",
+        "soldOut",
+        "calendar",
+        "notOnPcChannel",
+    ] {
+        assert!(saved.contains(category), "{category} 没了：{saved}");
+    }
 }
 
 /// An event whose page could not be read had nothing checked, so the run
@@ -542,12 +712,17 @@ fn an_event_that_could_not_be_read_claims_nothing_about_its_structure() {
         "/item.htm?id=1090000000001".to_string(),
         support::fixture("item_not_found.html"),
     );
-    let routes = with_route(unchanged_routes(), gone);
+    // Nothing else covers 已开售 either, so the run ends with the gap and
+    // has to say which of the two things happened to the saved sample.
+    let routes = changed(unchanged_routes(), "/item.htm?id=1086791513717", |_| {
+        support::fixture("item_sold_out.html")
+    });
     let no_candidates = (
         "/".to_string(),
         "<html><body>没有演出链接</body></html>".to_string(),
     );
-    let damai = support::MockDamai::start_bodies(with_route(routes, no_candidates));
+    let damai =
+        support::MockDamai::start_bodies(with_route(with_route(routes, gone), no_candidates));
     let out = run(&home, &damai, &["--samples", samples.to_str().unwrap()]);
     let text = stdout(&out);
     let block = about(&text, "1090000000001");
@@ -561,8 +736,8 @@ fn an_event_that_could_not_be_read_claims_nothing_about_its_structure() {
         "一个状态码都没读到，却说都见过：{block}"
     );
     assert!(
-        text.contains("缺样本：已开售：1090000000001 这次读不了"),
-        "缺样本的原因说成了状态变了，其实是这一页读不了：{text}"
+        text.contains("样本缺口：没有已开售的样本了") && text.contains("1090000000001 这次读不了"),
+        "样本缺口的原因说成了状态变了，其实是这一页读不了：{text}"
     );
     assert_eq!(out.status.code(), Some(1), "{text}");
 }
@@ -652,6 +827,8 @@ fn candidate(dir: &Path, name: &str) -> String {
 /// The gap between requests is a wait, not a printed promise: every agent
 /// shares the owner's one address. Measured where it counts, at the
 /// server, across the detail page, the home page and the tier endpoint.
+/// The home page is the last candidate a run tries (0014), so the pool's
+/// 已开售 event answers as a sold-out page here to get the run there.
 #[test]
 fn a_run_waits_between_every_request_it_sends() {
     let home = Home::new("gap-run");
@@ -662,8 +839,10 @@ fn a_run_waits_between_every_request_it_sends() {
              {"itemId":1077137031347,"category":"onSale"}]}"#,
     )
     .unwrap();
-    let damai =
-        support::MockDamai::start_bodies(with_route(unchanged_routes(), home_with(1086791513717)));
+    let routes = changed(unchanged_routes(), "/item.htm?id=1086791513717", |_| {
+        support::fixture("item_sold_out.html")
+    });
+    let damai = support::MockDamai::start_bodies(with_route(routes, home_with(1086791513717)));
     let mut cmd = home.theflash(&damai.base_url());
     cmd.args([
         "inspect",

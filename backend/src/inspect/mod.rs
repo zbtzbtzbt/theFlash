@@ -130,14 +130,31 @@ impl EventReport {
     }
 }
 
-/// A situation theFlash has to handle that this run ended without a sample
-/// for: the saved one stopped showing it and the home page had no
-/// replacement. Nobody is watching that situation until an agent puts a
-/// new event in the sample file, so it is a finding and not a note.
+/// Why a situation has no sample in this run.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Uncovered {
+pub enum Uncovered {
+    /// Every candidate was tried: the saved backups, the pool in the
+    /// repository, and the home page. The inspection is blind to this
+    /// situation until someone puts a new event in the sample file, so
+    /// this is a finding. `was` is what became of the event that used to
+    /// cover the situation, because a page that could not be read and a
+    /// page that moved to another situation ask for different things.
+    NothingLeft { was: String },
+    /// `--max-events` ran out first. Not a finding: the next run with a
+    /// bigger budget covers it.
+    OutOfBudget,
+}
+
+/// A sample that is about to stop showing its situation, reported before
+/// it does: a replacement has to be found by hand (0014), which takes
+/// longer than noticing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Expiring {
+    pub item_id: u64,
     pub category: Category,
-    pub why: String,
+    pub name: Option<String>,
+    /// Beijing time, as everything else theFlash prints.
+    pub at: String,
 }
 
 pub struct Report {
@@ -145,16 +162,25 @@ pub struct Report {
     pub at: String,
     pub requests: usize,
     pub events: Vec<EventReport>,
-    /// Situations this run lost its sample for.
-    pub uncovered: Vec<Uncovered>,
-    /// Anything worth saying that is not a finding about damai.cn.
+    /// Which situations this run has no sample for, and why.
+    pub uncovered: Vec<(Category, Uncovered)>,
+    /// Samples that stop covering their situation within
+    /// `samples::NOTICE_BEFORE_EXPIRY_MS`.
+    pub expiring: Vec<Expiring>,
+    /// Where the sample set is kept, so a report can say what to edit.
+    pub samples_path: PathBuf,
+    /// Anything else worth saying that is not a finding about damai.cn.
     pub notes: Vec<String>,
 }
 
 impl Report {
-    /// Whether an agent has to look at this run.
+    /// Whether an agent has to look at this run. A situation nothing
+    /// covers any more counts: an inspection that quietly stops checking
+    /// one of the five situations is the failure #39 was opened for.
     pub fn has_findings(&self) -> bool {
-        self.events.iter().any(|e| !e.is_clean()) || !self.uncovered.is_empty()
+        self.events.iter().any(|e| !e.is_clean())
+            || self.nothing_left() > 0
+            || !self.expiring.is_empty()
     }
 
     pub fn changes(&self) -> usize {
@@ -163,6 +189,14 @@ impl Report {
 
     pub fn unseen_codes(&self) -> usize {
         self.events.iter().map(|e| e.unseen.len()).sum()
+    }
+
+    /// Situations with no candidate left anywhere.
+    pub fn nothing_left(&self) -> usize {
+        self.uncovered
+            .iter()
+            .filter(|(_, why)| matches!(why, Uncovered::NothingLeft { .. }))
+            .count()
     }
 }
 
@@ -229,10 +263,15 @@ impl Pacer {
     }
 }
 
-/// One inspection: the saved samples, replacements off the home page for
-/// the ones that went stale, and the structure and status codes of every
-/// page it read. Risk control anywhere ends the run without a retry, as
-/// everywhere else in theFlash.
+/// What a run says when damai.cn's home page gives it nothing, which is
+/// every time since 2026-10-14 (#39).
+const HOME_HAS_NO_LINK: &str = "首页上没有演出链接（它的演出卡片是 JS 渲染的，匿名 HTML 里没有 \
+     detail.damai.cn 的链接），所以这次换不出新样本；见 0014";
+
+/// One inspection: the saved samples, replacements for the ones that went
+/// stale, and the structure and status codes of every page it read. Risk
+/// control anywhere ends the run without a retry, as everywhere else in
+/// theFlash.
 pub async fn run(client: &Client, opts: &Options) -> Result<Report, Error> {
     let at = now_beijing();
     let (saved, note) = samples::load(&opts.samples_path);
@@ -241,6 +280,8 @@ pub async fn run(client: &Client, opts: &Options) -> Result<Report, Error> {
         requests: 0,
         events: Vec::new(),
         uncovered: Vec::new(),
+        expiring: Vec::new(),
+        samples_path: opts.samples_path.clone(),
         notes: note.into_iter().collect(),
     };
     let budget = opts.max_events.clamp(1, MAX_MAX_EVENTS);
@@ -261,111 +302,142 @@ pub async fn run(client: &Client, opts: &Options) -> Result<Report, Error> {
     // costs one request, not two.
     let mut pages: Vec<Page> = Vec::new();
     let mut failures: Vec<Failed> = Vec::new();
-    let mut asked: Vec<u64> = Vec::new();
-    for sample in &saved {
-        if asked.len() >= budget {
-            break;
-        }
-        if asked.contains(&sample.item_id) {
+    let mut tried: Vec<u64> = Vec::new();
+
+    // The event that covered each situation last time.
+    for category in COVERAGE {
+        let Some(item_id) = samples::ids_for(&saved, category).first().copied() else {
+            continue;
+        };
+        if tried.contains(&item_id) {
             continue;
         }
-        asked.push(sample.item_id);
+        if tried.len() >= budget {
+            break;
+        }
+        tried.push(item_id);
         read_one(
             client,
             &mut pacer,
             &mut report.requests,
-            sample.item_id,
+            item_id,
             &mut pages,
             &mut failures,
         )
         .await?;
     }
 
-    // Situations no page covers yet: take candidates off the home page.
-    let covered = |pages: &[Page], c: Category| pages.iter().any(|p| p.category == Some(c));
-    let mut from_home: Vec<u64> = Vec::new();
-    if COVERAGE.iter().any(|c| !covered(&pages, *c)) && asked.len() < budget {
-        match read_home(client, &mut pacer, &mut report.requests).await? {
-            Ok(ids) if ids.is_empty() => report.notes.push(
-                "首页上没有演出链接（它的演出卡片是 JS 渲染的，匿名 HTML 里没有 \
-                 detail.damai.cn 的链接），所以这次换不了样本；见 #39"
-                    .to_string(),
-            ),
-            Ok(ids) => from_home = ids,
-            Err(why) => report.notes.push(format!("首页取不到新样本：{why}")),
+    // Situations nothing read covers: the backups this machine saved, the
+    // pool in the repository, and then the home page, which has carried no
+    // event link since 2026-10-14 but costs one request and would start
+    // working again by itself (0014).
+    let mut home: Vec<u64> = Vec::new();
+    let mut asked_home = false;
+    for category in COVERAGE {
+        while !pages.iter().any(|p| p.category == Some(category)) {
+            if tried.len() >= budget {
+                report.uncovered.push((category, Uncovered::OutOfBudget));
+                break;
+            }
+            let mut next = next_candidate(&saved, category, &home, &tried);
+            if next.is_none() && !asked_home {
+                asked_home = true;
+                match read_home(client, &mut pacer, &mut report.requests).await? {
+                    Ok(ids) if ids.is_empty() => report.notes.push(HOME_HAS_NO_LINK.to_string()),
+                    Ok(ids) => home = ids,
+                    Err(why) => report.notes.push(format!("首页取不到新样本：{why}")),
+                }
+                next = next_candidate(&saved, category, &home, &tried);
+            }
+            let Some(item_id) = next else {
+                report.uncovered.push((
+                    category,
+                    Uncovered::NothingLeft {
+                        was: what_became_of(&saved, category, &tried, &failures),
+                    },
+                ));
+                break;
+            };
+            tried.push(item_id);
+            read_one(
+                client,
+                &mut pacer,
+                &mut report.requests,
+                item_id,
+                &mut pages,
+                &mut failures,
+            )
+            .await?;
         }
-    }
-    for id in from_home {
-        if COVERAGE.iter().all(|c| covered(&pages, *c)) || asked.len() >= budget {
-            break;
-        }
-        if asked.contains(&id) {
-            continue;
-        }
-        asked.push(id);
-        read_one(
-            client,
-            &mut pacer,
-            &mut report.requests,
-            id,
-            &mut pages,
-            &mut failures,
-        )
-        .await?;
     }
 
-    // One sample per situation, newest reading first come first served. A
-    // situation with no page keeps the event it had: dropping it would
-    // quietly shrink what every later run inspects.
+    // What the next run reads first, and the backups behind it. An event
+    // that moved on — a sale opened, a sale sold out — is filed under the
+    // situation it shows now, which is how 已开售 and 已售罄 refill
+    // themselves without any listing to look things up in.
     let mut kept: Vec<Sample> = Vec::new();
     for category in COVERAGE {
-        if let Some(page) = pages.iter().find(|p| p.category == Some(category)) {
-            kept.push(Sample {
-                item_id: page.item_id,
-                category,
-                name: event_name(&page.json),
-            });
-            continue;
-        }
-        let was = saved.iter().find(|s| s.category == category);
-        if let Some(was) = was {
-            kept.push(was.clone());
-        }
-        match was {
-            // Its page no longer shows this situation, or could not be
-            // read at all: coverage is lost until an agent hands this
-            // situation a new event, so the run fails. Which of the two it
-            // was decides what whoever reads this has to do.
-            Some(was) if asked.contains(&was.item_id) => {
-                let what_happened = match failures.iter().find(|f| f.item_id == was.item_id) {
-                    Some(f) => format!("{} 这次读不了（{}）", was.item_id, f.why),
-                    None => format!("{} 不再是这个状态", was.item_id),
-                };
-                report.uncovered.push(Uncovered {
-                    category,
-                    why: format!(
-                        "{}：{what_happened}，首页也没有能替代它的演出。\
-                         补一个：改 {}，把这一类的 itemId 换成一场现在是这个状态的演出",
-                        category.name(),
-                        opts.samples_path.display()
-                    ),
-                });
+        let mut ids: Vec<u64> = pages
+            .iter()
+            .filter(|p| p.category == Some(category))
+            .map(|p| p.item_id)
+            .collect();
+        // Saved events this run never read: nothing is known against them.
+        // One that could not be read goes behind those, not out: a single
+        // failed request is not proof the event is gone.
+        for id in samples::ids_for(&saved, category) {
+            let read = pages.iter().any(|p| p.item_id == id);
+            if !read && !ids.contains(&id) && !tried.contains(&id) {
+                ids.push(id);
             }
-            // The budget ran out before its turn: this run looked at
-            // fewer events on purpose, which is not news about damai.cn.
-            Some(was) => report.notes.push(format!(
-                "这次没有{}的样本：预算（--max-events {budget}）在轮到 {} 之前就用完了",
-                category.name(),
-                was.item_id
-            )),
-            None => report.uncovered.push(Uncovered {
+        }
+        for id in samples::ids_for(&saved, category) {
+            if failures.iter().any(|failed| failed.item_id == id) && !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+        ids.truncate(samples::KEEP_PER_CATEGORY);
+        for item_id in ids {
+            kept.push(Sample {
+                item_id,
                 category,
-                why: format!(
-                    "{}：样本集里没有这一类。补一个：改 {}，加一场现在是这个状态的演出",
-                    category.name(),
-                    opts.samples_path.display()
-                ),
-            }),
+                name: pages
+                    .iter()
+                    .find(|p| p.item_id == item_id)
+                    .and_then(|p| event_name(&p.json)),
+            });
+        }
+    }
+
+    // The one event per situation whose tiers this run reads: one request
+    // is enough to see what that endpoint sends, and the backups are not
+    // worth a request each.
+    let actives: Vec<u64> = COVERAGE
+        .iter()
+        .filter_map(|c| kept.iter().find(|s| s.category == *c).map(|s| s.item_id))
+        .collect();
+
+    // Samples that are about to stop covering their situation. Finding a
+    // replacement takes a person or an agent, so the notice goes out
+    // before the coverage is gone rather than after.
+    let now = now_ms();
+    for category in COVERAGE {
+        let Some(sample) = kept.iter().find(|s| s.category == category) else {
+            continue;
+        };
+        let Some(page) = pages.iter().find(|p| p.item_id == sample.item_id) else {
+            continue;
+        };
+        let Some(stops_at) = samples::stops_covering_at(category, &page.json) else {
+            continue;
+        };
+        if samples::is_expiring(stops_at, now) {
+            report.expiring.push(Expiring {
+                item_id: sample.item_id,
+                category,
+                name: sample.name.clone(),
+                at: beijing(stops_at),
+            });
         }
     }
 
@@ -385,17 +457,20 @@ pub async fn run(client: &Client, opts: &Options) -> Result<Report, Error> {
             failed: None,
             candidates: Vec::new(),
         };
-        let was = saved.iter().find(|s| Some(s.category) == page.category);
+        let was = page
+            .category
+            .and_then(|c| samples::ids_for(&saved, c).first().copied());
         if let Some(was) = was
-            && was.item_id != id
+            && was != id
         {
-            event.replaced = Some(was.item_id);
+            event.replaced = Some(was);
         }
         collect(&page.json, shape::ITEM_PAGE_FIELDS, &mut event.changes);
 
-        // One session's tiers, when this page is a sample of a situation.
+        // One session's tiers, when this page is the sample of a
+        // situation: the backups are not read again.
         let mut tier_body: Option<(u64, String)> = None;
-        if kept.iter().any(|s| s.item_id == id)
+        if actives.contains(&id)
             && let Some(perform_id) = first_perform_id(&page.json)
         {
             event.session = Some(perform_id);
@@ -572,6 +647,44 @@ fn collect(root: &Value, fields: &'static [Field], changes: &mut Vec<Change>) {
     }
 }
 
+/// The next event to try for a situation whose sample went stale, in the
+/// order the sources are trusted: the backups saved on this machine (seen
+/// in this situation by a real run), the pool kept in the repository, and
+/// whatever the home page offered. None means this situation has nothing
+/// left, which is a finding.
+fn next_candidate(
+    saved: &[Sample],
+    category: Category,
+    home: &[u64],
+    tried: &[u64],
+) -> Option<u64> {
+    samples::ids_for(saved, category)
+        .into_iter()
+        .chain(samples::pool(category).iter().copied())
+        .chain(home.iter().copied())
+        .find(|id| !tried.contains(id))
+}
+
+/// What became of the event that covered `category` last time, which a
+/// report about a situation with nothing left has to say: a page that
+/// could not be read this once may answer again tomorrow, while one that
+/// moved to another situation never covers this one again.
+fn what_became_of(
+    saved: &[Sample],
+    category: Category,
+    tried: &[u64],
+    failures: &[Failed],
+) -> String {
+    let Some(item_id) = samples::ids_for(saved, category).first().copied() else {
+        return "样本集里本来就没有这一类".to_string();
+    };
+    match failures.iter().find(|f| f.item_id == item_id) {
+        Some(failed) => format!("{item_id} 这次读不了（{}）", failed.why),
+        None if tried.contains(&item_id) => format!("{item_id} 不再是这个状态"),
+        None => format!("{item_id} 这次没读到"),
+    }
+}
+
 /// One response: what damai.cn sent, kept even when theFlash could not
 /// read it, and what it read out of it. `read` being `Err` is this one
 /// event's problem; `Err(_)` from these functions stops the run.
@@ -718,19 +831,27 @@ fn first_perform_id(json: &Value) -> Option<u64> {
     None
 }
 
-/// This machine's wall clock in Beijing time, which is how everything
-/// theFlash prints is written. chrono is built without its clock feature,
+/// This machine's wall clock. chrono is built without its clock feature,
 /// so the time comes from `SystemTime`, as in `watch::env`.
-fn now_beijing() -> String {
-    let ms = SystemTime::now()
+fn now_ms() -> i64 {
+    SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
-        .unwrap_or(0);
-    let beijing = FixedOffset::east_opt(8 * 3600).expect("+08:00 is a valid offset");
-    match DateTime::from_timestamp_millis(ms).map(|t| t.with_timezone(&beijing)) {
+        .unwrap_or(0)
+}
+
+/// A time in Beijing time, which is how everything theFlash prints is
+/// written.
+fn beijing(ms: i64) -> String {
+    let offset = FixedOffset::east_opt(8 * 3600).expect("+08:00 is a valid offset");
+    match DateTime::from_timestamp_millis(ms).map(|t| t.with_timezone(&offset)) {
         Some(t) => format!("{}（北京时间）", t.format("%Y-%m-%d %H:%M")),
         None => "时间不可用".to_string(),
     }
+}
+
+fn now_beijing() -> String {
+    beijing(now_ms())
 }
 
 /// What to record a fixture from.
@@ -882,8 +1003,30 @@ pub fn render(report: &Report) -> String {
     for note in &report.notes {
         out.push_str(&format!("说明：{note}\n"));
     }
-    for lost in &report.uncovered {
-        out.push_str(&format!("缺样本：{}\n", lost.why));
+    for (category, why) in &report.uncovered {
+        match why {
+            Uncovered::NothingLeft { was } => out.push_str(&format!(
+                "样本缺口：没有{}的样本了，这一类这次没查（{was}）。保存的备用样本、仓库里的候选池和首页都试过了。\
+                 补一场现在是这个状态的演出：改 {}，或者把它加进 backend/src/inspect/samples.rs 的候选池\n",
+                category.name(),
+                report.samples_path.display()
+            )),
+            Uncovered::OutOfBudget => out.push_str(&format!(
+                "这次没查{}：--max-events 的预算先用完了\n",
+                category.name()
+            )),
+        }
+    }
+    for expiring in &report.expiring {
+        out.push_str(&format!(
+            "样本快过期：{} {} 在 {} 开售，之后就不是{}了。趁现在换一场{}的演出进 {}\n",
+            expiring.item_id,
+            expiring.name.as_deref().unwrap_or("名称未知"),
+            expiring.at,
+            expiring.category.name(),
+            expiring.category.name(),
+            report.samples_path.display()
+        ));
     }
     for event in &report.events {
         let category = event.category.map_or("未分类", Category::name);
@@ -928,15 +1071,32 @@ pub fn render(report: &Report) -> String {
         }
     }
     out.push('\n');
-    if report.has_findings() {
+    if !report.has_findings() {
+        out.push_str("结论：没有变化。\n");
+        return out;
+    }
+    if report.changes() > 0 || report.unseen_codes() > 0 {
         out.push_str(&format!(
             "结论：发现 {} 处结构变化、{} 个没见过的状态码、{} 类没有样本了。大麦很可能改版了，请按候选 fixture 核对并修。\n",
             report.changes(),
             report.unseen_codes(),
             report.uncovered.len()
         ));
-    } else {
-        out.push_str("结论：没有变化。\n");
+    }
+    if report.nothing_left() > 0 {
+        out.push_str(&format!(
+            "结论：{} 类样本补不上，巡检暂时看不见这些状态。按上面的“样本缺口”补样本，否则大麦在这些状态上改版不会被发现。\n",
+            report.nothing_left()
+        ));
+    }
+    if !report.expiring.is_empty() {
+        out.push_str(&format!(
+            "结论：{} 个样本快过期。按上面的“样本快过期”提前换掉，别等这一类没样本了。\n",
+            report.expiring.len()
+        ));
+    }
+    if report.events.iter().any(|e| e.failed.is_some()) {
+        out.push_str("结论：有样本读不了，见上面的“查不了”。\n");
     }
     out
 }
@@ -966,10 +1126,17 @@ pub fn issue_body(report: &Report) -> String {
         how.push_str("\n拿不到那台机器就自己重录（要先拿 damai-lock）：\n\n");
     }
     how.push_str("```sh\ntheflash inspect record <演出链接或ID> --as <名字> --sessions 1\n```\n");
+    let samples = if report.nothing_left() > 0 || !report.expiring.is_empty() {
+        "样本缺口和快过期的样本：找一场现在是这个状态的演出，把它的 itemId 写进样本文件，\
+         并加进 backend/src/inspect/samples.rs 的候选池（为什么要人来找：0014）。\n"
+    } else {
+        ""
+    };
     format!(
         "`theflash inspect` 在真实大麦上发现了变化。\n\n```\n{}```\n\n{how}\n\
          怎么处理：按 docs/subsystems/damai-inspect.md 用候选 fixture 复现，\
          先写一个会失败的测试，再改解析或状态映射；没见过的状态码要先在大麦页面上核对它显示的文字，再加进映射表。\n\n\
+         {samples}\n\
          这条是 `theflash inspect` 自动写的。\n",
         render(report)
     )
@@ -987,8 +1154,11 @@ pub fn issue_title(report: &Report) -> String {
     if failed > 0 {
         parts.push(format!("{failed} 场查不了"));
     }
-    if !report.uncovered.is_empty() {
-        parts.push(format!("{} 类没有样本", report.uncovered.len()));
+    if report.nothing_left() > 0 {
+        parts.push(format!("{} 类样本补不上", report.nothing_left()));
+    }
+    if !report.expiring.is_empty() {
+        parts.push(format!("{} 个样本快过期", report.expiring.len()));
     }
     format!("大麦改版巡检：{}", parts.join("，"))
 }

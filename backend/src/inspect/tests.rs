@@ -389,6 +389,8 @@ fn a_report_with_no_finding_says_so_and_one_with_a_finding_names_it() {
             candidates: Vec::new(),
         }],
         uncovered: Vec::new(),
+        expiring: Vec::new(),
+        samples_path: PathBuf::from("/tmp/inspect-samples.json"),
         notes: Vec::new(),
     };
     assert!(!clean.has_findings());
@@ -415,6 +417,79 @@ fn a_report_with_no_finding_says_so_and_one_with_a_finding_names_it() {
     assert!(issue_body(&found).contains("dataDefault.performBases"));
 }
 
+/// A situation with no candidate left is a finding on its own: the
+/// inspection has stopped checking that situation, which is what #39 was
+/// opened for.
+#[test]
+fn a_situation_nothing_covers_is_a_finding_and_a_budget_cut_is_not() {
+    let base = Report {
+        at: "2026-10-14 04:00（北京时间）".into(),
+        requests: 9,
+        events: Vec::new(),
+        uncovered: Vec::new(),
+        expiring: Vec::new(),
+        samples_path: PathBuf::from("/tmp/inspect-samples.json"),
+        notes: Vec::new(),
+    };
+
+    let mut out_of_budget = Report { ..base };
+    out_of_budget
+        .uncovered
+        .push((Category::SoldOut, Uncovered::OutOfBudget));
+    assert!(!out_of_budget.has_findings());
+    assert!(render(&out_of_budget).contains("这次没查已售罄"));
+
+    let mut nothing_left = out_of_budget;
+    nothing_left.uncovered.push((
+        Category::Calendar,
+        Uncovered::NothingLeft {
+            was: "1084537866279 不再是这个状态".into(),
+        },
+    ));
+    assert!(nothing_left.has_findings());
+    assert_eq!(nothing_left.nothing_left(), 1);
+    let text = render(&nothing_left);
+    assert!(text.contains("样本缺口：没有日历选日期的样本了"), "{text}");
+    assert!(
+        text.contains("1084537866279 不再是这个状态"),
+        "没说原来那一场怎么了：{text}"
+    );
+    assert!(
+        text.contains("/tmp/inspect-samples.json"),
+        "没说要改哪个文件：{text}"
+    );
+    assert!(issue_title(&nothing_left).contains("1 类样本补不上"));
+    assert!(issue_body(&nothing_left).contains("候选池"));
+}
+
+/// The notice that goes out before a sample stops covering its
+/// situation, which is the only warning anyone gets: replacements are
+/// found by hand (0014).
+#[test]
+fn a_sample_about_to_stop_covering_its_situation_is_a_finding() {
+    let mut report = Report {
+        at: "2026-10-14 04:00（北京时间）".into(),
+        requests: 9,
+        events: Vec::new(),
+        uncovered: Vec::new(),
+        expiring: Vec::new(),
+        samples_path: PathBuf::from("/tmp/inspect-samples.json"),
+        notes: Vec::new(),
+    };
+    report.expiring.push(Expiring {
+        item_id: 1092337348536,
+        category: Category::NotYetOnSale,
+        name: Some("甲".into()),
+        at: "2026-10-14 10:18（北京时间）".into(),
+    });
+    assert!(report.has_findings());
+    let text = render(&report);
+    assert!(text.contains("样本快过期：1092337348536 甲"), "{text}");
+    assert!(text.contains("2026-10-14 10:18（北京时间）"), "{text}");
+    assert!(text.contains("之后就不是未开售了"), "{text}");
+    assert!(issue_title(&report).contains("1 个样本快过期"));
+}
+
 #[test]
 fn findings_are_what_decides_whether_an_issue_is_opened() {
     struct Never;
@@ -434,6 +509,8 @@ fn findings_are_what_decides_whether_an_issue_is_opened() {
         requests: 1,
         events: Vec::new(),
         uncovered: Vec::new(),
+        expiring: Vec::new(),
+        samples_path: PathBuf::from("/tmp/inspect-samples.json"),
         notes: vec!["说明不算发现".into()],
     };
     assert_eq!(report_findings(&clean, &Never).unwrap(), None);
@@ -441,19 +518,21 @@ fn findings_are_what_decides_whether_an_issue_is_opened() {
     // A situation with no sample left is a finding of its own: nobody is
     // watching it until an agent hands it a new event.
     let lost = Report {
-        uncovered: vec![Uncovered {
-            category: Category::OnSale,
-            why: "已开售：1077137031347 不再是这个状态".into(),
-        }],
+        uncovered: vec![(
+            Category::OnSale,
+            Uncovered::NothingLeft {
+                was: "1077137031347 不再是这个状态".into(),
+            },
+        )],
         ..clean
     };
     assert!(lost.has_findings());
     assert!(
-        render(&lost).contains("缺样本：已开售"),
+        render(&lost).contains("样本缺口：没有已开售的样本了"),
         "{}",
         render(&lost)
     );
-    assert!(issue_title(&lost).contains("1 类没有样本"));
+    assert!(issue_title(&lost).contains("1 类样本补不上"));
 }
 
 /// Asking for requests closer together than the real site's floor is only
