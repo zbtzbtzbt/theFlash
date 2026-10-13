@@ -1,0 +1,102 @@
+[
+  {
+    "number": 38,
+    "title": "prompts: 判断 main 红不红只看 Test 工作流，被拒绝的 Release run 不算（#5）",
+    "body": "#5 的后续，只改 prompts，不改代码和 CI。\nAgent: CodeBuddy",
+    "labels": [
+      {
+        "name": "待审查"
+      }
+    ],
+    "head": {
+      "sha": "d8c0b7c1e8df0381712dc60eb1e83aa484f955bc",
+      "ref": "night/issue-5-2"
+    }
+  },
+  {
+    "number": 36,
+    "title": "tests, scripts: 凭据跨行或写成函数参数、fixture 和配置里的大麦域名、绕开 support 启动程序，守护测试都会报出来（#21）",
+    "body": "处理 #21 的三条和 #21 评论里补的两条（不自动关闭 #21，由验收者关）。只改测试、屏蔽清单和文档；不改程序访问大麦的行为，不改 CI 配置、依赖或网络地址（`scripts/damai-hosts.txt` 多了 5 个域名，CI 的 hosts 屏蔽会多写 5 行 `0.0.0.0`，只会少连，不会多连）。\nAgent: CodeBuddy",
+    "labels": [
+      {
+        "name": "待审查"
+      }
+    ],
+    "head": {
+      "sha": "812e0a123adfceb3b2efeeb4acc5b002a89589d9",
+      "ref": "night/issue-21"
+    }
+  },
+  {
+    "number": 35,
+    "title": "frontend tests: 四类界面回归会触发测试失败（#30）",
+    "body": "原来的“界面与 CLI 一致”测试只比较页面不显示的 `report`；Host 用例被 Origin 提前拦住；断开测试只看假 query 收到 AbortSignal。现在四类回归都会触发行为断言失败，界面行为不变。\nAgent: Codex",
+    "labels": [
+      {
+        "name": "待审查"
+      }
+    ],
+    "head": {
+      "sha": "e5b8cdc8b6ef807d7d2ba3718ef41ac2c4edb000",
+      "ref": "night/issue-30"
+    }
+  },
+  {
+    "number": 33,
+    "title": "claim: 一条命令就能看到谁在做哪个 issue、改哪些模块、过期了没有（#16）",
+    "body": "认领从一条散文评论变成机器能读的租约：谁在做、改哪些模块、什么时候过期（#16）。\n- 还活着的证据：`## 心跳` 评论、持有者签了 `Agent:` 的任何评论、推一次认领评论里写的分支。别的 agent 的评论不算，否则一条审查意见就能让挂掉的会话看起来还活着。30 分钟没动静算“该心跳了”，120 分钟算过期，任何 agent 都可以 `reclaim` 收回。\nAgent: Claude",
+    "labels": [
+      {
+        "name": "待审查"
+      }
+    ],
+    "head": {
+      "sha": "eca6af1f93332953506abee73e8274ea8da5bf1f",
+      "ref": "night/issue-16"
+    }
+  },
+  {
+    "number": 32,
+    "title": "watch: 开售和回流提醒可通过 ntfy 推到手机（#11）",
+    "body": "Refs #11。盯票的开售/回流提醒现在可经 ntfy 推到手机，手机沿用桌面标题、演出/场次/票档/状态和时间。没有配置时终端与桌面行为不变；推送失败只给固定打码提示，后续盯票继续。实现者 Codex（今晚第 5 线），0012 按 #20 分配。\nAgent: Codex",
+    "labels": [],
+    "head": {
+      "sha": "f5e49b99f6840d1cc194688aab8779103098ff9a",
+      "ref": "night/issue-11"
+    }
+  },
+  {
+    "number": 28,
+    "title": "damai: 任何一个进程触发风控，其他进程也停下，所有请求共用一个频率上限（#4）",
+    "body": "实现 #4：所有访问大麦的请求走同一层——进程内共用一个频率上限，任何进程触发风控，其他进程也停下。\nAgent: Claude",
+    "labels": [],
+    "head": {
+      "sha": "87cffc4025076620952dfa39279c7ba02793a1dd",
+      "ref": "night/issue-4"
+    }
+  },
+  {
+    "number": 24,
+    "title": "merge-gate: 合并只在 CI 绿、有独立审查记录、审查的就是这个提交时才发生（#15、#13）",
+    "body": "解决 #15，同时解决 #13。决定记录 [0007](https://github.com/zbtzbtzbt/theFlash/blob/night/issue-15/docs/decisions/0007-merge-gate.md)（#20 分配的编号）。\n拒绝合并的情况：PR 不是打开状态、草稿、带阻断标签（`要修改` / `不要合并` / `等 owner`）、正文没有 `Agent:` 标记、没有审查记录、记录缺字段、结论不是明确的“通过”、审查者就是实现者、记录的 SHA 和 head 对不上、审查之后又有新推送、CI 没跑完 / 少一个平台 / 必需的 job 不是 `success`、审查之后 main 动了（动了就拒，不比文件名）、和 main 冲突。\nAgent: Claude",
+    "labels": [
+      {
+        "name": "要修改"
+      }
+    ],
+    "head": {
+      "sha": "1295ff4ea539c20811b02d79e11c9c6048fe36f9",
+      "ref": "night/issue-15"
+    }
+  },
+  {
+    "number": 23,
+    "title": "validation: 定时验证由 launchd 独立运行并自动评论结果（#17）",
+    "body": "Refs #17（由独立 agent 审查，合并后再由独立验收者关闭）。\nAgent: Codex",
+    "labels": [],
+    "head": {
+      "sha": "07effce0267fe0ce375676dbcfa5585e41f86f7a",
+      "ref": "night/issue-17"
+    }
+  }
+]

@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# 调度程序：GitHub 上有事才启动一个全新的 agent 会话，处理完就退出。它自己
+# 不调用大模型。规则见 docs/subsystems/dispatch.md，为什么这样见
+# docs/decisions/0010-dispatcher.md。
+#
+#   scripts/dispatch example-config > ~/.config/theflash/dispatch.json
+#   scripts/dispatch plan                   现在该派什么活（什么都不启动）
+#   scripts/dispatch plan --json            同上，给别的脚本读
+#   scripts/dispatch tick                   派一轮
+#   scripts/dispatch install                登记成用户服务，常驻
+#   scripts/dispatch status                 在跑没跑、正在跑哪些会话
+#   scripts/dispatch uninstall              停掉并删掉服务
+#
+# 退出码：0 做了 / 可以做，1 拒绝或没有要派的活，2 用法或取数据出错。
+set -euo pipefail
+cd "$(dirname "$0")/../backend"
+# install 要把自己的绝对路径写进服务文件，所以装的是编译好的程序，而不是
+# `cargo run`：开机时 cargo 和工作目录都可能不在。
+if [ "${1:-}" = install ]; then
+    cargo build --quiet --bin dispatch
+    exec ./target/debug/dispatch "$@"
+fi
+# --quiet keeps cargo's progress out of the command's own output.
+exec cargo run --quiet --bin dispatch -- "$@"

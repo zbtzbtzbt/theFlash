@@ -1,0 +1,15 @@
+{
+  "total_count": 1,
+  "workflow_runs": [
+    {
+      "id": 38456076570,
+      "name": "Test",
+      "status": "completed",
+      "conclusion": "failure",
+      "head_branch": "night/issue-30",
+      "head_sha": "7e81e05ff966bd9e45ebbb662429c1338d855857",
+      "event": "pull_request",
+      "created_at": "2026-10-13T19:35:43Z"
+    }
+  ]
+}

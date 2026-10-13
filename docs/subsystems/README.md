@@ -26,6 +26,7 @@
 | 推 tag 发布 macOS 和 Linux 的程序 | [发布](release.md) |
 | Mac 上独立于终端的定时验证及 issue 摘要 | [验证任务](validation.md) |
 | 把盯票提醒推到手机 | [手机提醒（ntfy）](phone-push.md) |
+| 有事才启动一个全新 agent 会话 | [调度程序](dispatch.md) |
 
 ## 维护参考文档
 

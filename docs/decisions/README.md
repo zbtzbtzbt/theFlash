@@ -63,3 +63,6 @@ theFlash 没有人类架构师，架构由 agent 决定。每个会影响后续�
 | [0014](0014-inspection-sample-pool.md) | 巡检样本：不爬列表，靠候选池自愈，补不上就报警 | 采用 |
 | [0015](0015-generated-docs-indexes.md) | docs 的两张索引表由脚本从目录生成，并发 PR 不再碰同一行 | 采用 |
 <!-- docs-index:end -->
+| [0011](0011-damai-revision-inspection.md) | 改版巡检：声明程序依赖的字段路径，拿真实响应和它比 | 采用 |
+| [0012](0012-phone-push.md) | 可替换的盯票手机推送，先支持 ntfy | 采用 |
+| [0010](0010-dispatcher.md) | 有事才启动一个全新 agent 会话的常驻调度程序，混合部署 | 采用 |
