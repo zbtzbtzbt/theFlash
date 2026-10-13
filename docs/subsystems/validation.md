@@ -25,7 +25,7 @@ python3 scripts/validation.py uninstall <任务ID>
 
 `task.json` 是事实来源。`registered → starting → running → stopping → finished/cancelled`；启动意图先持久化，再启动子进程，防止启动与保存 PID 之间崩溃后重放；不能启动、创建防睡眠程序或写日志失败时，停止被测程序并报告 failed，监督者崩溃后恢复时 interrupted。取消在任务目录写标记，由监督者在下一轮处理：开始前取消不启动命令、不创建 caffeinate；运行时取消仅对自己的被测 PID 发 SIGINT。结束代码保留原值（负数表示信号）；到时正常响应 SIGINT 的 watch 通常退出 0，停止原因仍显示“达到最长运行时间”。忽略 SIGINT 的程序会留在 stopping，不能卸载活动任务。
 
-`output.log` 合并 stdout/stderr，每行 UTC 时间戳；超长行分段/截断，关键输出保留前 8 和后 12 行。已知敏感字段所在行省略，任意输出仍需调用方保证不带秘密。`runner.log` 用于解释器/launchd 启动诊断，不向 issue 上传原始诊断。`summary.md` 包含任务 ID、计划与实际起止时间、退出码、停止原因、关键输出、本机日志路径；并非把日志发布成公网文件。保存完成结果后调用 gh 的 `--body-file` 评论关联 issue。
+`output.log` 合并 stdout/stderr，每行 UTC 时间戳；超长行分段/截断，关键输出保留前 8 和后 12 行。已知敏感字段所在行省略，任意输出仍需调用方保证不带秘密。`runner.log` 用于解释器/launchd 启动诊断，不向 issue 上传原始诊断。`summary.md` 包含任务 ID、计划与实际起止时间、退出码、停止原因、关键输出、本机日志路径；并非把日志发布成公网文件。保存完成结果后调用 gh 的 `--body-file` 评论关联 issue。自动评论署名 `Agent: validation runner`，表示工具生成的结果，不作为登记者、实现者或验收者的身份声明。旧任务无需新增字段；已经登记的 runner 是固定副本，仍使用登记时的版本，新登记任务才包含此修复。
 
 评论失败最多三次、间隔一分钟，`delivery=pending`；`report` 仅补发结果。成功为 posted，重复调用不重复评论。网络在服务器接受评论后断开仍可能导致重试重复发送，任务 ID 可供识别；不承诺 exactly-once。运行器与 report/uninstall 共用文件锁，防止抢写结果。卸载要求已结束、评论成功且 runner 已释放锁，bootout 后删除 plist，保留本机证据。
 

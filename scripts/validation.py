@@ -57,7 +57,7 @@ def summary(task, job):
             f"- 日志位置（本机）：`{job / 'output.log'}`\n\n"
             f"关键输出（最多前 8 / 后 12 行；完整输出在本机日志）：\n"
             f"<pre>{html.escape(output).replace('@', '&#64;')}</pre>\n\n"
-            f"<!-- theflash-validation:{task['id']} -->\nAgent: Codex\n")
+            f"<!-- theflash-validation:{task['id']} -->\nAgent: validation runner\n")
 
 
 class System:

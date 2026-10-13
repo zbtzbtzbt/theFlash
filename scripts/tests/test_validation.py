@@ -161,8 +161,9 @@ class WorkerAcceptance(unittest.TestCase):
         text = fake.posts[0][1]
         for expected in ['计划开始：', '实际开始：', '结束：', '退出码：7',
                          'watch ready', 'all normal', str(self.job / 'output.log'),
-                         'Agent: Codex']:
+                         'Agent: validation runner']:
             self.assertIn(expected, text)
+        self.assertNotIn('Agent: Codex', text)
         self.assertTrue(all(re.match(r'^\[\d{4}-', line) for line in
                             (self.job / 'output.log').read_text().splitlines()))
 
