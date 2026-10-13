@@ -349,11 +349,14 @@ fn first_line(stdout: &str, stderr: &str) -> String {
 }
 
 /// Stops a session's whole process group, so the tools it started stop
-/// too. `kill -TERM -<pid>` works the same on macOS and Linux, and the
-/// dispatcher gave every session its own group.
+/// too. The dispatcher gave every session its own group, and the group
+/// is `-<pid>`. The `--` is what makes that portable: Linux's `kill`
+/// (procps) reads `-1234` as options and refuses, macOS's takes it as a
+/// pid either way, so without `--` a timed-out session on Linux is
+/// forgotten but keeps running.
 fn stop(pid: u32) {
     let _ = Command::new(super::state::kill_bin())
-        .args(["-TERM", &format!("-{pid}")])
+        .args(["-TERM", "--", &format!("-{pid}")])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();

@@ -89,7 +89,7 @@ pub fn unit(kind: Kind, program: &Path, config_path: &Path, logs: &Path) -> Stri
         ),
         Kind::Systemd => format!(
             "[Unit]\n\
-             Description=theFlash dispatcher: starts one fresh agent session per piece of work\n\
+             Description={LABEL}: theFlash 调度程序，有事才启动一个全新 agent 会话\n\
              After=network-online.target\n\n\
              [Service]\n\
              ExecStart={program} run --config {config_path}\n\
