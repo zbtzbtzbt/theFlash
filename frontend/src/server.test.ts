@@ -34,7 +34,7 @@ function request(base: string, input = "1086791513717", extra: Record<string, st
   });
 }
 it.each(["1086791513717", "1092337348536", "1077137031347"])(
-  "browser and CLI agree for real fixture %s",
+  "event-json report preserves CLI text for real fixture %s",
   async (id) => {
     const { base } = await ui();
     const response = await request(base, id);
@@ -66,7 +66,12 @@ it("blocks foreign origins, DNS rebinding hosts, absent origin and simple cross-
   const { base } = await ui();
   for (const headers of [
     { Origin: "https://example.com" },
-    { Host: "evil.example" },
+    { Host: "evil.example", Origin: "http://evil.example" },
+    {
+      Host: `evil.example:${new URL(base).port}`,
+      Origin: `http://evil.example:${new URL(base).port}`,
+    },
+    { Host: "evil.example", Origin: base },
     { Origin: "" },
     { "Content-Type": "text/plain" },
     { "Sec-Fetch-Site": "cross-site" },

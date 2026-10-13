@@ -1,4 +1,7 @@
-import { Window } from "happy-dom";
+import { execFile } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { promisify } from "node:util";
+import { type Element, Window } from "happy-dom";
 import { afterEach, expect, it, vi } from "vitest";
 import { mount } from "./app.js";
 
@@ -32,6 +35,15 @@ import { loadEvent } from "./query.js";
 import { close, offline, replay } from "./test-support.js";
 
 const views: EventView[] = [];
+const reports: string[] = [];
+async function cli(id: string): Promise<string> {
+  const { stdout } = await promisify(execFile)(
+    new URL("../../backend/target/debug/theflash", import.meta.url).pathname,
+    ["event", id],
+    { env: process.env },
+  );
+  return stdout;
+}
 let guard: Awaited<ReturnType<typeof offline>>;
 let upstream: Awaited<ReturnType<typeof replay>>;
 let missingUpstream: Awaited<ReturnType<typeof replay>>;
@@ -47,12 +59,14 @@ beforeAll(async () => {
     "1084537866279",
   ]) {
     views.push(await loadEvent(id, new AbortController().signal));
+    reports.push(await cli(id));
   }
   missingUpstream = await replay(false, true);
   process.env.THEFLASH_DAMAI_BASE_URL = missingUpstream.base;
   views.push(await loadEvent("1077137031347", new AbortController().signal));
+  reports.push(await cli("1077137031347"));
   process.env.THEFLASH_DAMAI_BASE_URL = upstream.base;
-}, 15000);
+}, 30000);
 afterAll(async () => {
   await close(upstream.server);
   await close(missingUpstream.server);
@@ -75,39 +89,102 @@ function page(fetcher: typeof fetch) {
   };
   return { w, root, submit };
 }
-it("renders every field, tier and state from real event responses", () => {
-  for (const view of views) {
-    const w = new Window();
-    windows.push(w);
-    const root = w.document.createElement("main");
-    renderEvent(root as unknown as HTMLElement, view);
-    const text = root.textContent;
-    for (const value of [
-      view.name,
-      view.city,
-      view.venue,
-      view.sale.label,
-      view.sellStart,
-      view.notice,
-    ]) {
-      if (value !== null) expect(text).toContain(value);
-    }
-    expect(root.querySelectorAll(".session")).toHaveLength(view.sessions.length);
-    expect(root.querySelectorAll(".tier")).toHaveLength(
-      view.sessions.flatMap((s) => s.tiers).length,
+// Read the rendered nodes, never EventView.report or the fields used to render them.
+// The independent `event` process supplies both the text and badge semantics.
+it.each([
+  { index: 0, name: "on sale" },
+  { index: 1, name: "not yet on sale" },
+  { index: 2, name: "sold out" },
+  { index: 3, name: "unsupported PC channel" },
+  { index: 4, name: "18 calendar sessions" },
+  { index: 5, name: "missing skuList" },
+])("rendered DOM matches independent CLI text and status styles: $name", ({ index }) => {
+  const view = views[index];
+  const report = reports[index];
+  if (!view || !report) throw new Error("missing real fixture");
+  const w = new Window();
+  windows.push(w);
+  const root = w.document.createElement("main");
+  w.document.body.append(root);
+  renderEvent(root as unknown as HTMLElement, view);
+  const text = (parent: Element, selector: string): string => {
+    const node = parent.querySelector(selector);
+    expect(node, `missing visible field ${selector}`).not.toBeNull();
+    return node?.textContent ?? "";
+  };
+  const lines = [`演出：${text(root, ".event-name")}`];
+  for (const pair of root.querySelectorAll(".meta-pair")) {
+    const label = text(pair, "dt");
+    if (label !== "开售时间") lines.push(`${label}：${text(pair, "dd")}`);
+  }
+  lines.push(`售卖状态：${text(root, ".event-top .badge")}`);
+  const start = Array.from(root.querySelectorAll(".meta-pair")).find(
+    (pair) => text(pair, "dt") === "开售时间",
+  );
+  if (start) lines.push(`开售时间：${text(start, "dd")}`);
+  for (const notice of root.querySelectorAll(":scope > .notice")) {
+    lines.push(
+      "",
+      `${notice.textContent?.startsWith("大麦电脑版") ? "场次和票档" : "场次"}：${notice.textContent}`,
     );
-    for (const session of view.sessions) {
-      expect(text).toContain(session.name);
-      if (session.error) expect(text).toContain(session.error);
-      if (session.notice) expect(text).toContain(session.notice);
-      for (const tier of session.tiers) {
-        expect(text).toContain(tier.name);
-        expect(text).toContain(tier.price);
-        expect(text).toContain(tier.status.label);
-        expect(root.querySelector(`.badge.${tier.status.kind}`)).not.toBeNull();
-      }
+  }
+  for (const session of root.querySelectorAll(".session")) {
+    lines.push("", `场次：${text(session, "h3")}`);
+    for (const notice of session.querySelectorAll(".notice")) lines.push(`  ${notice.textContent}`);
+    for (const tier of session.querySelectorAll(".tier")) {
+      lines.push(
+        `  ${text(tier, ".tier-name")} · ${text(tier, ".price")} · ${text(tier, ".badge")}`,
+      );
     }
   }
+  expect(
+    `${lines.join("\n")}\n`,
+    "visible DOM must match the independent CLI, including order and omissions",
+  ).toBe(report);
+  const kind = (label: string): string => {
+    if (label === "在售" || label === "可售") return "available";
+    if (label === "缺货") return "out-of-stock";
+    if (label === "未开售") return "not-yet-on-sale";
+    if (label === "已售罄") return "sold-out";
+    return "unknown";
+  };
+  const cliStatuses = report.split("\n").flatMap((line) => {
+    if (line.startsWith("售卖状态：")) return [line.slice("售卖状态：".length)];
+    if (line.startsWith("  ") && line.includes(" · ")) return [line.split(" · ").at(-1) ?? ""];
+    return [];
+  });
+  const badges = Array.from(root.querySelectorAll(".badge"));
+  expect(badges).toHaveLength(cliStatuses.length);
+  for (const [i, badge] of badges.entries()) {
+    const label = cliStatuses[i] ?? "";
+    expect(badge.textContent).toBe(label);
+    expect(
+      Array.from(badge.classList).filter((value) => value !== "badge"),
+      `wrong visible status style for ${label}`,
+    ).toEqual([kind(label)]);
+  }
+});
+
+it("the five status styles have distinct foreground and background colors", () => {
+  const w = new Window();
+  windows.push(w);
+  const style = w.document.createElement("style");
+  style.textContent = readFileSync(new URL("../public/style.css", import.meta.url), "utf8");
+  w.document.head.append(style);
+  const foregrounds: string[] = [];
+  const backgrounds: string[] = [];
+  for (const kind of ["available", "out-of-stock", "not-yet-on-sale", "sold-out", "unknown"]) {
+    const badge = w.document.createElement("span");
+    badge.className = `badge ${kind}`;
+    w.document.body.append(badge);
+    const computed = w.getComputedStyle(badge);
+    foregrounds.push(computed.color);
+    backgrounds.push(computed.backgroundColor);
+    expect(computed.color, kind).not.toBe("");
+    expect(computed.backgroundColor, kind).not.toBe("rgba(0, 0, 0, 0)");
+  }
+  expect(new Set(foregrounds).size).toBe(5);
+  expect(new Set(backgrounds).size).toBe(5);
 });
 it("keeps loading visible and sends only one request on repeated submits", async () => {
   let finish: (response: Response) => void = () => {};

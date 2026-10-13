@@ -21,9 +21,10 @@ const routes: Record<string, string> = {
 export function replay(
   risk = false,
   missingTiers = false,
+  beforeReply: (url: URL) => Promise<void> = async () => {},
 ): Promise<{ server: Server; base: string; hits: string[] }> {
   const hits: string[] = [];
-  const server = createServer((req, res) => {
+  const server = createServer(async (req, res) => {
     hits.push(req.url ?? "");
     const url = new URL(req.url ?? "/", "http://127.0.0.1");
     const id = url.searchParams.get(url.pathname === "/item.htm" ? "id" : "dataId");
@@ -41,6 +42,7 @@ export function replay(
       delete data.perform.skuList;
       body = `${body.slice(0, open + 1)}${JSON.stringify(data)}${body.slice(end)}`;
     }
+    await beforeReply(url);
     res.end(body);
   });
   return new Promise((resolve) =>
