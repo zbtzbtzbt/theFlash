@@ -1,5 +1,7 @@
 # 盯票：开售提醒和回流提醒
 
+> 按大麦时钟提醒开售、轮询回流
+
 `theflash watch <链接或ID> [--session 场次] [--tier 票档] [--interval 秒] [--no-system-notify]` 盯住一场演出：未开售时按大麦的时钟倒计时，开售那一刻提醒，再确认是否真的能买；之后按间隔查询，盯的票档从没票变成可售时提醒。只读，不登录，不下单。为什么这样设计见 [0002](../decisions/0002-watch-timing-and-polling.md)；查询本身见 [damai-event.md](damai-event.md)。
 
 ## 运行路径

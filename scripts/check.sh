@@ -8,6 +8,12 @@ cd "$(dirname "$0")/.."
 echo "== validation scheduler (Python, offline)"
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests -v
 
+# The docs index tables are generated from the files they list, so parallel
+# pull requests never edit the same row (#45). Catch the change that adds a
+# record without regenerating them.
+echo "== docs indexes (generated from docs/)"
+python3 scripts/docs_index.py --check
+
 echo "== backend (Rust)"
 (
   cd backend
