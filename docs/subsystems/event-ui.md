@@ -38,4 +38,5 @@
 - [server.test.ts](../../frontend/src/server.test.ts)：`report` 的 JSON/CLI 文本契约、本机绑定、Host/Origin 防护（DNS rebinding 请求的 Host 与 Origin 都是同一个外部域名，包含当前端口及省略端口两种形状）、断网、风控无重试、跨标签页并发及服务发出取消信号。
 - [query.test.ts](../../frontend/src/query.test.ts)：直接 abort `loadEvent` 和通过真实 HTTP 客户端断开两条路径都启动真实 Rust 子进程。fixture 暂停首个票档响应，在响应仍被暂停时等待操作系统确认子进程退出，再解除暂停并确认没有后续票档请求；仅 Promise 拒绝或假 query 收到 AbortSignal 不算取消成功。失败路径也清理测试自己启动的进程。
 - [test-support.ts](../../frontend/src/test-support.ts) 只回放 [原始响应](../../backend/testdata/damai/)，每个服务器随测试关闭，不访问真实大麦；Node 测试也使用 loopback 陷阱代理，忘记指定 fixture 上游时会报“测试试图访问真实大麦”，不发真实请求。
+- [offline.test.ts](../../frontend/src/offline.test.ts)：[vitest.config.ts](../../frontend/vitest.config.ts) 在每次运行的测试文件启动前接上 test-support 的陷阱，测试文件不调用 `offline()` 也在陷阱后面。探针在单独的一次运行里，不调用 `offline()`，让 `theflash`、Node 的 `fetch` 和 `node:https` 各向非本机地址（`0.0.0.0`，陷阱坏了也出不了本机）发一次请求，断言那次运行失败并列出这三个请求（#34）。
 - 真实环境和浏览器自检证据见 [#3 自检记录](../validation/issue-3.md)。独立验收由其他 agent 完成，不能用实现者自检替代。

@@ -2,7 +2,7 @@
 
 - 状态：采用
 - 日期：2026-10-14
-- 相关：#7，[code-standards](../code-standards.md#owner-的决定)
+- 相关：#7，#34，[code-standards](../code-standards.md#owner-的决定)
 
 ## 背景
 
@@ -22,8 +22,8 @@ owner 定了两条安全规则：自动化测试和 CI 绝不访问真实的大�
 
 四层，各管一件事：
 
-1. **陷阱代理**（[`tests/support/mod.rs`](../../backend/tests/support/mod.rs) 的 `offline`）：测试启动 `theflash` 时，代理指向测试进程里的一个本地监听，`NO_PROXY` 只放行 `127.0.0.1`、`localhost`、`::1`。陷阱收到任何请求就打印“测试试图访问真实大麦”和请求内容，并以 101 结束整个测试进程（只让一个线程 panic，触发它的测试可能仍然通过）。[`tests/offline_guard.rs`](../../backend/tests/offline_guard.rs) 用一个忘了设假服务器的探针证明这一点。
-2. **`make check` 里的死代理**（[`scripts/check.sh`](../../scripts/check.sh)）：`cargo test` 整体在代理指向没人监听的 `127.0.0.1:9` 下运行，没有经过 `support::offline` 的进程发出的非本机请求也会失败。
+1. **陷阱代理**（[`tests/support/mod.rs`](../../backend/tests/support/mod.rs) 的 `offline`）：测试启动 `theflash` 时，代理指向测试进程里的一个本地监听，`NO_PROXY` 只放行 `127.0.0.1`、`localhost`、`::1`。陷阱收到任何请求就打印“测试试图访问真实大麦”和请求内容，并以 101 结束整个测试进程（只让一个线程 panic，触发它的测试可能仍然通过）。[`tests/offline_guard.rs`](../../backend/tests/offline_guard.rs) 用一个忘了设假服务器的探针证明这一点。前端的陷阱在 [`frontend/src/test-support.ts`](../../frontend/src/test-support.ts)，由 [`vitest.config.ts`](../../frontend/vitest.config.ts) 在每次运行的测试文件启动之前接上，测试文件不用自己调用 `offline()`：测试启动的 `theflash`，以及 Node 自己的 `fetch` 和 `http`（靠 `NODE_USE_ENV_PROXY`），非本机请求都进陷阱；陷阱收到过请求，整次运行失败并列出请求了什么。[`offline.test.ts`](../../frontend/src/offline.test.ts) 的探针证明这一点（#34）。
+2. **`make check` 里的死代理**（[`scripts/check.sh`](../../scripts/check.sh)）：开头的依赖步骤（`cargo fetch`、`npm ci`）是脚本里唯一能联网的一步，之后的每一步都在代理指向没人监听的 `127.0.0.1:9` 下运行，`NODE_USE_ENV_PROXY=1` 让 Node 也用它。不管测试是哪种语言写的，没有经过陷阱的进程发出的非本机请求都会失败；以后加在后面的测试组不用做什么就被覆盖（#34）。
 3. **CI 里把大麦域名解析到 `0.0.0.0`**（[`scripts/block-damai-hosts.sh`](../../scripts/block-damai-hosts.sh)，在 `Check` 之前跑，Linux 和 macOS 都做）：绕过代理环境变量的客户端也连不上。域名清单只有一份：[`scripts/damai-hosts.txt`](../../scripts/damai-hosts.txt)。
 4. **守护测试**（[`tests/repo_guard.rs`](../../backend/tests/repo_guard.rs)）。读的是 git 跟踪的文件加上还没 `git add`、也没被忽略的文件，提交前跑 `make check` 和提交后一样算数（#21）。
    - Markdown 以外的文本文件里出现的每个大麦域名必须在清单里，否则失败：代码、配置、脚本都算，假服务器回放给程序的 fixture 也算，因为回放的页面里的域名就是程序可能被带去请求的地址。清单里不含子域名的父域名，要逐个列出。
@@ -36,10 +36,12 @@ owner 定了两条安全规则：自动化测试和 CI 绝不访问真实的大�
 - 登录相关的 fixture 一旦带了真实 cookie 或证件号，测试就红。白名单按“文件 + 规则”放行，范围比单行大，所以只给确认安全的文件用，不为真实数据开口子。
 - 截图里的文字扫描不到，仍然靠 [code-standards](../code-standards.md) 里的人工规则（agent 自己检查，出现凭据整张删掉重截）。
 - 陷阱只拦走代理环境变量的客户端。以后如果引入忽略环境变量的 HTTP 客户端（例如 `no_proxy()` 的 reqwest），第 3 层的 hosts 屏蔽仍然在 CI 里兜底，但本地失去保护；到那时应换成网络沙箱，并取代这条记录。
+- Node 只在进程启动时读 `NODE_USE_ENV_PROXY`，所以前端陷阱管的是它接上之后启动的进程（vitest 的 worker 和测试启动的程序），不管 vitest 主进程自己。测试里自己建的 `http.Agent`、直接开的 socket 不读代理变量，第 1、2 层都拦不住，只剩 CI 的第 3 层。
+- 前端没有和 `CARGO_BIN_EXE` 守护对应的文本检查：陷阱由配置接上，不靠每个测试文件记得调用，配置被去掉或不再生效时探针失败。另起一套 vitest 配置跑前端测试时，那套配置也要接上 `test-support.ts`。
+- Python 测试（#17）和以后别的语言的测试只有第 2 层：在 `make check` 里，非本机请求连到死代理就失败，但失败信息不说原因；单独运行时没有保护。要联网的新步骤（例如装依赖）放进依赖步骤，放在它前面的步骤不在死代理下。
 - 第 3 层改的是整台机器的解析，所以只在用完即弃的 runner 上做：`block-damai-hosts.sh` 只在 `RUNNER_ENVIRONMENT=github-hosted` 时改 `/etc/hosts`，在别的机器上拒绝，免得同一台机器上的浏览器验证和 `theflash watch` 也连不上真实大麦（#22）。不用 `CI=true` 判断，因为 agent 常为了关掉交互提示自己设它。脚本写的每一行都带标记，[`scripts/unblock-damai-hosts.sh`](../../scripts/unblock-damai-hosts.sh) 只删带标记的行，以及加标记之前（e860486）写的 `0.0.0.0 <清单里的域名>` 行；CI 每次都在真实 `/etc/hosts` 上屏蔽再撤销，要求文件恢复原样。以后要在长期使用的机器（例如自托管 runner）上也做这层屏蔽，应换成只影响测试进程的网络沙箱，并取代这条记录。
 - 身份证号和手机号的检查按 ASCII 数字整段匹配，被字母或数字相连的长串不算；带空格、横线分隔的写法扫不到。
 - 第 4 层读的是文本，不理解代码，所以下面这些写法仍然查不到（#21 补上了跨行、函数参数、导出对象和 `cookies.txt`）：
   - 凭据：值不是字面量的（变量、函数调用、`format!` 拼出来的），这时仓库里本来就没有值；名字和值作为相邻参数时，只认带数字或符号的字面值，全是字母的值会被当成名字列表里的下一项放过；值包在另一个调用里的（`HeaderValue::from_static("Bearer …")`）；`COOKIE_NAMES` 以外的 cookie（例如风控用的 `x5sec`），除非它写在一个 Cookie 请求头里。
   - 域名：拼出来的（`"damai" + ".cn"`）和只在 Markdown 里出现的。
   - 启动二进制：只认 `CARGO_BIN_EXE` 这个名字，`cargo run`、写死 `target/debug/theflash`、`assert_cmd` 这类启动方式查不到。这时第 2 层的死代理仍然让请求失败，只是失败信息不说原因。
-  - 第 2 层和第 4 层只管 Rust 测试：前端测试（vitest）靠自己调用 `frontend/src/test-support.ts` 的 `offline()`，没有死代理兜底，也没有守护检查是否调用了；以后加别的语言的测试也一样（#34）。
