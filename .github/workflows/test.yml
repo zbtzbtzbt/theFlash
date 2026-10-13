@@ -44,6 +44,15 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
+      # Automated tests and CI never touch the real damai.cn (owner's rule,
+      # issue #7). Resolve every damai host to 0.0.0.0 before anything runs,
+      # so a test that forgets its local mock server fails. Needs sudo to
+      # write /etc/hosts, which both runners have without a secret.
+      - name: Block the real damai.cn
+        shell: bash
+        timeout-minutes: 2
+        run: bash scripts/block-damai-hosts.sh
+
       - name: Check
         shell: bash
         run: bash scripts/check.sh

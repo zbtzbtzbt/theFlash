@@ -24,6 +24,8 @@
 | 测试检查行为，不检查实现。 | 断言用户或调用方需要的东西。格式调整和内部重构不应该让测试失败，除非逐字节一致本身就是需求。 |
 | main 上失败的测试是当下要修的 bug。 | “main 上也一样失败”不是基线，“全量跑失败、单独跑通过”也不是。要么在原因处修掉，要么开 issue 写明原因，并在单独的 commit 里完成，然后才能在它上面继续发版。 |
 | 测试不碰真实机器。 | 测试在临时目录下跑，不读写真实配置，不访问真实的大麦网或其他第三方服务，用本地 mock 回放 `testdata/` 里保存的真实响应。 |
+| 测试启动 `theflash` 只走 `support::offline`，新的大麦域名先进屏蔽清单。 | 没经过 `support::offline` 的测试，或源码里出现 [`scripts/damai-hosts.txt`](../scripts/damai-hosts.txt) 里没有的大麦域名，守护测试会失败。机制和理由见 [0003](decisions/0003-tests-cannot-reach-damai.md)。 |
+| 仓库里没有凭据和个人信息。 | [`repo_guard.rs`](../backend/tests/repo_guard.rs) 扫描所有被跟踪的文本文件：登录 cookie 带值、Cookie 和 Authorization 请求头、合法的身份证号和手机号。白名单每项写原因。**截图里的文字扫描不到**：截图仍靠人工规则，保存前自己看一遍，出现凭据就整张删掉重截。 |
 | 测试启动的东西随测试结束。 | 测试启动的进程、协程、定时任务，在测试返回前停止或等待完成，否则会写进下一个测试的目录，或者空转好几天。 |
 | 时序测试两边都留余量。 | 不用负载高的机器可能超过的墙钟时间做断言。复现时序失败靠注入延迟，不靠反复重跑等它失败。 |
 | 以某个保证命名的测试，在保证被破坏时必须失败。 | 合并前手动破坏这个保证，看测试变红。 |
@@ -68,6 +70,7 @@
 - 每次 push main 和每个 PR 都跑 `scripts/check.sh`（和 `make check` 是同一个脚本），覆盖 Linux 和 macOS（项目不支持 Windows），`fail-fast: false`。
 - main 上的 run 不被下一次 push 取消（发版要等一个跑完的绿 run）。PR 上新 push 可以取消旧 run。
 - 每个容易卡住的步骤（装依赖、下载）设置超时。
+- 跑 `scripts/check.sh` 之前，先用 `scripts/block-damai-hosts.sh` 把大麦域名解析到 `0.0.0.0`（Linux 和 macOS 都做），让漏掉假服务器的测试失败，而不是访问真实大麦。
 - 规则一旦能机械判断（格式、禁用某个 API、必须有某段注释），就写成 CI 步骤或守护测试，并在步骤旁边的注释里写明是哪次事故促成的。
 
 ## Owner 的决定
@@ -77,8 +80,8 @@
 架构和技术决定不在这里，它们由 agent 做出并记录在 [docs/decisions/](decisions/README.md)。
 
 - 绝不用真实账号完成下单或支付。真实环境的验证停在“提交订单”之前，除非 owner 在 issue 里明确授权某一次。
-- 凭据（账号密码、cookie、token）不进仓库、日志、commit message、截图和 fixture。
-- 自动化测试和 CI 绝不访问真实的大麦网。
+- 凭据（账号密码、cookie、token）不进仓库、日志、commit message、截图和 fixture。（仓库里的文本由 `repo_guard.rs` 守护；截图、日志和 commit message 扫描不到，靠人工规则。）
+- 自动化测试和 CI 绝不访问真实的大麦网。（守护：[0003](decisions/0003-tests-cannot-reach-damai.md)。）
 - 账号出现风控提示（验证码、限流、封禁）时停下来报告 owner，由 owner 决定下一步。
 - 人不验收。每个 issue 由实现者之外的 agent 按 [prompts/acceptance.md](../prompts/acceptance.md) 独立验收，通过后才关闭；实现者不关闭自己的 issue。
 - 抢票是辅助式的（#6）：程序负责精确的开售和回流提醒、提前登录并核对观演人和地址、开售时在用户的浏览器里打开已经选好场次和票档的页面；点“提交订单”和处理验证码由人完成。程序不提交订单，不绕过任何风控。

@@ -1,0 +1,11 @@
+# Confirmed false positives of backend/tests/repo_guard.rs, one per line:
+#
+#   path | rule | reason
+#
+# path is relative to the repository root; rule is cookie, header, id-card or
+# phone. The entry lets that rule through in that whole file, so the reason
+# must say why nothing real can be there. An entry that matches nothing fails
+# the test: remove it. Never allowlist a real credential or a real person's
+# data: delete it from the repository.
+
+backend/tests/repo_guard.rs | header | the scanner's own samples of the header names it looks for, such as a Cookie line; none is a real header

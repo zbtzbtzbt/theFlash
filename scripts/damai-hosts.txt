@@ -1,0 +1,12 @@
+# Every damai.cn host. CI resolves each one to an address nothing listens on
+# (scripts/block-damai-hosts.sh), so a test that reaches for the real damai.cn
+# fails instead of sending a request. backend/tests/repo_guard.rs fails when
+# source code names a damai host that is not in this list, so add a host here
+# in the same change that starts using it. One host per line; # starts a
+# comment. Subdomains are not covered by their parent: list each one.
+damai.cn
+www.damai.cn
+detail.damai.cn
+m.damai.cn
+search.damai.cn
+mtop.damai.cn
