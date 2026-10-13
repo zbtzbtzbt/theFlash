@@ -20,7 +20,7 @@ use chrono::{DateTime, Utc};
 /// joined when the value is dropped.
 pub struct MockDamai {
     addr: SocketAddr,
-    hits: Arc<Mutex<Vec<String>>>,
+    hits: Arc<Mutex<Vec<(String, Instant)>>>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
@@ -70,9 +70,19 @@ impl MockDamai {
         format!("http://{}", self.addr)
     }
 
+    /// Server arrival times, used to check actual GET/HEAD pacing.
+    pub fn timed_hits(&self) -> Vec<(String, Instant)> {
+        self.hits.lock().unwrap().clone()
+    }
+
     /// "METHOD target" of every request so far.
     pub fn hits(&self) -> Vec<String> {
-        self.hits.lock().unwrap().clone()
+        self.hits
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(request, _)| request.clone())
+            .collect()
     }
 }
 
@@ -89,7 +99,7 @@ impl Drop for MockDamai {
 fn answer(
     mut stream: TcpStream,
     routes: &[(String, String)],
-    hits: &Mutex<Vec<String>>,
+    hits: &Mutex<Vec<(String, Instant)>>,
     clock: Option<(Instant, i64)>,
 ) {
     let mut reader = BufReader::new(stream.try_clone().unwrap());
@@ -109,7 +119,9 @@ fn answer(
     let mut parts = request_line.split_whitespace();
     let method = parts.next().unwrap_or("").to_string();
     let target = parts.next().unwrap_or("").to_string();
-    hits.lock().unwrap().push(format!("{method} {target}"));
+    hits.lock()
+        .unwrap()
+        .push((format!("{method} {target}"), Instant::now()));
     let (status, body) = match routes.iter().find(|(m, _)| target.contains(m.as_str())) {
         Some((_, body)) => ("200 OK", body.as_str()),
         None => ("404 Not Found", "not found"),

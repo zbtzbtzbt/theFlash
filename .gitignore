@@ -6,3 +6,5 @@ dist/
 .env.*
 
 /frontend/dist/
+__pycache__/
+/.validation-demo/

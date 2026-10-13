@@ -5,6 +5,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+echo "== validation scheduler (Python, offline)"
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests -v
+
 echo "== backend (Rust)"
 (
   cd backend

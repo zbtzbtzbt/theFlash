@@ -100,3 +100,7 @@ make fmt     # 自动格式化
 ```
 
 从源码构建命令行程序：`cd backend && cargo build --release`，程序在 `backend/target/release/theflash`。
+
+## 定时和长时间验证（macOS）
+
+`python3 scripts/validation.py register --at now --duration 600 --issue 17 -- /absolute/path/theflash watch <ID> --interval 60 --no-system-notify` 登记一个独立于终端的 launchd 任务，结束后自动评论 issue。用 `list` 查看、`cancel <任务ID>` 请求 SIGINT 停止、`uninstall <任务ID>` 卸载已完成项。需要 Python 3 和已登录的 gh；睡眠中的 Mac 不会由 launchd 唤醒。完整操作、结果补发及安全边界见 [验证任务](docs/subsystems/validation.md)。

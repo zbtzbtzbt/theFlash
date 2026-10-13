@@ -1,3 +1,4 @@
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use chrono::DateTime;
@@ -29,11 +30,20 @@ pub struct ClockReading {
 pub struct Client {
     http: reqwest::Client,
     base: String,
+    request_gap: Duration,
+    next_request: Mutex<Option<Instant>>,
 }
 
 impl Client {
     /// `base` is DEFAULT_BASE_URL outside tests.
     pub fn new(base: impl Into<String>) -> Result<Self, Error> {
+        // Opt-in conservative pacing for unattended validation (#17).
+        // The default and cross-process policy remain owned by #4.
+        let request_gap = match std::env::var("THEFLASH_REQUEST_GAP_MS") {
+            Ok(value) => validation_gap(&value)?,
+            Err(std::env::VarError::NotPresent) => Duration::ZERO,
+            Err(_) => return Err(Error::InvalidInput("THEFLASH_REQUEST_GAP_MS 无效".into())),
+        };
         let http = reqwest::Client::builder()
             .user_agent(USER_AGENT)
             .connect_timeout(Duration::from_secs(10))
@@ -46,6 +56,8 @@ impl Client {
         Ok(Client {
             http,
             base: base.into().trim_end_matches('/').to_string(),
+            request_gap,
+            next_request: Mutex::new(None),
         })
     }
 
@@ -136,6 +148,7 @@ impl Client {
             url: url.clone(),
             reason: chain(&e),
         };
+        self.pace().await;
         let sent = Instant::now();
         let resp = self.http.head(&url).send().await.map_err(network)?;
         let received = Instant::now();
@@ -170,6 +183,7 @@ impl Client {
     }
 
     async fn get(&self, url: &str, referer: Option<&str>) -> Result<String, Error> {
+        self.pace().await;
         let mut req = self.http.get(url);
         if let Some(r) = referer {
             req = req.header(reqwest::header::REFERER, r);
@@ -192,6 +206,37 @@ impl Client {
         }
         Ok(body)
     }
+
+    async fn pace(&self) {
+        if self.request_gap.is_zero() {
+            return;
+        }
+        let delay = reserve_request(
+            &mut self.next_request.lock().unwrap_or_else(|p| p.into_inner()),
+            Instant::now(),
+            self.request_gap,
+        );
+        tokio::time::sleep(delay).await;
+    }
+}
+
+fn reserve_request(next: &mut Option<Instant>, now: Instant, gap: Duration) -> Duration {
+    let target = next.unwrap_or(now).max(now);
+    *next = target.checked_add(gap);
+    target.duration_since(now)
+}
+
+fn validation_gap(value: &str) -> Result<Duration, Error> {
+    // Reject unrepresentable/accidentally enormous deadlines instead of
+    // overflowing the reservation and silently losing the requested pacing.
+    value
+        .parse::<u64>()
+        .ok()
+        .filter(|ms| *ms <= 86_400_000)
+        .map(Duration::from_millis)
+        .ok_or_else(|| {
+            Error::InvalidInput("THEFLASH_REQUEST_GAP_MS 必须是 0 到 86400000 毫秒".into())
+        })
 }
 
 /// damai.cn's slider challenge, served in place of the page asked for.
@@ -259,6 +304,33 @@ pub fn parse_item_id(input: &str) -> Result<u64, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validation_requests_reserve_two_second_slots_with_injected_time() {
+        let now = Instant::now();
+        let gap = Duration::from_secs(2);
+        let mut next = None;
+        assert_eq!(reserve_request(&mut next, now, gap), Duration::ZERO);
+        assert_eq!(reserve_request(&mut next, now, gap), gap);
+        assert_eq!(reserve_request(&mut next, now, gap), gap * 2);
+        assert_eq!(
+            reserve_request(&mut next, now + gap * 10, gap),
+            Duration::ZERO
+        );
+    }
+
+    #[test]
+    fn validation_gap_rejects_invalid_and_overflowing_deadlines() {
+        assert_eq!(validation_gap("0").unwrap(), Duration::ZERO);
+        assert_eq!(validation_gap("2000").unwrap(), Duration::from_secs(2));
+        assert_eq!(
+            validation_gap("86400000").unwrap(),
+            Duration::from_secs(86400)
+        );
+        for value in ["-1", "bad", "86400001", "18446744073709551615"] {
+            assert!(validation_gap(value).is_err());
+        }
+    }
 
     #[test]
     fn item_id_from_links_and_bare_ids() {
