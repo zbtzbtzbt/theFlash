@@ -87,7 +87,7 @@
 - main 上的 run 不被下一次 push 取消（发版要等一个跑完的绿 run）。PR 上新 push 可以取消旧 run。
 - 每个容易卡住的步骤（装依赖、下载）设置超时。
 - 跑 `scripts/check.sh` 之前，先用 `scripts/block-damai-hosts.sh` 把大麦域名解析到 `0.0.0.0`（Linux 和 macOS 都做），让漏掉假服务器的测试失败，而不是访问真实大麦。这一步只属于 GitHub 托管的一次性 runner：脚本在别的机器上拒绝改 `/etc/hosts`，因为它会让整台机器（浏览器、`theflash watch`）都连不上真实大麦，症状像断网（#22）。本地 `make check` 不需要它。已经被屏蔽的机器用 `scripts/unblock-damai-hosts.sh` 撤销，它只删屏蔽脚本写的行。
-- `scripts/check.sh` 只在开头的依赖步骤（`cargo fetch`、`npm ci`）里联网，之后整段在死代理下跑，所有语言的测试都在里面（#34）。新的测试组加在依赖步骤后面；要下载东西的步骤放进依赖步骤，不放在它前面。机制见 [0003](decisions/0003-tests-cannot-reach-damai.md)。
+- `scripts/check.sh` 只在开头的依赖步骤（`cargo fetch`、`npm ci`）里联网，之后整段在死代理下跑，所有语言的测试都在里面（#34）。新的测试组加在依赖步骤后面；要下载东西的步骤放进依赖步骤，不放在它前面。放错了 [`dead_proxy.rs`](../backend/tests/dead_proxy.rs) 会失败。机制见 [0003](decisions/0003-tests-cannot-reach-damai.md)。
 - 规则一旦能机械判断（格式、禁用某个 API、必须有某段注释），就写成 CI 步骤或守护测试，并在步骤旁边的注释里写明是哪次事故促成的。
 
 ## Owner 的决定

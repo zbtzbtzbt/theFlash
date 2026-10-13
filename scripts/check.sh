@@ -18,7 +18,9 @@ echo "== dependencies"
 # read them with NODE_USE_ENV_PROXY. Test runs that start theflash replace
 # the proxy with a tripwire that says what was attempted
 # (backend/tests/support/mod.rs, frontend/src/test-support.ts). New steps go
-# below this line, and are covered without doing anything (#34).
+# below this line, and are covered without doing anything (#34);
+# backend/tests/dead_proxy.rs fails when a step other than the downloads
+# runs without these.
 dead=http://127.0.0.1:9
 export HTTP_PROXY=$dead HTTPS_PROXY=$dead ALL_PROXY=$dead \
   http_proxy=$dead https_proxy=$dead all_proxy=$dead \
