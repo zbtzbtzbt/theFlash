@@ -1,6 +1,17 @@
 # 给 coding agent 的说明
 
-theFlash 是大麦网（damai.cn）的抢票程序。代码由 agent 编写、验证、提交和发布，人只给方向并做裁决。每个会话都按下面的流程走。
+theFlash 是大麦网（damai.cn）的抢票程序，一个 AI Native 项目：架构设计、编码、测试、审查、发布全部由 agent 完成，人不参与架构设计，也不写任何代码。没有人会替你审 diff，也没有人会替你做技术决定；你和其他 agent 就是这个项目的架构师、开发者、测试者和审查者。
+
+人只做四件事：提出目标和问题、提供账号和授权、对产品和安全规则做裁决、验收结果。除此之外的一切由 agent 自己决定，并把决定写下来，让后来的 agent 读得到。
+
+每个会话都按下面的流程走。
+
+## 架构由 agent 决定
+
+- 技术选型、模块划分、接口设计、依赖引入都由 agent 决定。不要停下来问人“用 A 还是 B”；比较之后选一个，写成一条[架构决定记录](docs/decisions/README.md)，然后继续。
+- 动手前先读 `docs/decisions/` 里已有的决定。要推翻一条已有的决定，必须有它当时不知道的新证据，并写一条新的记录取代它。不要因为个人偏好来回改。
+- 子系统稳定下来后，在 [docs/subsystems/](docs/subsystems/README.md) 里写它的设计参考，后来的 agent 靠它理解系统，而不是靠问人。
+- 只有涉及花钱、真实账号、法律风险或用户可见的产品取舍时，才需要人裁决。这时开一个 issue，写清选项、各自的后果和你的建议，在等裁决期间先做不受影响的部分。
 
 ## 仓库结构和命令
 
@@ -9,7 +20,9 @@ theFlash 是大麦网（damai.cn）的抢票程序。代码由 agent 编写、�
 | `backend/` | Rust 后端（高性能部分）。工具链由根目录的 `rust-toolchain.toml` 指定。 |
 | `frontend/` | TypeScript 前端。Biome 负责格式和 lint，Vitest 负责测试，Node 版本见 `.node-version`。 |
 | `scripts/check.sh` | 合并或发版前必须通过的全部检查。`make check` 和 CI 跑的都是它。 |
-| `.github/workflows/test.yml` | CI：在 Linux、macOS、Windows 上跑 `scripts/check.sh`。 |
+| `.github/workflows/test.yml` | CI：在 Linux 和 macOS 上跑 `scripts/check.sh`。 |
+
+只支持 macOS 和 Linux，不支持 Windows。不要为 Windows 写兼容代码、分支或 CI。
 
 - `make check`：格式、lint、类型检查、构建、全部测试。
 - `make fmt`：自动格式化前后端。
@@ -19,7 +32,8 @@ theFlash 是大麦网（damai.cn）的抢票程序。代码由 agent 编写、�
 
 1. [LESSONS.md](LESSONS.md)：最近合并的工作哪里做错了，以及本可以拦住它的规则。
 2. [docs/code-standards.md](docs/code-standards.md)：改动要满足的规则和验收标准。
-3. 要改的子系统的设计参考：[docs/subsystems/README.md](docs/subsystems/README.md)。改之前先读，再对照它链接的源码。
+3. [docs/decisions/](docs/decisions/README.md)：已经做过的架构决定和理由。
+4. 要改的子系统的设计参考：[docs/subsystems/README.md](docs/subsystems/README.md)。改之前先读，再对照它链接的源码。
 
 ## 一次会话的流程
 

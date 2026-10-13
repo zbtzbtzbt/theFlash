@@ -1,0 +1,28 @@
+# theFlash
+
+大麦网（damai.cn）抢票程序。前端 TypeScript，高性能后端 Rust。支持 macOS 和 Linux，不支持 Windows。
+
+## 项目定位：AI Native
+
+theFlash 从架构设计到编码、测试、审查、发布，全部由 AI agent 完成。人不参与架构设计，也不写任何代码。
+
+| 谁 | 做什么 |
+| --- | --- |
+| agent | 架构设计和技术选型（记录在 `docs/decisions/`）、编码、自动化测试、用 computer use 做真实环境验证、代码审查、发版、每晚复盘并更新规则。 |
+| 人 | 提出目标和问题、提供账号和授权、对产品和安全规则做裁决、验收结果。 |
+
+## 项目怎么自己迭代
+
+- **白天**：agent 按 [prompts/work-tick.md](prompts/work-tick.md) 定时跑一轮，优先修红的 CI，再发版、审 PR、处理 issue。每个改动都要带一个“没有它就会失败”的测试，并在 commit 正文写明跑了什么、没试什么。
+- **夜里**：复盘 agent 按 [prompts/nightly-review.md](prompts/nightly-review.md) 检查当天的 commit，把出错的地方写进 [LESSONS.md](LESSONS.md)。同一条教训出现在 3 个不同的日子，就升级进 [docs/code-standards.md](docs/code-standards.md)；能机械判断的规则写成 CI 检查或守护测试。
+- **CI**：每次 push 都在 Linux 和 macOS 上跑 `make check`。只有 CI 跑完并且是绿的 commit 才能发版。
+
+这套做法参考了 [yetone/magpie](https://github.com/yetone/magpie)，分析见 [docs/magpie-study.md](docs/magpie-study.md)。agent 的工作规则见 [AGENTS.md](AGENTS.md)。
+
+## 开发命令
+
+```sh
+make setup   # 安装前端依赖
+make check   # 格式、lint、类型检查、构建、全部测试（CI 跑的也是它）
+make fmt     # 自动格式化
+```
