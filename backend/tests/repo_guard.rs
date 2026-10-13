@@ -696,7 +696,7 @@ fn tests_start_binaries_only_through_support() {
 #[test]
 fn frontend_tests_run_theflash_only_under_a_temporary_home() {
     let root = repo_root();
-    let without: Vec<String> = tracked_files(&root)
+    let without: Vec<String> = repo_files(&root)
         .into_iter()
         .filter(|f| f.starts_with("frontend/src/") && f.ends_with(".test.ts"))
         .filter(|f| {
@@ -709,6 +709,84 @@ fn frontend_tests_run_theflash_only_under_a_temporary_home() {
         without.is_empty(),
         "这些前端测试会运行 theflash，但没有用 test-support 的 tempHome()，\
          会读写真实用户的状态目录（风控熔断就在那里）：{without:?}"
+    );
+}
+
+/// The `*.md` targets of the markdown links on one line, in order.
+fn markdown_links_to_md(line: &str) -> Vec<&str> {
+    line.match_indices("](")
+        .filter_map(|(at, _)| {
+            let rest = &line[at + 2..];
+            let end = rest.find(')')?;
+            Some(&rest[..end]).filter(|t| t.ends_with(".md"))
+        })
+        .collect()
+}
+
+/// Several sessions rebase onto main at the same time, and the two index
+/// tables are where their changes land together. PR #28 hit the conflict;
+/// resolving it by keeping one side would have dropped the other side's row
+/// without failing any check, because nothing links the files to the index.
+#[test]
+fn every_decision_record_and_subsystem_reference_is_in_its_index() {
+    let root = repo_root();
+    let files = repo_files(&root);
+    let mut missing: Vec<String> = Vec::new();
+    for dir in ["docs/decisions", "docs/subsystems"] {
+        let index_path = format!("{dir}/README.md");
+        let index = std::fs::read_to_string(root.join(&index_path))
+            .unwrap_or_else(|e| panic!("{index_path}: {e}"));
+        for file in &files {
+            let Some(name) = file
+                .strip_prefix(&format!("{dir}/"))
+                .filter(|n| n.ends_with(".md") && *n != "README.md" && !n.contains('/'))
+            else {
+                continue;
+            };
+            // The row for this document, not a mention of it inside another
+            // row: 0004's row links 0005 where it says 0005 supersedes part
+            // of it, and that is not an entry for 0005. A row describes the
+            // document it links to first; later links in it are references.
+            let listed = index
+                .lines()
+                .filter(|l| l.trim_start().starts_with('|'))
+                .any(|l| markdown_links_to_md(l).first() == Some(&name));
+            if !listed {
+                missing.push(format!("{file} has no row of its own in {index_path}"));
+            }
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "这些文档没有出现在它所在目录的索引表里，后来的 agent 读索引就找不到它们。\
+         在索引表里加一行（rebase 解决冲突时两边的行都要留下）：\n{}",
+        missing.join("\n")
+    );
+}
+
+/// A leftover marker in Rust or TypeScript stops the build, but in Markdown
+/// it is silently committed. The pieces are joined here so this file is not
+/// its own finding.
+#[test]
+fn no_file_in_the_repository_keeps_a_merge_conflict_marker() {
+    let root = repo_root();
+    let open = "<".repeat(7);
+    let close = ">".repeat(7);
+    let mut found: Vec<String> = Vec::new();
+    for file in repo_files(&root) {
+        let Ok(text) = std::fs::read_to_string(root.join(&file)) else {
+            continue; // binary or unreadable: the other guards cover those
+        };
+        for (i, line) in text.lines().enumerate() {
+            if line.starts_with(&open) || line.starts_with(&close) {
+                found.push(format!("{file}:{}", i + 1));
+            }
+        }
+    }
+    assert!(
+        found.is_empty(),
+        "这些行是没解决完的合并冲突标记：\n{}",
+        found.join("\n")
     );
 }
 
