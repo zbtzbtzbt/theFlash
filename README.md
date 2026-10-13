@@ -20,17 +20,61 @@ theFlash 从架构设计到编码、测试、审查、发布，全部由 AI agen
 
 这套做法参考了 [yetone/magpie](https://github.com/yetone/magpie)，分析见 [docs/magpie-study.md](docs/magpie-study.md)。agent 的工作规则见 [AGENTS.md](AGENTS.md)。
 
+## 下载和运行
+
+不用装 Rust 或 Node。每个 [release](https://github.com/zbtzbtzbt/theFlash/releases) 都有 macOS（Apple 芯片和 Intel，macOS 11 及以上）和 Linux x86_64 的 `theflash`。仓库现在是私有的，下载要用能读这个仓库的 GitHub 账号：先装 [GitHub CLI](https://cli.github.com)，再运行 `gh auth login`。
+
+安装最新的正式版，装到 `~/.local/bin`。以后再运行一次就是升级：
+
+```sh
+gh release download --repo zbtzbtzbt/theFlash --pattern install.sh --clobber
+sh install.sh
+```
+
+安装指定的版本，包括预发布：
+
+```sh
+gh release download v0.1.0-rc.1 --repo zbtzbtzbt/theFlash --pattern install.sh --clobber
+sh install.sh v0.1.0-rc.1
+```
+
+`install.sh` 按本机平台选文件，先校验 SHA256，对不上就什么都不装。要装到别的目录，设置 `THEFLASH_INSTALL_DIR`。
+
+也可以不用脚本，从 release 页面手动下载对应平台的文件和同名的 `.sha256`：
+
+| 平台 | 文件 |
+| --- | --- |
+| macOS，Apple 芯片 | `theflash-aarch64-apple-darwin.tar.gz` |
+| macOS，Intel | `theflash-x86_64-apple-darwin.tar.gz` |
+| Linux x86_64 | `theflash-x86_64-unknown-linux-musl.tar.gz` |
+
+```sh
+shasum -a 256 -c theflash-aarch64-apple-darwin.tar.gz.sha256   # Linux 上用 sha256sum -c
+tar -xzf theflash-aarch64-apple-darwin.tar.gz
+./theflash --version
+```
+
+**macOS 的 Gatekeeper**：程序没有 Apple 的开发者签名（要不要做见 #25）。用浏览器下载的文件，第一次运行时 macOS 可能提示无法验证开发者，拒绝运行。先确认 SHA256 和 release 上的一致，再二选一：
+
+- 在终端里去掉隔离属性：`xattr -d com.apple.quarantine theflash`；
+- 或者运行一次让它被拦下，然后在“系统设置 → 隐私与安全性”里点“仍要打开”。
+
+用 gh 或 `install.sh` 下载的文件没有隔离属性，不会被拦。
+
+**Linux**：程序是静态链接的，不依赖发行版的库。它用系统的 CA 证书验证大麦的 HTTPS 证书；精简的容器镜像里如果没有，先装 `ca-certificates`。
+
+发布流程和产物清单见 [docs/subsystems/release.md](docs/subsystems/release.md)。
+
 ## 用法
 
 ```sh
-cd backend && cargo build --release
-./target/release/theflash event "https://detail.damai.cn/item.htm?id=1086791513717"
+theflash event "https://detail.damai.cn/item.htm?id=1086791513717"
 ```
 
 输出演出名称、城市、场馆、售卖状态（未开售时附开售时间），以及每个场次的每个票档的价格和状态。只查询，不登录，不下单。细节见 [docs/subsystems/damai-event.md](docs/subsystems/damai-event.md)。
 
 ```sh
-./target/release/theflash watch "https://detail.damai.cn/item.htm?id=1086791513717" --session 10-17 --tier 380
+theflash watch "https://detail.damai.cn/item.htm?id=1086791513717" --session 10-17 --tier 380
 ```
 
 盯住一场演出：未开售时按大麦的时钟倒计时，开售那一刻提醒；之后每 30 秒查一次，盯的票档有票时提醒（终端和系统通知）。Ctrl-C 停止。细节见 [docs/subsystems/damai-watch.md](docs/subsystems/damai-watch.md)。
@@ -54,3 +98,5 @@ make setup   # 安装前端依赖
 make check   # 格式、lint、类型检查、构建、全部测试（CI 跑的也是它）
 make fmt     # 自动格式化
 ```
+
+从源码构建命令行程序：`cd backend && cargo build --release`，程序在 `backend/target/release/theflash`。

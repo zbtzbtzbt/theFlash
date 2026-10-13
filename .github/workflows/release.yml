@@ -1,0 +1,216 @@
+name: Release
+
+# Publishes theflash for macOS (Apple silicon and Intel) and Linux (x86_64)
+# as a GitHub release when a v* tag is pushed, or when run by hand for a tag
+# and a commit. Nothing is published unless `scripts/release.sh gate`
+# passes: the tag is vX.Y.Z or vX.Y.Z-rc.N and is the version in
+# backend/Cargo.toml, the commit is on main, and the Test workflow finished
+# green on that commit. Rules: docs/code-standards.md (发版). Reasons:
+# docs/decisions/0006-release-cli-binaries.md.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 要发布的 tag，例如 v0.1.0-rc.1；必须是那个 commit 上 backend/Cargo.toml 的版本
+        required: true
+        type: string
+      commit:
+        description: 要发布的 commit 的完整 SHA；tag 已经存在时可以不填
+        required: false
+        type: string
+        default: ""
+  # A pull request that changes how a release is built builds, checks and
+  # packs every target the same way, and publishes nothing.
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - scripts/release.sh
+      - scripts/install.sh
+      - backend/Cargo.toml
+      - backend/Cargo.lock
+      - rust-toolchain.toml
+
+permissions:
+  contents: read
+
+# bash with pipefail: a failing command in a pipe fails its step.
+defaults:
+  run:
+    shell: bash
+
+# One release of a tag at a time, never cancelled halfway. A pull request's
+# dry run is replaced by its next push.
+concurrency:
+  group: release-${{ github.event_name == 'pull_request' && github.ref || inputs.tag || github.ref_name }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  gate:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      # Lists the Test workflow's runs on the commit.
+      actions: read
+    outputs:
+      tag: ${{ steps.gate.outputs.tag }}
+      commit: ${{ steps.gate.outputs.commit }}
+      version: ${{ steps.gate.outputs.version }}
+      prerelease: ${{ steps.gate.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Every commit and tag, so the gate can tell whether the commit is
+          # an ancestor of origin/main.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: May this be released
+        id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+          # Empty for a pushed tag: the gate releases the commit it points at.
+          COMMIT: ${{ inputs.commit }}
+        run: bash scripts/release.sh gate "$TAG" "$COMMIT"
+
+  build:
+    name: build (${{ matrix.target }})
+    needs: gate
+    # A pull request skips the gate and still builds.
+    if: ${{ !cancelled() && (needs.gate.result == 'success' || (github.event_name == 'pull_request' && needs.gate.result == 'skipped')) }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # The same targets as TARGETS in scripts/release.sh.
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          # Cross-built on Apple silicon, and run under Rosetta to check it.
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          # Statically linked against musl: runs whatever the distribution's
+          # glibc version is.
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      TARGET: ${{ matrix.target }}
+      # The macOS builds run on macOS 11 and later, whatever the runner's is.
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.gate.outputs.commit || github.sha }}
+          persist-credentials: false
+
+      # rust-toolchain.toml names the toolchain, as in the Test workflow.
+      - name: Rust toolchain
+        timeout-minutes: 10
+        run: rustup toolchain install && rustup target add "$TARGET" && rustc --version
+
+      - name: C compiler for musl
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        timeout-minutes: 5
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends musl-tools
+
+      - name: Rosetta
+        if: matrix.target == 'x86_64-apple-darwin'
+        timeout-minutes: 5
+        run: arch -x86_64 /usr/bin/true 2>/dev/null || sudo softwareupdate --install-rosetta --agree-to-license
+
+      - name: Build
+        working-directory: backend
+        timeout-minutes: 20
+        run: cargo build --release --locked --target "$TARGET"
+
+      - name: Check and pack
+        env:
+          VERSION: ${{ needs.gate.outputs.version }}
+        run: |
+          version=${VERSION:-$(bash scripts/release.sh version HEAD)}
+          bash scripts/release.sh package "$TARGET" "$version" "backend/target/$TARGET/release/theflash"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: theflash-${{ matrix.target }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  # A pull request's dry run: the builds together are exactly the asset
+  # list, and the notes can be written. No write access. (The gate was
+  # skipped, so success() alone would skip this job too.)
+  dry-run:
+    needs: build
+    if: ${{ !cancelled() && github.event_name == 'pull_request' && needs.build.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: theflash-*
+          path: dist
+          merge-multiple: true
+
+      - name: Check the files
+        run: bash scripts/release.sh stage dist
+
+      - name: Release notes
+        run: bash scripts/release.sh notes "v$(bash scripts/release.sh version HEAD)" HEAD
+
+  publish:
+    needs: [gate, build]
+    # Only after the gate passed and every build succeeded.
+    if: ${{ !cancelled() && github.event_name != 'pull_request' && needs.gate.result == 'success' && needs.build.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      # Creates the release (and its tag, when run by hand for a new one) and
+      # uploads the files. The only job that can write; it builds nothing,
+      # and runs only code from the commit the gate checked.
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ needs.gate.outputs.tag }}
+      COMMIT: ${{ needs.gate.outputs.commit }}
+      PRERELEASE: ${{ needs.gate.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.gate.outputs.commit }}
+          # The notes are the commit titles since the last final release.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: theflash-*
+          path: dist
+          merge-multiple: true
+
+      - name: Check the files
+        run: bash scripts/release.sh stage dist
+
+      - name: Release notes
+        run: bash scripts/release.sh notes "$TAG" "$COMMIT" | tee "$RUNNER_TEMP/notes.md"
+
+      # A draft first; made public only when every file is there, then
+      # checked again.
+      - name: Publish
+        run: bash scripts/release.sh publish "$TAG" "$COMMIT" "$PRERELEASE" dist "$RUNNER_TEMP/notes.md"

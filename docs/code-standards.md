@@ -51,13 +51,29 @@
 
 ## 发版
 
-一次发版只有在下面都成立时才算数：
+推 `v*` tag 后，[发布工作流](../.github/workflows/release.yml)先用 [`scripts/release.sh`](../scripts/release.sh) 的 `gate` 检查。下面任何一条不满足，工作流就失败，什么都不发布（理由见 [0006](decisions/0006-release-cli-binaries.md)，步骤见[发布](subsystems/release.md)）：
 
-- 打 tag 的 commit（或包含它的更新 commit）上，有一个已经跑完并且是绿的 CI run。被下一次 push 取消的 run 不算通过。
+- tag 是 `vX.Y.Z`（正式版）或 `vX.Y.Z-rc.N`（预发布，N 从 1 开始），并且等于这个 commit 上 `backend/Cargo.toml` 的版本。
 - tag 在 main 上，是 `origin/main` 的祖先。
-- 所有发布产物都在（产物清单技术栈确定后写在这里）。
+- tag 指向的 commit 上，Test 工作流跑完了并且是绿的：至少有一个 push 到 main 或手动触发的 run，并且这些 run 全部跑完、都是绿的。还在跑的、被取消的、红的都会拦住发布；PR 的 run 测的是合并后的结果，不算。
+- 所有发布产物都在，每个都附同名的 `.sha256`：
 
-先 `git fetch --tags` 找下一个可用版本号，因为可能有多个会话在发版。
+  | 文件 | 给谁 |
+  | --- | --- |
+  | `theflash-aarch64-apple-darwin.tar.gz` | macOS 11 及以上，Apple 芯片 |
+  | `theflash-x86_64-apple-darwin.tar.gz` | macOS 11 及以上，Intel |
+  | `theflash-x86_64-unknown-linux-musl.tar.gz` | Linux x86_64，静态链接，不依赖发行版的库 |
+  | `install.sh` | 安装和升级 |
+
+  清单只有一份：`scripts/release.sh` 里的 `TARGETS` 和 `assets`。少一个、多一个或校验和对不上，release 停在草稿，不公开。
+
+版本号：
+
+- 先 `git fetch --tags` 找下一个可用版本号，因为可能有多个会话在发版。
+- 0.x 阶段，有新的用户可见功能就升次版本号（0.1.0 → 0.2.0），只有修复就升修订号（0.2.0 → 0.2.1）。
+- 要先在真实环境里验证的版本，先发预发布 `-rc.N`。GitHub 上标为 pre-release，`install.sh` 不指定版本时不装它。
+- 版本号写在 `backend/Cargo.toml`（`Cargo.lock` 一起改），用一个 PR 合进 main。main 上那个 commit 的 Test 跑完变绿以后，再在那个 commit 上打 tag。`theflash --version` 和 Cargo.toml 一致，由 [`tests/version.rs`](../backend/tests/version.rs) 守护。
+- 变更说明由工作流用上一个正式版以来的 commit 标题生成，所以 commit 标题要写用户看到的行为（见 [Commits](#commits)）。
 
 ## 并行会话
 
