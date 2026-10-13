@@ -21,14 +21,19 @@ struct MockDamai {
 
 impl MockDamai {
     fn start(routes: &[(&'static str, &'static str)]) -> Self {
+        Self::start_bodies(
+            routes
+                .iter()
+                .map(|(route, name)| (route.to_string(), fixture(name)))
+                .collect(),
+        )
+    }
+
+    fn start_bodies(routes: Vec<(String, String)>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let hits = Arc::new(Mutex::new(Vec::new()));
         let stop = Arc::new(AtomicBool::new(false));
-        let routes: Vec<(String, String)> = routes
-            .iter()
-            .map(|(m, f)| (m.to_string(), fixture(f)))
-            .collect();
         let thread = {
             let hits = hits.clone();
             let stop = stop.clone();
@@ -365,4 +370,149 @@ fn risk_control_on_a_tier_request_stops_the_rest() {
     assert!(!out.status.success());
     assert!(stderr(&out).contains("风控"), "stderr: {}", stderr(&out));
     assert_eq!(damai.hits().len(), 2, "requests: {:?}", damai.hits());
+}
+
+// Mutate exactly the real response and field used in the acceptance report.
+fn sold_out_with_sku_list(value: Option<serde_json::Value>) -> MockDamai {
+    let original = fixture("sku_sold_out_284490009.jsonp");
+    let open = original.find('(').unwrap();
+    let close = original.rfind(')').unwrap();
+    let mut data: serde_json::Value = serde_json::from_str(&original[open + 1..close]).unwrap();
+    let perform = data["perform"].as_object_mut().unwrap();
+    match value {
+        Some(value) => {
+            perform.insert("skuList".into(), value);
+        }
+        None => {
+            perform.remove("skuList");
+        }
+    }
+    MockDamai::start_bodies(vec![
+        (
+            "/item.htm?id=1077137031347".into(),
+            fixture("item_sold_out.html"),
+        ),
+        (
+            "dataType=2&dataId=284490009".into(),
+            format!("__jp0({data})"),
+        ),
+    ])
+}
+
+fn assert_unknown_sku_list(value: Option<serde_json::Value>) {
+    let damai = sold_out_with_sku_list(value);
+    let out = theflash(&damai.base_url(), &["event", "1077137031347"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let got = stdout(&out);
+    assert!(
+        got.contains("场次：2026-10-17 周六 13:00\n  票档：未知"),
+        "{got}"
+    );
+    assert!(!got.contains("没有票档"), "{got}");
+    assert_eq!(damai.hits().len(), 2);
+}
+
+#[test]
+fn missing_sku_list_is_unknown() {
+    assert_unknown_sku_list(None);
+}
+
+#[test]
+fn null_sku_list_is_unknown() {
+    assert_unknown_sku_list(Some(serde_json::Value::Null));
+}
+
+#[test]
+fn explicitly_empty_sku_list_has_no_tiers() {
+    let damai = sold_out_with_sku_list(Some(serde_json::json!([])));
+    let out = theflash(&damai.base_url(), &["event", "1077137031347"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        stdout(&out).contains("  票档：没有票档\n"),
+        "{}",
+        stdout(&out)
+    );
+}
+
+#[test]
+fn malformed_sku_list_is_a_failure_instead_of_empty() {
+    for value in [
+        serde_json::json!({}),
+        serde_json::json!(""),
+        serde_json::json!(false),
+    ] {
+        let damai = sold_out_with_sku_list(Some(value));
+        let out = theflash(&damai.base_url(), &["event", "1077137031347"]);
+        assert!(out.status.success(), "{}", stderr(&out));
+        assert!(stdout(&out).contains("票档：获取失败"), "{}", stdout(&out));
+        assert!(!stdout(&out).contains("没有票档"), "{}", stdout(&out));
+    }
+}
+
+#[test]
+fn invalid_links_with_numeric_ids_are_refused_before_any_request() {
+    let damai = MockDamai::start(&[
+        ("/item.htm?id=1077137031347", "item_sold_out.html"),
+        (
+            "dataType=2&dataId=284490009",
+            "sku_sold_out_284490009.jsonp",
+        ),
+    ]);
+    for input in [
+        "https:///detail.damai.cn/item.htm?id=1077137031347",
+        "https://@detail.damai.cn/item.htm?id=1077137031347",
+        "https://example.com/?id=1077137031347",
+        "garbage?id=1077137031347",
+        "https://detail.damai.cn.evil.example/item.htm?id=1077137031347",
+        "https://damai.cn@evil.example/item.htm?id=1077137031347",
+        "https://evil.example@detail.damai.cn/item.htm?id=1077137031347",
+        "ftp://detail.damai.cn/item.htm?id=1077137031347",
+        "https://detail.damai.cn/wrong.htm?id=1077137031347",
+        "https://detail.damai.cn:444/item.htm?id=1077137031347",
+        "https://detail.damai.cn/item.htm?itemId=1077137031347",
+        "https://m.damai.cn/damai/detail/item.html?id=1077137031347",
+        "https://detail.damai.cn/item.htm?id=1077137031347&id=123",
+    ] {
+        let out = theflash(&damai.base_url(), &["event", input]);
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "input {input:?}: {}",
+            stdout(&out)
+        );
+        assert!(stderr(&out).contains("找不到演出 ID"), "{}", stderr(&out));
+        assert!(stdout(&out).is_empty());
+        assert!(
+            damai.hits().is_empty(),
+            "input {input:?}, requests: {:?}",
+            damai.hits()
+        );
+    }
+}
+
+#[test]
+fn supported_links_and_numeric_ids_query_the_same_event() {
+    let damai = MockDamai::start(&[
+        ("/item.htm?id=1077137031347", "item_sold_out.html"),
+        (
+            "dataType=2&dataId=284490009",
+            "sku_sold_out_284490009.jsonp",
+        ),
+    ]);
+    for input in [
+        "1077137031347",
+        "https://detail.damai.cn/item.htm?spm=share&id=1077137031347#top",
+        "http://detail.damai.cn/item.htm?id=1077137031347",
+        "https://m.damai.cn/damai/detail/item.html?itemId=1077137031347&from=share",
+        "https://detail.damai.cn/item.htm?id=%31%30%37%37%31%33%37%30%33%31%33%34%37",
+    ] {
+        let out = theflash(&damai.base_url(), &["event", input]);
+        assert!(out.status.success(), "input {input:?}: {}", stderr(&out));
+        assert!(
+            stdout(&out).contains("售卖状态：已售罄"),
+            "{}",
+            stdout(&out)
+        );
+    }
+    assert_eq!(damai.hits().len(), 10);
 }

@@ -69,14 +69,15 @@ impl Client {
                             Some(b) => sale_state(Some(b)),
                             None => sale.clone(),
                         };
-                        Ok(p.skus
-                            .iter()
-                            .map(|s| Tier {
-                                name: s.name.clone(),
-                                price: s.price.clone(),
-                                status: tier_status(&state, s),
-                            })
-                            .collect())
+                        Ok(p.skus.map(|skus| {
+                            skus.iter()
+                                .map(|s| Tier {
+                                    name: s.name.clone(),
+                                    price: s.price.clone(),
+                                    status: tier_status(&state, s),
+                                })
+                                .collect()
+                        }))
                     }
                     Err(reason) => Err(format!("看不懂票档数据：{reason}")),
                 },
@@ -152,18 +153,40 @@ pub fn parse_item_id(input: &str) -> Result<u64, Error> {
     if !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()) {
         return s.parse().map_err(|_| invalid());
     }
-    let query = s.split_once('?').map(|(_, q)| q).ok_or_else(invalid)?;
-    let query = query.split('#').next().unwrap_or("");
-    for pair in query.split('&') {
-        if let Some((key, value)) = pair.split_once('=')
-            && (key == "id" || key == "itemId")
-            && !value.is_empty()
-            && value.bytes().all(|b| b.is_ascii_digit())
-        {
-            return value.parse().map_err(|_| invalid());
-        }
+    if s.chars().any(|c| c.is_whitespace() || c.is_control()) || s.contains('\\') {
+        return Err(invalid());
     }
-    Err(invalid())
+    // URL parsers repair special-scheme inputs like https:///host; refuse
+    // malformed authority text before normalization hides it.
+    let authority = s
+        .split_once("://")
+        .and_then(|(_, rest)| rest.split(['/', '?', '#']).next())
+        .ok_or_else(invalid)?;
+    if authority.is_empty() || authority.contains('@') {
+        return Err(invalid());
+    }
+    let url = reqwest::Url::parse(s).map_err(|_| invalid())?;
+    if !matches!(url.scheme(), "http" | "https")
+        || !s
+            .to_ascii_lowercase()
+            .starts_with(&format!("{}://", url.scheme()))
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.port().is_some()
+    {
+        return Err(invalid());
+    }
+    let id_key = match (url.host_str(), url.path()) {
+        (Some("detail.damai.cn"), "/item.htm") => "id",
+        (Some("m.damai.cn"), "/damai/detail/item.html") => "itemId",
+        _ => return Err(invalid()),
+    };
+    let mut ids = url.query_pairs().filter(|(key, _)| key == id_key);
+    let (_, value) = ids.next().ok_or_else(invalid)?;
+    if ids.next().is_some() || value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(invalid());
+    }
+    value.parse().map_err(|_| invalid())
 }
 
 #[cfg(test)]

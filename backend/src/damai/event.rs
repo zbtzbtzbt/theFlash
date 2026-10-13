@@ -31,8 +31,9 @@ pub enum SaleState {
 pub struct Session {
     pub perform_id: u64,
     pub name: Option<String>,
+    /// Ok(None): list missing/null; Ok(Some([])): explicitly empty.
     /// Err holds why this session's tiers couldn't be read.
-    pub tiers: Result<Vec<Tier>, String>,
+    pub tiers: Result<Option<Vec<Tier>>, String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
