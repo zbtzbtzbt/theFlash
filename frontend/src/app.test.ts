@@ -32,7 +32,7 @@ import { afterAll, beforeAll } from "vitest";
 import { renderEvent } from "./app.js";
 import type { EventView } from "./protocol.js";
 import { loadEvent } from "./query.js";
-import { close, offline, replay } from "./test-support.js";
+import { close, offline, replay, tempHome } from "./test-support.js";
 
 const views: EventView[] = [];
 const reports: string[] = [];
@@ -47,7 +47,11 @@ async function cli(id: string): Promise<string> {
 let guard: Awaited<ReturnType<typeof offline>>;
 let upstream: Awaited<ReturnType<typeof replay>>;
 let missingUpstream: Awaited<ReturnType<typeof replay>>;
+let home: ReturnType<typeof tempHome>;
 beforeAll(async () => {
+  // loadEvent below runs the Rust binary, which reads the risk-control
+  // breaker under HOME; a test must not read or write the real one.
+  home = tempHome();
   guard = await offline();
   upstream = await replay();
   process.env.THEFLASH_DAMAI_BASE_URL = upstream.base;
@@ -71,6 +75,7 @@ afterAll(async () => {
   await close(upstream.server);
   await close(missingUpstream.server);
   await close(guard.server);
+  home.remove();
   expect(guard.hits, "测试试图访问真实大麦：fixture 上游未设置").toHaveLength(0);
 });
 

@@ -224,12 +224,10 @@ pub fn theflash(base_url: &str) -> Command {
 fn at_home(base_url: &str, home: &Path) -> Command {
     let mut c = Command::new(env!("CARGO_BIN_EXE_theflash"));
     c.env("THEFLASH_DAMAI_BASE_URL", base_url);
-    // theflash keeps the risk-control breaker under HOME (on Linux under
-    // XDG_STATE_HOME when it is set), so both are pointed at the test's
-    // own directory. See src/damai/access.rs.
-    c.env("HOME", home);
-    c.env_remove("XDG_STATE_HOME");
     offline(&mut c);
+    // offline() already points HOME at the shared test directory; this
+    // test wants one of its own.
+    c.env("HOME", home);
     c
 }
 
@@ -289,11 +287,15 @@ impl Drop for Home {
     }
 }
 
-/// Makes `cmd` unable to reach the real damai.cn: its proxies become a
-/// tripwire, and only this machine's addresses skip the proxy. A test that
-/// forgets THEFLASH_DAMAI_BASE_URL sends its request to the tripwire, which
-/// ends the test process with a message saying so. Every test that starts
-/// the binary goes through here (tests/repo_guard.rs checks that).
+/// Makes `cmd` unable to reach the real damai.cn or the real user's files:
+/// its proxies become a tripwire, and only this machine's addresses skip
+/// the proxy. A test that forgets THEFLASH_DAMAI_BASE_URL sends its request
+/// to the tripwire, which ends the test process with a message saying so.
+/// HOME points at a test directory, because theflash keeps the
+/// risk-control breaker under HOME (under XDG_STATE_HOME on Linux when it
+/// is set) and a test must not read or write the user's own. Every test
+/// that starts the binary goes through here (tests/repo_guard.rs checks
+/// that), so both guarantees hold for all of them.
 pub fn offline(cmd: &mut Command) {
     let proxy = tripwire();
     for v in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"] {
@@ -302,6 +304,8 @@ pub fn offline(cmd: &mut Command) {
     }
     cmd.env("NO_PROXY", "127.0.0.1,localhost,::1");
     cmd.env("no_proxy", "127.0.0.1,localhost,::1");
+    cmd.env("HOME", shared_home());
+    cmd.env_remove("XDG_STATE_HOME");
 }
 
 /// The merge-gate binary with nothing to reach GitHub with: `gh` is gone

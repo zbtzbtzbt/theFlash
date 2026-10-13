@@ -688,6 +688,30 @@ fn tests_start_binaries_only_through_support() {
     );
 }
 
+/// The frontend tests run the same binary from Node, where there is no
+/// `support::offline` to point HOME at a test directory. #4: a `beforeAll`
+/// that built its fixtures with `loadEvent` ran under the real HOME and
+/// created the risk-control breaker's lock file in the owner's own state
+/// directory. A test that runs the binary now has to take `tempHome`.
+#[test]
+fn frontend_tests_run_theflash_only_under_a_temporary_home() {
+    let root = repo_root();
+    let without: Vec<String> = tracked_files(&root)
+        .into_iter()
+        .filter(|f| f.starts_with("frontend/src/") && f.ends_with(".test.ts"))
+        .filter(|f| {
+            let text = std::fs::read_to_string(root.join(f)).unwrap_or_default();
+            // loadEvent and execFile are the two ways a test starts it.
+            (text.contains("loadEvent") || text.contains("execFile")) && !text.contains("tempHome(")
+        })
+        .collect();
+    assert!(
+        without.is_empty(),
+        "这些前端测试会运行 theflash，但没有用 test-support 的 tempHome()，\
+         会读写真实用户的状态目录（风控熔断就在那里）：{without:?}"
+    );
+}
+
 // ---- the scanner itself ----
 
 fn found(text: &str) -> Vec<Rule> {
