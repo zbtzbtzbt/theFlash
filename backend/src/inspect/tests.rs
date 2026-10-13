@@ -459,7 +459,16 @@ fn a_situation_nothing_covers_is_a_finding_and_a_budget_cut_is_not() {
         "没说要改哪个文件：{text}"
     );
     assert!(issue_title(&nothing_left).contains("1 类样本补不上"));
-    assert!(issue_body(&nothing_left).contains("候选池"));
+    let body = issue_body(&nothing_left);
+    assert!(body.contains("候选池"), "{body}");
+    assert!(
+        !body.contains("在真实大麦上发现了变化"),
+        "补不上样本不是大麦改版：{body}"
+    );
+    assert!(
+        !body.contains("用候选 fixture 复现"),
+        "没有结构变化就没有候选 fixture 要复现：{body}"
+    );
 }
 
 /// The notice that goes out before a sample stops covering its

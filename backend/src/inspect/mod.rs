@@ -1101,43 +1101,59 @@ pub fn render(report: &Report) -> String {
     out
 }
 
-/// The report as an issue body: the same text, plus how to get the
-/// responses it is talking about. The candidate files are on the machine
-/// that ran the inspection, so whoever picks this up is told both where
-/// they are and the command that fetches them again anywhere else —
-/// without it the issue would only name paths nobody else can open.
+/// The report as an issue body: the same text, plus what to do with it
+/// and how to get the responses it is talking about. What to do depends
+/// on what was found — a damai.cn revision and a sample this inspection
+/// can no longer cover need different work — and the candidate files are
+/// on the machine that ran the inspection, so whoever picks a revision up
+/// is told both where they are and the command that fetches them again
+/// anywhere else.
 pub fn issue_body(report: &Report) -> String {
-    let mut how = String::new();
+    let revised = report.changes() > 0 || report.unseen_codes() > 0;
     let candidates: Vec<&PathBuf> = report
         .events
         .iter()
         .flat_map(|e| e.candidates.iter())
         .collect();
-    if candidates.is_empty() {
-        how.push_str(
-            "这次没有留下候选响应（巡检没加 `--candidates`，或者脱敏之后还命中凭据规则所以整份丢掉了）。\
-             用下面的命令自己取一份：\n\n",
-        );
+    let lead = if revised {
+        "`theflash inspect` 在真实大麦上发现了变化。"
     } else {
-        how.push_str("脱敏后的候选响应在跑巡检的那台机器上，文件名就是 `backend/testdata/damai/` 里的 fixture 名，拷进去就能回放：\n\n");
-        for path in &candidates {
-            how.push_str(&format!("- `{}`\n", path.display()));
-        }
-        how.push_str("\n拿不到那台机器就自己重录（要先拿 damai-lock）：\n\n");
-    }
-    how.push_str("```sh\ntheflash inspect record <演出链接或ID> --as <名字> --sessions 1\n```\n");
-    let samples = if report.nothing_left() > 0 || !report.expiring.is_empty() {
-        "样本缺口和快过期的样本：找一场现在是这个状态的演出，把它的 itemId 写进样本文件，\
-         并加进 backend/src/inspect/samples.rs 的候选池（为什么要人来找：0014）。\n"
-    } else {
-        ""
+        "`theflash inspect` 跑完了，有要人处理的事。"
     };
+    let mut what_to_do = String::new();
+    // Where the responses behind a revision are, which only a revision
+    // has: a situation with no sample left leaves no candidate fixture.
+    if revised || !candidates.is_empty() {
+        if candidates.is_empty() {
+            what_to_do.push_str(
+                "这次没有留下候选响应（巡检没加 `--candidates`，或者脱敏之后还命中凭据规则所以整份丢掉了）。\
+                 用下面的命令自己取一份：\n\n",
+            );
+        } else {
+            what_to_do.push_str("脱敏后的候选响应在跑巡检的那台机器上，文件名就是 `backend/testdata/damai/` 里的 fixture 名，拷进去就能回放：\n\n");
+            for path in &candidates {
+                what_to_do.push_str(&format!("- `{}`\n", path.display()));
+            }
+            what_to_do.push_str("\n拿不到那台机器就自己重录（要先拿 damai-lock）：\n\n");
+        }
+        what_to_do.push_str(
+            "```sh\ntheflash inspect record <演出链接或ID> --as <名字> --sessions 1\n```\n\n",
+        );
+    }
+    if revised {
+        what_to_do.push_str(
+            "怎么处理：按 docs/subsystems/damai-inspect.md 用候选 fixture 复现，\
+             先写一个会失败的测试，再改解析或状态映射；没见过的状态码要先在大麦页面上核对它显示的文字，再加进映射表。\n\n",
+        );
+    }
+    if report.nothing_left() > 0 || !report.expiring.is_empty() {
+        what_to_do.push_str(
+            "样本缺口和快过期的样本：找一场现在是这个状态的演出，把它的 itemId 写进样本文件，\
+             并加进 backend/src/inspect/samples.rs 的候选池（为什么要人来找：0014）。\n\n",
+        );
+    }
     format!(
-        "`theflash inspect` 在真实大麦上发现了变化。\n\n```\n{}```\n\n{how}\n\
-         怎么处理：按 docs/subsystems/damai-inspect.md 用候选 fixture 复现，\
-         先写一个会失败的测试，再改解析或状态映射；没见过的状态码要先在大麦页面上核对它显示的文字，再加进映射表。\n\n\
-         {samples}\n\
-         这条是 `theflash inspect` 自动写的。\n",
+        "{lead}\n\n```\n{}```\n\n{what_to_do}这条是 `theflash inspect` 自动写的。\n",
         render(report)
     )
 }
