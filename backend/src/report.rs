@@ -41,8 +41,9 @@ pub fn render(e: &Event) -> String {
             Err(why) => {
                 let _ = writeln!(out, "  票档：获取失败（{why}）");
             }
-            Ok(tiers) if tiers.is_empty() => out.push_str("  票档：没有票档\n"),
-            Ok(tiers) => {
+            Ok(None) => out.push_str("  票档：未知（大麦没有提供票档列表）\n"),
+            Ok(Some(tiers)) if tiers.is_empty() => out.push_str("  票档：没有票档\n"),
+            Ok(Some(tiers)) => {
                 for t in tiers {
                     let price = t
                         .price
@@ -105,11 +106,11 @@ mod tests {
             sessions: vec![Session {
                 perform_id: 2,
                 name: None,
-                tiers: Ok(vec![Tier {
+                tiers: Ok(Some(vec![Tier {
                     name: None,
                     price: None,
                     status: TierStatus::Unknown("frontEndStatus 9".into()),
-                }]),
+                }])),
             }],
         }
     }

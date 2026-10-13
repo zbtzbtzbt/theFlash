@@ -13,7 +13,9 @@ pub use event::{Event, SaleState, Session, Tier, TierStatus};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("从“{0}”里找不到演出 ID：请给大麦演出详情页链接（含 id=数字）或纯数字 ID")]
+    #[error(
+        "从“{0}”里找不到演出 ID：请给有效的大麦演出详情页链接（detail.damai.cn/item.htm?id=数字 或 m.damai.cn/damai/detail/item.html?itemId=数字）或纯数字 ID"
+    )]
     InvalidInput(String),
     #[error("演出 {0} 不存在或已下架")]
     NotFound(u64),

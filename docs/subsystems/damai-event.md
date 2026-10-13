@@ -10,7 +10,7 @@
 
 ## 运行路径
 
-1. [`parse_item_id`](../../backend/src/damai/client.rs)：从输入里取演出 ID。支持 `detail.damai.cn/item.htm?id=`、`m.damai.cn/...?itemId=`，以及纯数字。取不到时退出码为 2，不发任何请求。
+1. [`parse_item_id`](../../backend/src/damai/client.rs)：从输入里取演出 ID。支持 HTTP/HTTPS 的 `detail.damai.cn/item.htm?id=`、`m.damai.cn/damai/detail/item.html?itemId=`，以及纯数字。链接先校验协议、主机、详情页路径，拒绝带用户信息、非默认端口或重复 ID 参数的链接；参数按 URL 规则解码。无效输入退出码为 2，不发任何请求。
 2. [`Client::event`](../../backend/src/damai/client.rs)：请求 `https://detail.damai.cn/item.htm?id=<ID>`，交给 [`parse_item_page`](../../backend/src/damai/page.rs) 解析。
 3. 对每个场次，按时间顺序依次请求票档接口 [`tier_url`](../../backend/src/damai/sku.rs)，相邻两次请求之间间隔 300 毫秒（`TIER_REQUEST_GAP`），再由 [`parse_sku_jsonp`](../../backend/src/damai/sku.rs) 解析。
 4. [`report::render`](../../backend/src/report.rs) 输出文本。大麦没给的值显示“未知”。
@@ -35,6 +35,8 @@
 - **日历选日期**（例如 1084537866279、1088814851105）：`performBases` 是空的，场次按月份放在 `calendarPerforms` 里。
 
 票档接口必须带 `dataType=2&dataId=<performId>`。不带 `dataType=2` 时，大麦总是返回默认场次，所以程序会核对返回的 `perform.performId`，对不上的话这一场显示“获取失败（接口返回的是另一个场次）”。
+
+`perform.skuList` 缺失或为 `null` 时，沿解析、查询和输出保留为未知，显示“票档：未知（大麦没有提供票档列表）”；只有明确的空数组才显示“没有票档”。非数组的值视为解析失败，显示该场次票档获取失败，不猜为空。
 
 接口里的数字字段是字符串（`"performId": "286937790"`），详情页里是数字；[`text::integer`](../../backend/src/damai/text.rs) 两种都接受。显示的文字按浏览器的方式合并连续空白：大麦数据里写的是 `2027-01-10  周日 15:00`，网页上显示的是一个空格。
 
@@ -67,7 +69,7 @@
 
 | 情况 | 输出 | 退出码 |
 | --- | --- | --- |
-| 输入里没有演出 ID | 找不到演出 ID 的提示，不发请求 | 2 |
+| 输入无效或没有演出 ID | 找不到演出 ID 的提示，不发请求 | 2 |
 | 演出不存在（页面 200，但没有 `dataDefault`） | 演出不存在或已下架 | 1 |
 | 网络失败 | 网络请求失败，附上底层原因 | 1 |
 | 任一响应是滑块验证页（含 `_____tmd_____` 或 `x5secdata`） | 触发风控，已停止，没有重试 | 1 |

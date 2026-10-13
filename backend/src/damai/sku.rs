@@ -20,7 +20,8 @@ pub(crate) struct PerformSkus {
     pub perform_id: Option<u64>,
     /// The buy button for this session, which can differ from the page's.
     pub buy_button: Option<BuyButton>,
-    pub skus: Vec<SkuRaw>,
+    /// None means skuList was missing or null; Some([]) is explicitly empty.
+    pub skus: Option<Vec<SkuRaw>>,
 }
 
 pub(crate) fn tier_url(base: &str, item_id: u64, perform_id: u64) -> String {
@@ -54,21 +55,25 @@ pub(crate) fn parse_sku_jsonp(body: &str) -> Result<PerformSkus, String> {
         let text = string(&b["btnText"]);
         (status.is_some() || text.is_some()).then_some(BuyButton { status, text })
     };
-    let skus = perform["skuList"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .map(|s| SkuRaw {
-            name: string(&s["priceName"]),
-            price: string(&s["price"]),
-            front_end_status: string(&s["frontEndStatus"]),
-            salable: match s["skuSalable"].as_str() {
-                Some("true") => Some(true),
-                Some("false") => Some(false),
-                _ => s["skuSalable"].as_bool(),
-            },
-        })
-        .collect();
+    let skus = match &perform["skuList"] {
+        Value::Null => None,
+        Value::Array(values) => Some(
+            values
+                .iter()
+                .map(|s| SkuRaw {
+                    name: string(&s["priceName"]),
+                    price: string(&s["price"]),
+                    front_end_status: string(&s["frontEndStatus"]),
+                    salable: match s["skuSalable"].as_str() {
+                        Some("true") => Some(true),
+                        Some("false") => Some(false),
+                        _ => s["skuSalable"].as_bool(),
+                    },
+                })
+                .collect(),
+        ),
+        _ => return Err("perform.skuList 不是数组".into()),
+    };
 
     Ok(PerformSkus {
         perform_id: integer(&perform["performId"]).and_then(|i| u64::try_from(i).ok()),
@@ -98,9 +103,10 @@ mod tests {
         let p = parse_sku_jsonp(&fixture("sku_on_sale_286937790.jsonp")).unwrap();
         assert_eq!(p.perform_id, Some(286937790));
         assert_eq!(p.buy_button.as_ref().and_then(|b| b.status), Some(204));
-        assert_eq!(p.skus.len(), 5);
+        let skus = p.skus.unwrap();
+        assert_eq!(skus.len(), 5);
         assert_eq!(
-            p.skus[0],
+            skus[0],
             SkuRaw {
                 name: Some("D-118元".into()),
                 price: Some("118.00".into()),
@@ -116,6 +122,7 @@ mod tests {
         assert_eq!(p.buy_button.as_ref().and_then(|b| b.status), Some(92));
         assert!(
             p.skus
+                .unwrap()
                 .iter()
                 .all(|s| s.front_end_status.as_deref() == Some("4"))
         );
