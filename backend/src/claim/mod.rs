@@ -115,6 +115,17 @@ impl Lease {
     }
 }
 
+/// Why an issue labelled `认领中` has no readable lease.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Problem {
+    /// No claim comment at all, or one missing a required field: somebody
+    /// may well be working, and only they can say so.
+    Unreadable,
+    /// The claim was handed back and the label outlived it, so the issue
+    /// is free and the next claim fixes the label.
+    HandedBack,
+}
+
 /// An issue that claims to be claimed but whose lease cannot be read, so
 /// the board reports it instead of quietly treating it as free or as
 /// taken.
@@ -122,6 +133,7 @@ impl Lease {
 pub struct Trouble {
     pub issue: u64,
     pub title: String,
+    pub problem: Problem,
     pub why: String,
 }
 
@@ -154,9 +166,10 @@ pub fn board(snapshot: &Snapshot) -> Board {
     for issue in &snapshot.issues {
         match read_lease(issue, &snapshot.pushes) {
             Ok(lease) => out.leases.push(lease),
-            Err(why) => out.trouble.push(Trouble {
+            Err((problem, why)) => out.trouble.push(Trouble {
                 issue: issue.number,
                 title: issue.title.clone(),
+                problem,
                 why,
             }),
         }
@@ -175,29 +188,35 @@ pub fn board(snapshot: &Snapshot) -> Board {
 pub fn read_lease(
     issue: &Issue,
     pushes: &BTreeMap<String, DateTime<Utc>>,
-) -> Result<Lease, String> {
+) -> Result<Lease, (Problem, String)> {
     let claim = issue
         .comments
         .iter()
         .rev()
         .find_map(|c| lease::parse_claim(&c.body, &c.url, c.posted_at))
         .ok_or_else(|| {
-            format!(
-                "标着 {} 但没有认领评论：没法知道是哪个 agent、在改哪些模块。\
-                 让持有者补一条认领评论（格式见 docs/subsystems/claim-lease.md），\
-                 或者在 issue 上问清楚之后手动去掉标签",
-                lease::CLAIM_LABEL
+            (
+                Problem::Unreadable,
+                format!(
+                    "标着 {} 但没有认领评论：没法知道是哪个 agent、在改哪些模块。\
+                     让持有者补一条认领评论（格式见 docs/subsystems/claim-lease.md），\
+                     或者在 issue 上问清楚之后手动去掉标签",
+                    lease::CLAIM_LABEL
+                ),
             )
         })?;
     if let Some(field) = claim.missing_field() {
-        return Err(format!(
-            "认领评论缺字段 `{field}`（{}）：补上之后才知道{}",
-            claim.url,
-            if field == "agent" {
-                "是哪个 agent 在做"
-            } else {
-                "它会改哪些模块，别人没法避开"
-            }
+        return Err((
+            Problem::Unreadable,
+            format!(
+                "认领评论缺字段 `{field}`（{}）：补上之后才知道{}",
+                claim.url,
+                if field == "agent" {
+                    "是哪个 agent 在做"
+                } else {
+                    "它会改哪些模块，别人没法避开"
+                }
+            ),
         ));
     }
     if issue
@@ -205,10 +224,14 @@ pub fn read_lease(
         .iter()
         .any(|c| c.posted_at > claim.posted_at && lease::is_reclaim(&c.body))
     {
-        return Err(format!(
-            "最后一条认领（{}）之后有人收回了它，但 {} 标签还在：没有人在做，去掉标签",
-            claim.url,
-            lease::CLAIM_LABEL
+        return Err((
+            Problem::HandedBack,
+            format!(
+                "最后一条认领（{}）之后有人收回了它，但 {} 标签还在：没有人在做，\
+                 下一次认领会把标签理顺",
+                claim.url,
+                lease::CLAIM_LABEL
+            ),
         ));
     }
     let mut last = Activity {
@@ -307,6 +330,17 @@ pub fn decide_claim(
             "#{} 带着 {}{owner} 标签，只能由 {owner} 认领",
             issue.number,
             lease::ASSIGNED_PREFIX
+        ));
+    }
+    if let Some(t) = board
+        .trouble
+        .iter()
+        .find(|t| t.issue == issue.number && t.problem == Problem::Unreadable)
+    {
+        return Verdict::Refuse(format!(
+            "#{} 的认领读不出来，所以不知道是不是有人在做：{}。\
+             先在 issue 上问清楚，别盖掉可能正在跑的工作",
+            issue.number, t.why
         ));
     }
     if let Some(held) = board.lease(issue.number) {

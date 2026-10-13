@@ -307,6 +307,26 @@ fn an_issue_labelled_claimed_with_no_claim_comment_is_reported_not_treated_as_fr
         "读不出来的认领不能当成过期的认领收回：\n{}",
         reclaim.out
     );
+
+    let claim = claims(
+        &replay,
+        "2026-10-14T06:10:00+08:00",
+        &[
+            "claim",
+            "--issue",
+            "31",
+            "--agent",
+            "Claude",
+            "--modules",
+            "docs/demo",
+        ],
+    );
+    assert_eq!(claim.code, 1, "{}", claim.out);
+    assert!(
+        claim.out.contains("问清楚"),
+        "读不出来的认领可能有人在做，不能直接盖掉：\n{}",
+        claim.out
+    );
 }
 
 #[test]

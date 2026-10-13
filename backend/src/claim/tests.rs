@@ -464,3 +464,51 @@ fn durations_read_like_a_person_wrote_them() {
     assert_eq!(minutes(60), "1 小时");
     assert_eq!(minutes(125), "2 小时 5 分钟");
 }
+
+#[test]
+fn an_unreadable_claim_is_not_a_free_issue() {
+    let labelled = issue(&[lease::CLAIM_LABEL], vec![]);
+    let board = board_of(labelled.clone());
+    let Verdict::Refuse(why) = decide_claim(
+        &board,
+        &labelled,
+        "Codex",
+        &["backend".to_string()],
+        None,
+        at("2026-10-14T06:10:00+08:00"),
+    ) else {
+        panic!("读不出来的认领可能有人在做，不能直接盖掉");
+    };
+    assert!(
+        why.contains("没有认领评论") && why.contains("问清楚"),
+        "{why}"
+    );
+}
+
+#[test]
+fn a_handed_back_issue_can_be_claimed_again_right_away() {
+    let handed_back = issue(
+        &[lease::CLAIM_LABEL],
+        vec![
+            comment(DEMO_CLAIM, "2026-10-14T03:05:55+08:00"),
+            comment(
+                "## 收回认领\n\n- 收回者: Claude\n",
+                "2026-10-14T06:10:00+08:00",
+            ),
+        ],
+    );
+    let board = board_of(handed_back.clone());
+    assert_eq!(board.trouble[0].problem, Problem::HandedBack);
+    assert!(
+        decide_claim(
+            &board,
+            &handed_back,
+            "Codex",
+            &["docs/demo".to_string()],
+            None,
+            at("2026-10-14T06:11:00+08:00"),
+        )
+        .is_ok(),
+        "认领被收回之后标签还在，下一个 agent 应该能直接认领"
+    );
+}
