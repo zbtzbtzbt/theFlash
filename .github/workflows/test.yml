@@ -44,10 +44,25 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
+      # A block cuts the whole machine off from damai.cn, and
+      # scripts/unblock-damai-hosts.sh is how a machine someone uses gets it
+      # back (#22). Only a throwaway runner like this one can show that it
+      # works on a real /etc/hosts: block, undo, and the file must be what
+      # it was.
+      - name: Undoing the damai.cn block restores /etc/hosts
+        shell: bash
+        timeout-minutes: 2
+        run: |
+          cp /etc/hosts "$RUNNER_TEMP/hosts.before"
+          bash scripts/block-damai-hosts.sh
+          bash scripts/unblock-damai-hosts.sh
+          diff -u "$RUNNER_TEMP/hosts.before" /etc/hosts
+
       # Automated tests and CI never touch the real damai.cn (owner's rule,
       # issue #7). Resolve every damai host to 0.0.0.0 before anything runs,
       # so a test that forgets its local mock server fails. Needs sudo to
-      # write /etc/hosts, which both runners have without a secret.
+      # write /etc/hosts, which both runners have without a secret. The
+      # script refuses on anything but a GitHub-hosted runner (#22).
       - name: Block the real damai.cn
         shell: bash
         timeout-minutes: 2

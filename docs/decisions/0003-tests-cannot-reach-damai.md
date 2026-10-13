@@ -36,4 +36,5 @@ owner 定了两条安全规则：自动化测试和 CI 绝不访问真实的大�
 - 登录相关的 fixture 一旦带了真实 cookie 或证件号，测试就红。白名单按“文件 + 规则”放行，范围比单行大，所以只给确认安全的文件用，不为真实数据开口子。
 - 截图里的文字扫描不到，仍然靠 [code-standards](../code-standards.md) 里的人工规则（agent 自己检查，出现凭据整张删掉重截）。
 - 陷阱只拦走代理环境变量的客户端。以后如果引入忽略环境变量的 HTTP 客户端（例如 `no_proxy()` 的 reqwest），第 3 层的 hosts 屏蔽仍然在 CI 里兜底，但本地失去保护；到那时应换成网络沙箱，并取代这条记录。
+- 第 3 层改的是整台机器的解析，所以只在用完即弃的 runner 上做：`block-damai-hosts.sh` 只在 `RUNNER_ENVIRONMENT=github-hosted` 时改 `/etc/hosts`，在别的机器上拒绝，免得同一台机器上的浏览器验证和 `theflash watch` 也连不上真实大麦（#22）。不用 `CI=true` 判断，因为 agent 常为了关掉交互提示自己设它。脚本写的每一行都带标记，[`scripts/unblock-damai-hosts.sh`](../../scripts/unblock-damai-hosts.sh) 只删带标记的行，以及加标记之前（e860486）写的 `0.0.0.0 <清单里的域名>` 行；CI 每次都在真实 `/etc/hosts` 上屏蔽再撤销，要求文件恢复原样。以后要在长期使用的机器（例如自托管 runner）上也做这层屏蔽，应换成只影响测试进程的网络沙箱，并取代这条记录。
 - 身份证号和手机号的检查按 ASCII 数字整段匹配，被字母或数字相连的长串不算；带空格、横线分隔的写法扫不到。
