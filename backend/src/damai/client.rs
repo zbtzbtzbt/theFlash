@@ -6,7 +6,7 @@ use chrono::DateTime;
 use super::Error;
 use super::event::{Event, Session, Tier, sale_state, tier_status};
 use super::page::parse_item_page;
-use super::sku::{parse_sku_jsonp, tier_url};
+use super::sku::{parse_sku_jsonp, session_mismatch, tier_url};
 
 pub const DEFAULT_BASE_URL: &str = "https://detail.damai.cn";
 
@@ -131,24 +131,24 @@ impl Client {
             let url = tier_url(&self.base, item_id, perform.id);
             let tiers = match self.get(&url, Some(&page_url)).await {
                 Ok(body) => match parse_sku_jsonp(&body) {
-                    Ok(p) if p.perform_id != Some(perform.id) => {
-                        Err(format!("接口返回的是另一个场次（{:?}）", p.perform_id))
-                    }
-                    Ok(p) => {
-                        let state = match &p.buy_button {
-                            Some(b) => sale_state(Some(b)),
-                            None => sale.clone(),
-                        };
-                        Ok(p.skus.map(|skus| {
-                            skus.iter()
-                                .map(|s| Tier {
-                                    name: s.name.clone(),
-                                    price: s.price.clone(),
-                                    status: tier_status(&state, s),
-                                })
-                                .collect()
-                        }))
-                    }
+                    Ok(p) => match session_mismatch(&p, perform.id) {
+                        Some(why) => Err(why),
+                        None => {
+                            let state = match &p.buy_button {
+                                Some(b) => sale_state(Some(b)),
+                                None => sale.clone(),
+                            };
+                            Ok(p.skus.map(|skus| {
+                                skus.iter()
+                                    .map(|s| Tier {
+                                        name: s.name.clone(),
+                                        price: s.price.clone(),
+                                        status: tier_status(&state, s),
+                                    })
+                                    .collect()
+                            }))
+                        }
+                    },
                     Err(reason) => Err(format!("看不懂票档数据：{reason}")),
                 },
                 Err(e @ Error::RiskControl(_)) => return Err(e),

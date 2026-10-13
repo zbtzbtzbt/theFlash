@@ -71,7 +71,9 @@ pub enum Need {
 pub struct Field {
     /// Dotted path into the response. A segment ending in `[]` stands for
     /// every element of that array, so `perform.skuList[].price` is checked
-    /// once per tier.
+    /// once per tier. A path that ends in `[]` is about the elements
+    /// themselves: `perform.skuList[]` says every tier is an object, which
+    /// is what the fields under it need in order to be anywhere at all.
     pub path: &'static str,
     /// The kinds the code reading this field can take; see
     /// [`crate::damai`]'s `text::string` (strings only) and `text::integer`
@@ -134,10 +136,22 @@ pub const ITEM_PAGE_FIELDS: &[Field] = &[
     ),
     f("dataDefault.performBases", &[Array], SESSIONS, "场次列表"),
     f(
+        "dataDefault.performBases[]",
+        &[Object],
+        Always,
+        "一天的场次",
+    ),
+    f(
         "dataDefault.performBases[].performs",
         &[Array],
         Always,
         "一天里的场次",
+    ),
+    f(
+        "dataDefault.performBases[].performs[]",
+        &[Object],
+        Always,
+        "一个场次",
     ),
     f(
         "dataDefault.performBases[].performs[].performId",
@@ -164,16 +178,34 @@ pub const ITEM_PAGE_FIELDS: &[Field] = &[
         "日历选日期的页面的场次",
     ),
     f(
+        "dataDefault.calendarPerforms[]",
+        &[Object],
+        Always,
+        "一个月",
+    ),
+    f(
         "dataDefault.calendarPerforms[].performBases",
         &[Array],
         Always,
         "一个月里的场次",
     ),
     f(
+        "dataDefault.calendarPerforms[].performBases[]",
+        &[Object],
+        Always,
+        "一天的场次",
+    ),
+    f(
         "dataDefault.calendarPerforms[].performBases[].performs",
         &[Array],
         Always,
         "一天里的场次",
+    ),
+    f(
+        "dataDefault.calendarPerforms[].performBases[].performs[]",
+        &[Object],
+        Always,
+        "一个场次",
     ),
     f(
         "dataDefault.calendarPerforms[].performBases[].performs[].performId",
@@ -235,6 +267,7 @@ pub const TIER_FIELDS: &[Field] = &[
         "核对接口返回的是问的那个场次",
     ),
     f("perform.skuList", &[Array, Kind::Null], Always, "票档列表"),
+    f("perform.skuList[]", &[Object], Always, "一个票档"),
     f("perform.skuList[].priceName", &[Str], Always, "票档名称"),
     f("perform.skuList[].price", &[Str], Always, "票价"),
     f(
@@ -282,6 +315,15 @@ impl Outcome {
     pub fn is_clean(&self) -> bool {
         self.absent.is_empty() && self.wrong_kind.is_none()
     }
+
+    /// The first place whose kind the readers cannot take, kept with where
+    /// it was so whoever fixes it can find it in the response.
+    fn take_kind(&mut self, at: std::string::String, value: &Value, field: &Field) {
+        let kind = Kind::of(value);
+        if !field.accepts.contains(&kind) && self.wrong_kind.is_none() {
+            self.wrong_kind = Some((at, kind));
+        }
+    }
 }
 
 /// Where in `root` one field is, and what is there.
@@ -293,9 +335,10 @@ pub fn look(root: &Value, field: &Field) -> Outcome {
         let (key, each) = split_each(name);
         let mut next = Vec::new();
         for (at, value) in current {
-            // A parent that is missing or not an object is reported by its
-            // own field, which is always declared (a test checks that), so
-            // descending stops here without reporting it twice.
+            // A parent that is missing, not an object, or an array element
+            // that is not an object is reported by its own field, which is
+            // always declared (two tests check that), so descending stops
+            // here without reporting it twice.
             let Some(child) = value.as_object().and_then(|o| o.get(key)) else {
                 continue;
             };
@@ -310,7 +353,7 @@ pub fn look(root: &Value, field: &Field) -> Outcome {
         }
         current = next;
     }
-    let (key, _) = split_each(last);
+    let (key, each) = split_each(last);
     let mut outcome = Outcome {
         path: field.path,
         places: 0,
@@ -321,15 +364,24 @@ pub fn look(root: &Value, field: &Field) -> Outcome {
         let Some(object) = value.as_object() else {
             continue;
         };
-        outcome.places += 1;
         let at = join(&at, key);
         match object.get(key) {
-            None => outcome.absent.push(at),
-            Some(v) => {
-                let kind = Kind::of(v);
-                if !field.accepts.contains(&kind) && outcome.wrong_kind.is_none() {
-                    outcome.wrong_kind = Some((at, kind));
+            // An array that is not there at all is reported by the array's
+            // own declaration, not by the one about its elements.
+            None if each => {}
+            None => {
+                outcome.places += 1;
+                outcome.absent.push(at);
+            }
+            Some(v) if each => {
+                for (i, item) in v.as_array().into_iter().flatten().enumerate() {
+                    outcome.places += 1;
+                    outcome.take_kind(format!("{at}[{i}]"), item, field);
                 }
+            }
+            Some(v) => {
+                outcome.places += 1;
+                outcome.take_kind(at, v, field);
             }
         }
     }
@@ -429,15 +481,19 @@ mod tests {
     }
 
     /// Every path's parent is declared too, so `look` can stay quiet about
-    /// parents and still have every change reported exactly once.
+    /// parents and still have every change reported exactly once. The
+    /// parent of `a.b[]` is the array `a.b`, not `a`.
     #[test]
     fn every_declared_path_has_its_parent_declared() {
         for fields in [ITEM_PAGE_FIELDS, TIER_FIELDS] {
             for field in fields {
-                let Some((parent, _)) = field.path.rsplit_once('.') else {
-                    continue;
+                let parent = match field.path.strip_suffix("[]") {
+                    Some(array) => array,
+                    None => match field.path.rsplit_once('.') {
+                        Some((parent, _)) => parent,
+                        None => continue,
+                    },
                 };
-                let parent = parent.trim_end_matches("[]");
                 assert!(
                     fields.iter().any(|f| f.path == parent),
                     "{} 的父节点 {parent} 没有声明，它不见了就不会被报出来",
@@ -447,16 +503,53 @@ mod tests {
         }
     }
 
+    /// Descending into an array means saying what its elements are. An
+    /// element that stopped being an object takes every field under it
+    /// away, and without a declaration for the elements `look` would walk
+    /// past it and call the response unchanged.
     #[test]
-    fn no_declared_path_ends_in_an_array_marker() {
+    fn every_array_a_path_descends_into_has_its_elements_declared() {
         for fields in [ITEM_PAGE_FIELDS, TIER_FIELDS] {
             for field in fields {
-                assert!(
-                    !field.path.ends_with("[]"),
-                    "{}：数组本身用不带 [] 的路径声明",
-                    field.path
-                );
+                let mut prefix = std::string::String::new();
+                for name in field.path.split('.') {
+                    if !prefix.is_empty() {
+                        prefix.push('.');
+                    }
+                    prefix.push_str(name);
+                    if !name.ends_with("[]") || prefix == field.path {
+                        continue;
+                    }
+                    assert!(
+                        fields.iter().any(|f| f.path == prefix),
+                        "{} 往 {prefix} 里走，但 {prefix} 的元素没有声明：元素不是对象时，它下面的字段会一声不响地全部消失",
+                        field.path
+                    );
+                }
             }
         }
+    }
+
+    /// The elements of an array are checked one by one, named with their
+    /// index, and the array's own absence stays the array's business.
+    #[test]
+    fn an_array_element_of_a_kind_the_reader_cannot_take_is_named_with_its_index() {
+        const ELEMENTS: &[Field] = &[
+            f("a", &[Object], Always, "试"),
+            f("a.b", &[Array], Always, "试"),
+            f("a.b[]", &[Object], Always, "试"),
+        ];
+        let each = field(ELEMENTS, "a.b[]").unwrap();
+
+        let root = json!({"a": {"b": [{"c": 1}, null]}});
+        let o = look(&root, each);
+        assert_eq!(o.places, 2);
+        assert_eq!(o.wrong_kind, Some(("a.b[1]".to_string(), Kind::Null)));
+        assert!(o.absent.is_empty());
+
+        assert!(look(&json!({"a": {"b": [{}, {}]}}), each).is_clean());
+        let gone = look(&json!({"a": {}}), each);
+        assert_eq!(gone.places, 0, "数组不见了由数组自己报");
+        assert!(gone.is_clean());
     }
 }

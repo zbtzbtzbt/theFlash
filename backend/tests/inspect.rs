@@ -322,6 +322,361 @@ fn a_run_asks_about_at_most_as_many_events_as_it_was_allowed() {
     assert_eq!(out.status.code(), Some(0), "{text}");
 }
 
+/// An array element that stopped being an object takes every field under
+/// it away. Without a word about the elements themselves, a tier list of
+/// nulls reads as "nothing changed" while no user could buy a ticket.
+#[test]
+fn a_tier_list_whose_elements_are_no_longer_objects_is_reported() {
+    let home = Home::new("tier-elements");
+    // The saved response with only its tier list emptied of objects: the
+    // callback and every other field stay as damai.cn wrote them.
+    let routes = changed(unchanged_routes(), "dataId=286937788", |body| {
+        let (open, close) = (body.find('(').unwrap(), body.rfind(')').unwrap());
+        let mut json: serde_json::Value = serde_json::from_str(&body[open + 1..close]).unwrap();
+        json["perform"]["skuList"] = serde_json::json!([null]);
+        format!("{}({}){}", &body[..open], json, &body[close + 1..])
+    });
+    let damai = support::MockDamai::start_bodies(routes);
+    let out = run(&home, &damai, &[]);
+    let text = stdout(&out);
+    assert!(text.contains("perform.skuList[0] 变成了null"), "{text}");
+    assert_eq!(out.status.code(), Some(1), "{text}");
+}
+
+/// damai.cn can answer the tier endpoint with every field in place and
+/// still say the query failed. `theflash event` refuses that response, so
+/// an inspection that called it unchanged would be saying the opposite of
+/// what a user sees.
+#[test]
+fn a_tier_response_damai_marked_failed_is_reported_even_though_its_shape_is_intact() {
+    let home = Home::new("tier-failed");
+    let routes = changed(unchanged_routes(), "dataId=286937788", |body| {
+        body.replace(
+            r#""responseInfo":{"responseSuccess":"true","responseCode":""}"#,
+            r#""responseInfo":{"responseSuccess":"false","responseCode":"X1"}"#,
+        )
+    });
+    let damai = support::MockDamai::start_bodies(routes);
+    let out = run(&home, &damai, &[]);
+    let text = stdout(&out);
+    assert!(
+        text.contains("结构：和 testdata 里的一样"),
+        "字段都还在：{text}"
+    );
+    assert!(text.contains("票档接口：接口返回失败"), "{text}");
+    assert!(text.contains("X1"), "{text}");
+    assert_eq!(out.status.code(), Some(1), "{text}");
+}
+
+/// The same for a response about another session: theFlash asked for one
+/// session's tiers and would be showing someone else's.
+#[test]
+fn a_tier_response_about_another_session_is_reported() {
+    let home = Home::new("tier-other-session");
+    let routes = changed(unchanged_routes(), "dataId=286937788", |body| {
+        body.replace(r#""performId":"286937788""#, r#""performId":"286937791""#)
+    });
+    let damai = support::MockDamai::start_bodies(routes);
+    let out = run(&home, &damai, &[]);
+    let text = stdout(&out);
+    assert!(
+        text.contains("票档接口：接口返回的是另一个场次（286937791）"),
+        "{text}"
+    );
+    assert_eq!(out.status.code(), Some(1), "{text}");
+}
+
+/// The default command, which is what a scheduled run uses: a sample that
+/// went stale is replaced without anyone passing --max-events. A budget
+/// with no room for a replacement meant the home page was never read, and
+/// the stale set — which names one event twice — spent a request on it.
+#[test]
+fn the_default_run_has_room_to_replace_a_stale_sample() {
+    let home = Home::new("default-replaces");
+    let samples = home.path().join("samples.json");
+    std::fs::write(
+        &samples,
+        // 1077137031347 is sold out, so it stands for onSale no longer,
+        // and it is named twice.
+        r#"{"updatedAt":"2026-10-14 03:00（北京时间）","samples":[
+             {"itemId":1077137031347,"category":"onSale"},
+             {"itemId":1092337348536,"category":"notYetOnSale"},
+             {"itemId":1077137031347,"category":"soldOut"},
+             {"itemId":1084537866279,"category":"calendar"},
+             {"itemId":1080486727522,"category":"notOnPcChannel"}]}"#,
+    )
+    .unwrap();
+    let damai =
+        support::MockDamai::start_bodies(with_route(unchanged_routes(), home_with(1086791513717)));
+    let out = run(&home, &damai, &["--samples", samples.to_str().unwrap()]);
+    let text = stdout(&out);
+    assert!(
+        damai.hits().iter().any(|h| h == "GET /"),
+        "默认预算下没去首页找新样本：{:?}",
+        damai.hits()
+    );
+    assert_eq!(
+        damai
+            .hits()
+            .iter()
+            .filter(|h| h.contains("id=1077137031347"))
+            .count(),
+        1,
+        "同一场被问了两遍：{:?}",
+        damai.hits()
+    );
+    assert!(text.contains("[已开售] 1086791513717"), "{text}");
+    let saved = std::fs::read_to_string(&samples).unwrap();
+    for category in [
+        "onSale",
+        "notYetOnSale",
+        "soldOut",
+        "calendar",
+        "notOnPcChannel",
+    ] {
+        assert!(saved.contains(category), "{category} 没了：{saved}");
+    }
+    assert!(saved.contains("1086791513717"), "{saved}");
+    assert_eq!(out.status.code(), Some(0), "换样本本身不算发现：{text}");
+}
+
+/// Five situations means five samples, so a budget of exactly five left a
+/// run no request to spend on a replacement: it read every sample, found a
+/// situation uncovered, and stopped without ever asking the home page. The
+/// budget is a ceiling with room above the five, not a target.
+#[test]
+fn the_default_budget_leaves_room_to_replace_one_of_five_separate_samples() {
+    let home = Home::new("default-budget");
+    let samples = home.path().join("samples.json");
+    // The event this run was watching for 已开售 was taken down, which is
+    // what a sample going stale looks like at its worst.
+    std::fs::write(
+        &samples,
+        r#"{"updatedAt":"2026-10-14 03:00（北京时间）","samples":[
+             {"itemId":1090000000001,"category":"onSale"},
+             {"itemId":1092337348536,"category":"notYetOnSale"},
+             {"itemId":1077137031347,"category":"soldOut"},
+             {"itemId":1084537866279,"category":"calendar"},
+             {"itemId":1080486727522,"category":"notOnPcChannel"}]}"#,
+    )
+    .unwrap();
+    let gone = (
+        "/item.htm?id=1090000000001".to_string(),
+        support::fixture("item_not_found.html"),
+    );
+    let routes = with_route(unchanged_routes(), gone);
+    let damai = support::MockDamai::start_bodies(with_route(routes, home_with(1086791513717)));
+    let out = run(&home, &damai, &["--samples", samples.to_str().unwrap()]);
+    let text = stdout(&out);
+    assert!(
+        damai.hits().iter().any(|h| h == "GET /"),
+        "五个样本就把预算花光了，没去首页找替代：{:?}",
+        damai.hits()
+    );
+    assert!(text.contains("[已开售] 1086791513717"), "{text}");
+    let saved = std::fs::read_to_string(&samples).unwrap();
+    assert!(saved.contains("1086791513717"), "{saved}");
+    assert!(
+        !saved.contains("1090000000001"),
+        "下架的那场还留在样本集里：{saved}"
+    );
+}
+
+/// A situation left without a sample is not a healthy run: nobody is
+/// watching it until an agent hands it a new event. The old sample stays
+/// in the file, so the next run still inspects as much as this one did.
+#[test]
+fn a_situation_left_without_a_sample_fails_and_keeps_the_sample_it_had() {
+    let home = Home::new("coverage-lost");
+    let samples = home.path().join("samples.json");
+    std::fs::write(
+        &samples,
+        r#"{"updatedAt":"2026-10-14 03:00（北京时间）","samples":[
+             {"itemId":1077137031347,"category":"onSale"},
+             {"itemId":1092337348536,"category":"notYetOnSale"},
+             {"itemId":1077137031347,"category":"soldOut"},
+             {"itemId":1084537866279,"category":"calendar"},
+             {"itemId":1080486727522,"category":"notOnPcChannel"}]}"#,
+    )
+    .unwrap();
+    // The home page as damai.cn really serves it today: no detail link, so
+    // there is no replacement to be had (#39).
+    let no_candidates = (
+        "/".to_string(),
+        "<html><body>没有演出链接</body></html>".to_string(),
+    );
+    let damai = support::MockDamai::start_bodies(with_route(unchanged_routes(), no_candidates));
+    let out = run(&home, &damai, &["--samples", samples.to_str().unwrap()]);
+    let text = stdout(&out);
+    assert!(text.contains("缺样本：已开售"), "{text}");
+    assert!(text.contains("1 类没有样本了"), "{text}");
+    assert_eq!(out.status.code(), Some(1), "{text}");
+    let saved = std::fs::read_to_string(&samples).unwrap();
+    assert!(
+        saved.contains("\"onSale\""),
+        "丢了的那一类被从样本文件里删掉了，下次就不查了：{saved}"
+    );
+    assert_eq!(saved.matches("itemId").count(), 5, "样本集缩水了：{saved}");
+}
+
+/// A candidate is the response as damai.cn sent it, under the name the
+/// fixture beside it has: whoever fixes the change copies it into
+/// testdata/damai and the same readers replay it.
+#[test]
+fn a_candidate_is_the_response_as_damai_sent_it() {
+    let home = Home::new("candidate-bytes");
+    let dir = home.path().join("candidates");
+    let tiers = support::fixture("sku_on_sale_286937788.jsonp")
+        .replace("\"frontEndStatus\":\"2\"", "\"frontEndStatus\":\"777\"");
+    let routes = changed(unchanged_routes(), "dataId=286937788", |_| tiers.clone());
+    let damai = support::MockDamai::start_bodies(routes);
+    let out = run(&home, &damai, &["--candidates", dir.to_str().unwrap()]);
+    let text = stdout(&out);
+    assert_eq!(out.status.code(), Some(1), "{text}");
+    assert_eq!(
+        std::fs::read_to_string(dir.join("sku_1086791513717_286937788.jsonp")).unwrap(),
+        tiers,
+        "候选票档响应不是大麦发的那份字节"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("item_1086791513717.html")).unwrap(),
+        support::fixture("item_on_sale.html"),
+        "候选详情页不是大麦发的那份字节"
+    );
+}
+
+/// A response theFlash could not read at all is exactly the one whoever
+/// fixes the change has to replay, so it is kept too — it used to be
+/// thrown away, leaving the issue with nothing to reproduce from.
+#[test]
+fn a_response_that_cannot_be_read_is_kept_as_a_candidate() {
+    let home = Home::new("candidate-unreadable");
+    let dir = home.path().join("candidates");
+    let broken = "<html>upstream new layout</html>".to_string();
+    let routes = changed(unchanged_routes(), "dataId=286937788", |_| broken.clone());
+    let routes = changed(routes, "/item.htm?id=1092337348536", |_| broken.clone());
+    let damai = support::MockDamai::start_bodies(routes);
+    let out = run(&home, &damai, &["--candidates", dir.to_str().unwrap()]);
+    let text = stdout(&out);
+    assert_eq!(out.status.code(), Some(1), "{text}");
+    assert_eq!(
+        candidate(&dir, "sku_1086791513717_286937788.jsonp"),
+        broken,
+        "读不懂的票档响应没留下来"
+    );
+    assert_eq!(
+        candidate(&dir, "item_1092337348536.html"),
+        broken,
+        "读不懂的详情页没留下来"
+    );
+}
+
+/// What a run wrote for whoever fixes the change, with a message that says
+/// what is missing rather than only that a file is.
+fn candidate(dir: &Path, name: &str) -> String {
+    std::fs::read_to_string(dir.join(name)).unwrap_or_else(|e| {
+        let wrote: Vec<String> = std::fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        panic!("没有留下候选 {name}（{e}）；这次写出来的是 {wrote:?}")
+    })
+}
+
+/// The gap between requests is a wait, not a printed promise: every agent
+/// shares the owner's one address. Measured where it counts, at the
+/// server, across the detail page, the home page and the tier endpoint.
+#[test]
+fn a_run_waits_between_every_request_it_sends() {
+    let home = Home::new("gap-run");
+    let samples = home.path().join("samples.json");
+    std::fs::write(
+        &samples,
+        r#"{"updatedAt":"2026-10-14 03:00（北京时间）","samples":[
+             {"itemId":1077137031347,"category":"onSale"}]}"#,
+    )
+    .unwrap();
+    let damai =
+        support::MockDamai::start_bodies(with_route(unchanged_routes(), home_with(1086791513717)));
+    let mut cmd = home.theflash(&damai.base_url());
+    cmd.args([
+        "inspect",
+        "--samples",
+        samples.to_str().unwrap(),
+        "--gap",
+        "1",
+    ]);
+    let out = support::output_within(cmd, 60);
+    let hits = damai.hits();
+    assert!(hits.iter().any(|h| h == "GET /"), "没请求首页：{hits:?}");
+    assert!(
+        hits.iter().any(|h| h.contains("dataId=")),
+        "没请求票档接口：{hits:?}"
+    );
+    assert!(
+        hits.iter().filter(|h| h.contains("/item.htm")).count() >= 2,
+        "{hits:?}"
+    );
+    let gaps = damai.gaps();
+    assert!(gaps.len() >= 4, "请求太少，测不出节流：{hits:?}");
+    for (i, gap) in gaps.iter().enumerate() {
+        assert!(
+            *gap >= std::time::Duration::from_millis(900),
+            "第 {} 个请求只隔了 {gap:?}：{hits:?}\n{}",
+            i + 2,
+            stdout(&out)
+        );
+    }
+}
+
+/// Recording a fixture is the same promise: one page and each session's
+/// tiers, a wait apart.
+#[test]
+fn record_waits_between_the_page_and_each_session() {
+    let home = Home::new("gap-record");
+    let dir = home.path().join("testdata");
+    std::fs::create_dir_all(&dir).unwrap();
+    let second = (
+        "dataId=286937790".to_string(),
+        support::fixture("sku_on_sale_286937790.jsonp"),
+    );
+    let damai = support::MockDamai::start_bodies(with_route(unchanged_routes(), second));
+    let mut cmd = home.theflash(&damai.base_url());
+    cmd.args([
+        "inspect",
+        "record",
+        "1086791513717",
+        "--as",
+        "on_sale",
+        "--dir",
+        dir.to_str().unwrap(),
+        "--sessions",
+        "2",
+        "--gap",
+        "1",
+    ]);
+    let out = support::output_within(cmd, 60);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}{}{:?}",
+        stdout(&out),
+        String::from_utf8_lossy(&out.stderr),
+        damai.hits()
+    );
+    let gaps = damai.gaps();
+    assert!(gaps.len() >= 2, "{:?}", damai.hits());
+    for gap in &gaps {
+        assert!(
+            *gap >= std::time::Duration::from_millis(900),
+            "只隔了 {gap:?}：{:?}",
+            damai.hits()
+        );
+    }
+}
+
 /// The command an agent runs after damai.cn changed something: it writes
 /// the real responses where the tests replay them from.
 #[test]

@@ -84,6 +84,14 @@ impl MockDamai {
             .map(|(request, _)| request.clone())
             .collect()
     }
+
+    /// How long each request waited behind the one before it, measured
+    /// where it matters: when the request actually arrived. A pacing that
+    /// is only printed and not waited out shows up here as zero.
+    pub fn gaps(&self) -> Vec<std::time::Duration> {
+        let hits = self.hits.lock().unwrap();
+        hits.windows(2).map(|w| w[1].1 - w[0].1).collect()
+    }
 }
 
 impl Drop for MockDamai {

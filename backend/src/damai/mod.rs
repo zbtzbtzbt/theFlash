@@ -14,7 +14,7 @@ pub use event::{
     tier_code_is_mapped,
 };
 pub use page::item_page_json;
-pub use sku::tier_json;
+pub use sku::{tier_answer_problem, tier_json};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

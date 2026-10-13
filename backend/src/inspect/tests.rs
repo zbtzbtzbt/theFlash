@@ -7,6 +7,7 @@
 use serde_json::Value;
 
 use super::*;
+use crate::damai::tier_answer_problem;
 
 const ITEM_FIXTURES: [&str; 5] = [
     "item_on_sale.html",
@@ -208,6 +209,84 @@ fn a_field_that_changed_kind_is_reported_with_what_is_there_now() {
     );
 }
 
+/// An array element that stopped being an object takes every field under
+/// it away: `perform.skuList[0]` turning into null leaves `priceName`,
+/// `price` and `frontEndStatus` with nowhere to be, so without a word
+/// about the element itself the whole tier list would go missing quietly.
+#[test]
+fn a_tier_that_is_no_longer_an_object_is_reported_with_its_index() {
+    let mut json = tier_json_of("sku_on_sale_286937790.jsonp");
+    json["perform"]["skuList"] = Value::from(vec![Value::Null]);
+    let changes = changes_in(&json, shape::TIER_FIELDS);
+    assert_eq!(changes.len(), 1, "{changes:?}");
+    assert_eq!(
+        changes[0].what,
+        What::Changed {
+            at: "perform.skuList[0]".into(),
+            got: Kind::Null,
+        }
+    );
+    assert!(
+        changes[0].to_string().contains("一个票档"),
+        "{}",
+        changes[0]
+    );
+}
+
+/// The same for the arrays the sessions are listed in, on both kinds of
+/// page: an element that is not an object is where theFlash would lose
+/// every session it can ask tiers for.
+#[test]
+fn a_session_array_element_that_is_no_longer_an_object_is_reported() {
+    let mut json = item_json("item_on_sale.html");
+    json["dataDefault"]["performBases"][0]["performs"] = Value::from(vec![Value::from(7)]);
+    let changes = changes_in(&json, shape::ITEM_PAGE_FIELDS);
+    assert_eq!(changes.len(), 1, "{changes:?}");
+    assert_eq!(
+        changes[0].what,
+        What::Changed {
+            at: "dataDefault.performBases[0].performs[0]".into(),
+            got: Kind::Number,
+        }
+    );
+
+    let mut calendar = item_json("item_calendar.html");
+    calendar["dataDefault"]["calendarPerforms"] = Value::from(vec![Value::Null]);
+    let changes = changes_in(&calendar, shape::ITEM_PAGE_FIELDS);
+    assert_eq!(changes.len(), 1, "{changes:?}");
+    assert_eq!(
+        changes[0].what,
+        What::Changed {
+            at: "dataDefault.calendarPerforms[0]".into(),
+            got: Kind::Null,
+        }
+    );
+}
+
+/// damai.cn can answer the tier endpoint with a body of exactly the right
+/// shape that says the query failed, or one about another session.
+/// `damai::Client::event` refuses both, so an inspection that only looked
+/// at the shape would call a response no user could buy from "unchanged".
+#[test]
+fn a_tier_response_that_answers_no_one_is_a_finding_even_with_every_field_in_place() {
+    let good = tier_json_of("sku_on_sale_286937788.jsonp");
+    assert_eq!(tier_answer_problem(&good, 286937788), None);
+    assert!(changes_in(&good, shape::TIER_FIELDS).is_empty());
+
+    let mut failed = good.clone();
+    failed["responseInfo"]["responseSuccess"] = Value::from("false");
+    failed["responseInfo"]["responseCode"] = Value::from("X1");
+    assert!(
+        changes_in(&failed, shape::TIER_FIELDS).is_empty(),
+        "字段都在，只有语义变了"
+    );
+    let why = tier_answer_problem(&failed, 286937788).expect("接口说自己失败了");
+    assert!(why.contains("X1"), "{why}");
+
+    let other = tier_answer_problem(&good, 286937790).expect("返回的是另一个场次");
+    assert!(other.contains("286937788"), "{other}");
+}
+
 /// A page lists its sessions in `performBases` or, on a calendar page, in
 /// `calendarPerforms`. Neither alone is required, and a page with neither
 /// has no sessions theFlash can find, which is a change.
@@ -308,6 +387,7 @@ fn a_report_with_no_finding_says_so_and_one_with_a_finding_names_it() {
             failed: None,
             candidates: Vec::new(),
         }],
+        uncovered: Vec::new(),
         notes: Vec::new(),
     };
     assert!(!clean.has_findings());
@@ -352,9 +432,77 @@ fn findings_are_what_decides_whether_an_issue_is_opened() {
         at: "2026-10-14 04:00（北京时间）".into(),
         requests: 1,
         events: Vec::new(),
+        uncovered: Vec::new(),
         notes: vec!["说明不算发现".into()],
     };
     assert_eq!(report_findings(&clean, &Never).unwrap(), None);
+
+    // A situation with no sample left is a finding of its own: nobody is
+    // watching it until an agent hands it a new event.
+    let lost = Report {
+        uncovered: vec![Uncovered {
+            category: Category::OnSale,
+            why: "已开售：1077137031347 不再是这个状态".into(),
+        }],
+        ..clean
+    };
+    assert!(lost.has_findings());
+    assert!(
+        render(&lost).contains("缺样本：已开售"),
+        "{}",
+        render(&lost)
+    );
+    assert!(issue_title(&lost).contains("1 类没有样本"));
+}
+
+/// Asking for requests closer together than the real site's floor is only
+/// answered for a replay server on this machine. Anything else — the real
+/// damai.cn, another host, a value that is not a URL at all — waits the
+/// full gap: every agent shares the owner's one address, and whether the
+/// requests leave this machine is decided by where they go, not by whether
+/// an override happens to be set.
+#[test]
+fn only_a_replay_server_on_this_machine_may_be_asked_for_a_shorter_gap() {
+    for local in [
+        "http://127.0.0.1:8080",
+        "http://127.0.0.1:8080/",
+        "http://localhost:8080",
+        "http://[::1]:8080",
+    ] {
+        assert_eq!(
+            request_gap(Some(0), Some(local)),
+            (Duration::ZERO, None),
+            "{local}"
+        );
+    }
+    for elsewhere in [
+        damai::DEFAULT_BASE_URL,
+        damai::DEFAULT_HOME_URL,
+        "http://10.0.0.7:8080",
+        "http://127.0.0.1.example.com",
+        "127.0.0.1:8080",
+        "",
+        "\u{fffd}",
+    ] {
+        let (gap, refused) = request_gap(Some(0), Some(elsewhere));
+        assert_eq!(gap, DEFAULT_REQUEST_GAP, "{elsewhere}");
+        assert!(refused.is_some(), "{elsewhere} 被放行了，没有说明原因");
+    }
+    assert_eq!(
+        request_gap(Some(0), None).0,
+        DEFAULT_REQUEST_GAP,
+        "没有覆盖地址就是真实大麦"
+    );
+    // A longer gap is always the run's own business, and no gap asked for
+    // is the floor.
+    assert_eq!(
+        request_gap(Some(30), Some(damai::DEFAULT_BASE_URL)),
+        (Duration::from_secs(30), None)
+    );
+    assert_eq!(
+        request_gap(None, Some("http://127.0.0.1:1")).0,
+        DEFAULT_REQUEST_GAP
+    );
 }
 
 /// The state directory is spelled out, so a test fails if it moves: the

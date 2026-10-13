@@ -16,7 +16,7 @@ const USAGE: &str = "用法：
   theflash inspect [选项]             巡检真实大麦的页面结构，变了就报出来
       --samples <文件>                样本集，默认放在用户状态目录里
       --candidates <目录>             把脱敏后的候选 fixture 写到这里
-      --max-events <场数>             最多查几场，默认 5，上限 8
+      --max-events <场数>             最多查几场，默认 8（够查 5 类并换样本）
       --gap <秒>                      相邻请求至少隔几秒，默认 2
       --open-issue                    发现变化时开 issue 或追加评论（用 gh）
       --repo <owner/repo>             开 issue 开在哪个仓库，默认当前目录的
@@ -50,13 +50,25 @@ fn usage() -> ExitCode {
     ExitCode::from(2)
 }
 
+const BASE_URL_VAR: &str = "THEFLASH_DAMAI_BASE_URL";
+
+/// The replay server tests point theFlash at, when one is set. `client`
+/// and the request pacing both read it here, so they cannot disagree about
+/// whether the requests leave this machine: a value this process cannot
+/// read as text is kept exactly as it reads it, which is neither the real
+/// damai.cn nor a loopback address, so requests fail instead of quietly
+/// going to the real site at a replay server's pace.
+fn base_url() -> Option<String> {
+    std::env::var_os(BASE_URL_VAR).map(|v| v.to_string_lossy().into_owned())
+}
+
 /// Tests point this at a local server that replays saved damai.cn pages.
 /// The same server stands in for the home page, so no test reaches
 /// www.damai.cn either.
 fn client() -> Result<damai::Client, damai::Error> {
-    match std::env::var("THEFLASH_DAMAI_BASE_URL") {
-        Ok(base) => Ok(damai::Client::new(&base)?.with_home(base)),
-        Err(_) => damai::Client::new(damai::DEFAULT_BASE_URL),
+    match base_url() {
+        Some(base) => Ok(damai::Client::new(&base)?.with_home(base)),
+        None => damai::Client::new(damai::DEFAULT_BASE_URL),
     }
 }
 
@@ -172,21 +184,16 @@ async fn inspect_command(args: &[&str]) -> ExitCode {
 }
 
 /// Seconds between requests. Asking for less than the default is only
-/// allowed when the requests go to a local replay server, so a mistyped
-/// flag cannot turn an inspection into a burst at the real damai.cn.
+/// allowed when the requests go to a replay server on this machine, so
+/// neither a mistyped flag nor a base URL pointing elsewhere can turn an
+/// inspection into a burst at a real site. The rule itself is
+/// `inspect::request_gap`, where a test holds it.
 fn request_gap(asked: Option<u64>) -> Duration {
-    let real_damai = std::env::var_os("THEFLASH_DAMAI_BASE_URL").is_none();
-    match asked.map(Duration::from_secs) {
-        Some(gap) if real_damai && gap < inspect::DEFAULT_REQUEST_GAP => {
-            eprintln!(
-                "--gap 小于 {0} 秒，对真实大麦按 {0} 秒处理：所有 agent 共用一个出口 IP",
-                inspect::DEFAULT_REQUEST_GAP.as_secs()
-            );
-            inspect::DEFAULT_REQUEST_GAP
-        }
-        Some(gap) => gap,
-        None => inspect::DEFAULT_REQUEST_GAP,
+    let (gap, refused) = inspect::request_gap(asked, base_url().as_deref());
+    if let Some(line) = refused {
+        eprintln!("{line}");
     }
+    gap
 }
 
 async fn inspect_run(args: &[&str]) -> ExitCode {

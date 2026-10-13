@@ -24,7 +24,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use chrono::{DateTime, FixedOffset};
 use serde_json::Value;
 
-use crate::damai::{Client, Error, item_page_json, tier_json};
+use crate::damai::{self, Client, Error, item_page_json, tier_json};
 use codes::Unseen;
 use samples::{COVERAGE, Category, Sample};
 use shape::{Field, Kind, Need};
@@ -36,9 +36,12 @@ pub const DEFAULT_REQUEST_GAP: Duration = Duration::from_secs(2);
 
 /// How many events one run may request a page for, counting the ones it
 /// probes looking for a replacement sample. Five situations have to be
-/// covered, and sampling the whole site is explicitly not this tool's job
-/// (#8 is, under the owner's eye).
-pub const DEFAULT_MAX_EVENTS: usize = 5;
+/// covered, so a healthy run reads five pages and stops; the rest of the
+/// budget is the room a run needs to replace a sample that went stale,
+/// which a budget of exactly five left it without (#40 的审查). Sampling
+/// the whole site is explicitly not this tool's job (#8 is, under the
+/// owner's eye), which is what the ceiling is for.
+pub const DEFAULT_MAX_EVENTS: usize = 8;
 pub const MAX_MAX_EVENTS: usize = 8;
 
 pub struct Options {
@@ -123,20 +126,31 @@ impl EventReport {
     }
 }
 
+/// A situation theFlash has to handle that this run ended without a sample
+/// for: the saved one stopped showing it and the home page had no
+/// replacement. Nobody is watching that situation until an agent puts a
+/// new event in the sample file, so it is a finding and not a note.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Uncovered {
+    pub category: Category,
+    pub why: String,
+}
+
 pub struct Report {
     /// Beijing time, as everything else theFlash prints.
     pub at: String,
     pub requests: usize,
     pub events: Vec<EventReport>,
-    /// Which situations no sample covered, and anything else worth saying
-    /// that is not a finding about damai.cn.
+    /// Situations this run lost its sample for.
+    pub uncovered: Vec<Uncovered>,
+    /// Anything worth saying that is not a finding about damai.cn.
     pub notes: Vec<String>,
 }
 
 impl Report {
     /// Whether an agent has to look at this run.
     pub fn has_findings(&self) -> bool {
-        self.events.iter().any(|e| !e.is_clean())
+        self.events.iter().any(|e| !e.is_clean()) || !self.uncovered.is_empty()
     }
 
     pub fn changes(&self) -> usize {
@@ -146,6 +160,51 @@ impl Report {
     pub fn unseen_codes(&self) -> usize {
         self.events.iter().map(|e| e.unseen.len()).sum()
     }
+}
+
+/// Whether theFlash's damai.cn requests go to a replay server on this
+/// machine. `base` is the whole `THEFLASH_DAMAI_BASE_URL` override, and
+/// anything that is not a loopback address — the real damai.cn, another
+/// host, or a value this process could not read — is not one: those
+/// requests leave this machine and get the real site's pacing.
+pub fn is_local_replay(base: Option<&str>) -> bool {
+    let Some(base) = base else { return false };
+    let Ok(url) = reqwest::Url::parse(base) else {
+        return false;
+    };
+    if !matches!(url.scheme(), "http" | "https") {
+        return false;
+    }
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    // An IPv6 host is written in brackets in a URL.
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+}
+
+/// Seconds between requests, and the line to print when less than
+/// [`DEFAULT_REQUEST_GAP`] was asked for and refused. Only a replay server
+/// on this machine may be asked for faster, so neither a mistyped flag nor
+/// a base URL pointing somewhere else can turn an inspection into a burst
+/// at a real site: every agent shares the owner's one address.
+pub fn request_gap(asked: Option<u64>, base: Option<&str>) -> (Duration, Option<String>) {
+    let Some(asked) = asked.map(Duration::from_secs) else {
+        return (DEFAULT_REQUEST_GAP, None);
+    };
+    if asked >= DEFAULT_REQUEST_GAP || is_local_replay(base) {
+        return (asked, None);
+    }
+    (
+        DEFAULT_REQUEST_GAP,
+        Some(format!(
+            "--gap 小于 {0} 秒只有在请求发往本机回放服务器时才接受，这次按 {0} 秒处理：所有 agent 共用一个出口 IP",
+            DEFAULT_REQUEST_GAP.as_secs()
+        )),
+    )
 }
 
 /// At most one request every `gap`, counting every request of the run.
@@ -177,6 +236,7 @@ pub async fn run(client: &Client, opts: &Options) -> Result<Report, Error> {
         at: at.clone(),
         requests: 0,
         events: Vec::new(),
+        uncovered: Vec::new(),
         notes: note.into_iter().collect(),
     };
     let budget = opts.max_events.clamp(1, MAX_MAX_EVENTS);
@@ -191,29 +251,36 @@ pub async fn run(client: &Client, opts: &Options) -> Result<Report, Error> {
         last: None,
     };
 
-    // The pages read in this run, in the order they were read.
-    let mut pages: Vec<(u64, Value, Option<Category>)> = Vec::new();
-    let mut failures: Vec<(u64, String)> = Vec::new();
+    // The pages read in this run, in the order they were read, and the
+    // events whose page could not be read at all. The ids asked about are
+    // what the budget counts: a sample set that names one event twice
+    // costs one request, not two.
+    let mut pages: Vec<Page> = Vec::new();
+    let mut failures: Vec<Failed> = Vec::new();
+    let mut asked: Vec<u64> = Vec::new();
     for sample in &saved {
-        if pages.len() + failures.len() >= budget {
+        if asked.len() >= budget {
             break;
         }
-        match read_page(client, &mut pacer, &mut report.requests, sample.item_id).await? {
-            Ok(json) => {
-                let category = samples::classify(&json);
-                pages.push((sample.item_id, json, category));
-            }
-            Err(why) => failures.push((sample.item_id, why)),
+        if asked.contains(&sample.item_id) {
+            continue;
         }
+        asked.push(sample.item_id);
+        read_one(
+            client,
+            &mut pacer,
+            &mut report.requests,
+            sample.item_id,
+            &mut pages,
+            &mut failures,
+        )
+        .await?;
     }
 
     // Situations no page covers yet: take candidates off the home page.
+    let covered = |pages: &[Page], c: Category| pages.iter().any(|p| p.category == Some(c));
     let mut from_home: Vec<u64> = Vec::new();
-    if COVERAGE
-        .iter()
-        .any(|c| !pages.iter().any(|(_, _, got)| *got == Some(*c)))
-        && pages.len() + failures.len() < budget
-    {
+    if COVERAGE.iter().any(|c| !covered(&pages, *c)) && asked.len() < budget {
         match read_home(client, &mut pacer, &mut report.requests).await? {
             Ok(ids) if ids.is_empty() => report.notes.push(
                 "首页上没有演出链接（它的演出卡片是 JS 渲染的，匿名 HTML 里没有 \
@@ -225,112 +292,172 @@ pub async fn run(client: &Client, opts: &Options) -> Result<Report, Error> {
         }
     }
     for id in from_home {
-        let missing: Vec<Category> = COVERAGE
-            .into_iter()
-            .filter(|c| !pages.iter().any(|(_, _, got)| got == &Some(*c)))
-            .collect();
-        if missing.is_empty() || pages.len() + failures.len() >= budget {
+        if COVERAGE.iter().all(|c| covered(&pages, *c)) || asked.len() >= budget {
             break;
         }
-        if saved.iter().any(|s| s.item_id == id) || pages.iter().any(|(seen, _, _)| *seen == id) {
+        if asked.contains(&id) {
             continue;
         }
-        match read_page(client, &mut pacer, &mut report.requests, id).await? {
-            Ok(json) => {
-                let category = samples::classify(&json);
-                pages.push((id, json, category));
-            }
-            Err(why) => failures.push((id, why)),
-        }
+        asked.push(id);
+        read_one(
+            client,
+            &mut pacer,
+            &mut report.requests,
+            id,
+            &mut pages,
+            &mut failures,
+        )
+        .await?;
     }
 
-    // One sample per situation, newest reading first come first served.
+    // One sample per situation, newest reading first come first served. A
+    // situation with no page keeps the event it had: dropping it would
+    // quietly shrink what every later run inspects.
     let mut kept: Vec<Sample> = Vec::new();
     for category in COVERAGE {
-        let Some((id, json, _)) = pages.iter().find(|(_, _, got)| *got == Some(category)) else {
-            report.notes.push(format!(
-                "这次没有{}的样本：保存的样本不再是这个状态，也没有替代。\
-                 补一个：改 {}，把这一类的 itemId 换成一场现在是这个状态的演出",
-                category.name(),
-                opts.samples_path.display()
-            ));
+        if let Some(page) = pages.iter().find(|p| p.category == Some(category)) {
+            kept.push(Sample {
+                item_id: page.item_id,
+                category,
+                name: event_name(&page.json),
+            });
             continue;
-        };
-        kept.push(Sample {
-            item_id: *id,
-            category,
-            name: event_name(json),
-        });
+        }
+        let was = saved.iter().find(|s| s.category == category);
+        if let Some(was) = was {
+            kept.push(was.clone());
+        }
+        match was {
+            // Its page was read and no longer shows this situation, or
+            // could not be read: coverage is lost until an agent hands
+            // this situation a new event, so the run fails.
+            Some(was) if asked.contains(&was.item_id) => report.uncovered.push(Uncovered {
+                category,
+                why: format!(
+                    "{}：{} 不再是这个状态，首页也没有能替代它的演出。\
+                     补一个：改 {}，把这一类的 itemId 换成一场现在是这个状态的演出",
+                    category.name(),
+                    was.item_id,
+                    opts.samples_path.display()
+                ),
+            }),
+            // The budget ran out before its turn: this run looked at
+            // fewer events on purpose, which is not news about damai.cn.
+            Some(was) => report.notes.push(format!(
+                "这次没有{}的样本：预算（--max-events {budget}）在轮到 {} 之前就用完了",
+                category.name(),
+                was.item_id
+            )),
+            None => report.uncovered.push(Uncovered {
+                category,
+                why: format!(
+                    "{}：样本集里没有这一类。补一个：改 {}，加一场现在是这个状态的演出",
+                    category.name(),
+                    opts.samples_path.display()
+                ),
+            }),
+        }
     }
 
     // Every page read is checked, even one that covers no situation: its
     // fields are the same fields.
-    for (id, json, category) in &pages {
+    for page in &pages {
+        let id = page.item_id;
         let mut event = EventReport {
-            item_id: *id,
-            name: event_name(json),
-            category: *category,
+            item_id: id,
+            name: event_name(&page.json),
+            category: page.category,
             replaced: None,
             changes: Vec::new(),
-            unseen: codes::unseen_on_item_page(json),
+            unseen: codes::unseen_on_item_page(&page.json),
             session: None,
             failed: None,
             candidates: Vec::new(),
         };
-        let was = saved.iter().find(|s| Some(s.category) == *category);
+        let was = saved.iter().find(|s| Some(s.category) == page.category);
         if let Some(was) = was
-            && was.item_id != *id
+            && was.item_id != id
         {
             event.replaced = Some(was.item_id);
         }
-        collect(json, shape::ITEM_PAGE_FIELDS, &mut event.changes);
+        collect(&page.json, shape::ITEM_PAGE_FIELDS, &mut event.changes);
 
         // One session's tiers, when this page is a sample of a situation.
-        if kept.iter().any(|s| s.item_id == *id)
-            && let Some(perform_id) = first_perform_id(json)
+        let mut tier_body: Option<(u64, String)> = None;
+        if kept.iter().any(|s| s.item_id == id)
+            && let Some(perform_id) = first_perform_id(&page.json)
         {
             event.session = Some(perform_id);
-            match read_tiers(client, &mut pacer, &mut report.requests, *id, perform_id).await? {
+            let got = read_tiers(client, &mut pacer, &mut report.requests, id, perform_id).await?;
+            if let Some(body) = got.body {
+                tier_body = Some((perform_id, body));
+            }
+            match got.read {
                 Ok(tiers) => {
                     collect(&tiers, shape::TIER_FIELDS, &mut event.changes);
                     event.unseen.extend(codes::unseen_on_tiers(&tiers));
-                    if !event.is_clean()
-                        && let Some(dir) = &opts.candidates_dir
-                    {
-                        write_candidate(
-                            dir,
-                            &format!("sku_{id}_{perform_id}.jsonp"),
-                            &tiers.to_string(),
-                            &mut event,
-                            &mut report.notes,
-                        );
+                    // Every field can be in place in a response that says
+                    // the query failed, or that answers another session.
+                    if let Some(why) = damai::tier_answer_problem(&tiers, perform_id) {
+                        event.failed = Some(format!("票档接口：{why}"));
                     }
                 }
                 Err(why) => event.failed = Some(format!("票档接口：{why}")),
             }
         }
+
+        // The responses as damai.cn sent them, for whoever fixes this:
+        // same bytes, same file names as the fixtures in testdata/damai,
+        // so they can be dropped in and replayed.
         if !event.is_clean()
             && let Some(dir) = &opts.candidates_dir
         {
-            let name = format!("item_{id}.json");
-            let body = serde_json::to_string_pretty(json).unwrap_or_else(|_| json.to_string());
-            write_candidate(dir, &name, &body, &mut event, &mut report.notes);
+            write_candidate(
+                dir,
+                &format!("item_{id}.html"),
+                &page.body,
+                &mut event,
+                &mut report.notes,
+            );
+            if let Some((perform_id, body)) = &tier_body {
+                write_candidate(
+                    dir,
+                    &format!("sku_{id}_{perform_id}.jsonp"),
+                    body,
+                    &mut event,
+                    &mut report.notes,
+                );
+            }
         }
         report.events.push(event);
     }
 
-    for (id, why) in failures {
-        report.events.push(EventReport {
-            item_id: id,
+    for failed in failures {
+        let mut event = EventReport {
+            item_id: failed.item_id,
             name: None,
             category: None,
             replaced: None,
             changes: Vec::new(),
             unseen: Vec::new(),
             session: None,
-            failed: Some(why),
+            failed: Some(failed.why),
             candidates: Vec::new(),
-        });
+        };
+        // A response theFlash could not read is the one whoever fixes the
+        // change most needs to replay, so it is kept too.
+        if let Some(body) = &failed.body
+            && let Some(dir) = &opts.candidates_dir
+        {
+            write_candidate(
+                dir,
+                &format!("item_{}.html", failed.item_id),
+                body,
+                &mut event,
+                &mut report.notes,
+            );
+        }
+        report.events.push(event);
     }
 
     if !kept.is_empty()
@@ -339,6 +466,48 @@ pub async fn run(client: &Client, opts: &Options) -> Result<Report, Error> {
         report.notes.push(format!("样本没保存下来：{e}"));
     }
     Ok(report)
+}
+
+/// A page this run read, kept with the bytes damai.cn sent: a candidate
+/// fixture has to be the response itself, not theFlash's reading of it.
+struct Page {
+    item_id: u64,
+    json: Value,
+    category: Option<Category>,
+    body: String,
+}
+
+/// An event whose page this run could not read, with the response that
+/// could not be read when there was one.
+struct Failed {
+    item_id: u64,
+    why: String,
+    body: Option<String>,
+}
+
+async fn read_one(
+    client: &Client,
+    pacer: &mut Pacer,
+    requests: &mut usize,
+    item_id: u64,
+    pages: &mut Vec<Page>,
+    failures: &mut Vec<Failed>,
+) -> Result<(), Error> {
+    let got = read_page(client, pacer, requests, item_id).await?;
+    match got.read {
+        Ok(json) => pages.push(Page {
+            item_id,
+            category: samples::classify(&json),
+            json,
+            body: got.body.unwrap_or_default(),
+        }),
+        Err(why) => failures.push(Failed {
+            item_id,
+            why,
+            body: got.body,
+        }),
+    }
+    Ok(())
 }
 
 /// Turns one response into the changes between what theFlash depends on
@@ -391,24 +560,40 @@ fn collect(root: &Value, fields: &'static [Field], changes: &mut Vec<Change>) {
     }
 }
 
-/// `Ok(Err(why))` is this one event's problem; `Err(_)` stops the run.
+/// One response: what damai.cn sent, kept even when theFlash could not
+/// read it, and what it read out of it. `read` being `Err` is this one
+/// event's problem; `Err(_)` from these functions stops the run.
+struct Fetched {
+    body: Option<String>,
+    read: Result<Value, String>,
+}
+
 async fn read_page(
     client: &Client,
     pacer: &mut Pacer,
     requests: &mut usize,
     item_id: u64,
-) -> Result<Result<Value, String>, Error> {
+) -> Result<Fetched, Error> {
     pacer.wait().await;
     *requests += 1;
     let html = match client.item_page(item_id).await {
         Ok(html) => html,
         Err(e) if stops_the_run(&e) => return Err(e),
-        Err(e) => return Ok(Err(e.to_string())),
+        Err(e) => {
+            return Ok(Fetched {
+                body: None,
+                read: Err(e.to_string()),
+            });
+        }
     };
-    Ok(match item_page_json(&html) {
+    let read = match item_page_json(&html) {
         Ok(Some(json)) => Ok(json),
         Ok(None) => Err("页面里没有 dataDefault：演出不存在或已下架，这个样本该换了".into()),
         Err(why) => Err(format!("看不懂详情页里的 JSON：{why}")),
+    };
+    Ok(Fetched {
+        body: Some(html),
+        read,
     })
 }
 
@@ -418,15 +603,24 @@ async fn read_tiers(
     requests: &mut usize,
     item_id: u64,
     perform_id: u64,
-) -> Result<Result<Value, String>, Error> {
+) -> Result<Fetched, Error> {
     pacer.wait().await;
     *requests += 1;
     let body = match client.tier_page(item_id, perform_id).await {
         Ok(body) => body,
         Err(e) if stops_the_run(&e) => return Err(e),
-        Err(e) => return Ok(Err(e.to_string())),
+        Err(e) => {
+            return Ok(Fetched {
+                body: None,
+                read: Err(e.to_string()),
+            });
+        }
     };
-    Ok(tier_json(&body))
+    let read = tier_json(&body);
+    Ok(Fetched {
+        body: Some(body),
+        read,
+    })
 }
 
 async fn read_home(
@@ -675,6 +869,9 @@ pub fn render(report: &Report) -> String {
     for note in &report.notes {
         out.push_str(&format!("说明：{note}\n"));
     }
+    for lost in &report.uncovered {
+        out.push_str(&format!("缺样本：{}\n", lost.why));
+    }
     for event in &report.events {
         let category = event.category.map_or("未分类", Category::name);
         let name = event.name.as_deref().unwrap_or("名称未知");
@@ -718,9 +915,10 @@ pub fn render(report: &Report) -> String {
     out.push('\n');
     if report.has_findings() {
         out.push_str(&format!(
-            "结论：发现 {} 处结构变化、{} 个没见过的状态码。大麦很可能改版了，请按候选 fixture 核对并修。\n",
+            "结论：发现 {} 处结构变化、{} 个没见过的状态码、{} 类没有样本了。大麦很可能改版了，请按候选 fixture 核对并修。\n",
             report.changes(),
-            report.unseen_codes()
+            report.unseen_codes(),
+            report.uncovered.len()
         ));
     } else {
         out.push_str("结论：没有变化。\n");
@@ -728,10 +926,33 @@ pub fn render(report: &Report) -> String {
     out
 }
 
-/// The report as an issue body: the same text, plus what to do with it.
+/// The report as an issue body: the same text, plus how to get the
+/// responses it is talking about. The candidate files are on the machine
+/// that ran the inspection, so whoever picks this up is told both where
+/// they are and the command that fetches them again anywhere else —
+/// without it the issue would only name paths nobody else can open.
 pub fn issue_body(report: &Report) -> String {
+    let mut how = String::new();
+    let candidates: Vec<&PathBuf> = report
+        .events
+        .iter()
+        .flat_map(|e| e.candidates.iter())
+        .collect();
+    if candidates.is_empty() {
+        how.push_str(
+            "这次没有留下候选响应（巡检没加 `--candidates`，或者脱敏之后还命中凭据规则所以整份丢掉了）。\
+             用下面的命令自己取一份：\n\n",
+        );
+    } else {
+        how.push_str("脱敏后的候选响应在跑巡检的那台机器上，文件名就是 `backend/testdata/damai/` 里的 fixture 名，拷进去就能回放：\n\n");
+        for path in &candidates {
+            how.push_str(&format!("- `{}`\n", path.display()));
+        }
+        how.push_str("\n拿不到那台机器就自己重录（要先拿 damai-lock）：\n\n");
+    }
+    how.push_str("```sh\ntheflash inspect record <演出链接或ID> --as <名字> --sessions 1\n```\n");
     format!(
-        "`theflash inspect` 在真实大麦上发现了变化。\n\n```\n{}```\n\n\
+        "`theflash inspect` 在真实大麦上发现了变化。\n\n```\n{}```\n\n{how}\n\
          怎么处理：按 docs/subsystems/damai-inspect.md 用候选 fixture 复现，\
          先写一个会失败的测试，再改解析或状态映射；没见过的状态码要先在大麦页面上核对它显示的文字，再加进映射表。\n\n\
          这条是 `theflash inspect` 自动写的。\n",
@@ -750,6 +971,9 @@ pub fn issue_title(report: &Report) -> String {
     let failed = report.events.iter().filter(|e| e.failed.is_some()).count();
     if failed > 0 {
         parts.push(format!("{failed} 场查不了"));
+    }
+    if !report.uncovered.is_empty() {
+        parts.push(format!("{} 类没有样本", report.uncovered.len()));
     }
     format!("大麦改版巡检：{}", parts.join("，"))
 }

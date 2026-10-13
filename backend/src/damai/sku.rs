@@ -44,8 +44,14 @@ pub fn tier_json(body: &str) -> Result<Value, String> {
 }
 
 pub(crate) fn parse_sku_jsonp(body: &str) -> Result<PerformSkus, String> {
-    let data = tier_json(body)?;
+    parse_sku_json(&tier_json(body)?)
+}
 
+/// The tiers in a response damai.cn already sent, which is what the
+/// structure inspection has in hand. Kept apart from `parse_sku_jsonp` so
+/// "what this response means" has one definition: a run that only compared
+/// field paths would call a response theFlash cannot read "unchanged".
+pub(crate) fn parse_sku_json(data: &Value) -> Result<PerformSkus, String> {
     let info = &data["responseInfo"];
     if info["responseSuccess"].as_str() == Some("false") {
         return Err(format!(
@@ -85,6 +91,31 @@ pub(crate) fn parse_sku_jsonp(body: &str) -> Result<PerformSkus, String> {
         perform_id: integer(&perform["performId"]).and_then(|i| u64::try_from(i).ok()),
         buy_button,
         skus,
+    })
+}
+
+/// Why this response carries no tiers for the session that was asked
+/// about, or None when it does. damai.cn answers a session that is gone,
+/// or a request it did not like, with a body of exactly the right shape:
+/// only `responseSuccess` and the session id say so. Public so the
+/// structure inspection asks the same question a query does.
+pub fn tier_answer_problem(data: &Value, asked: u64) -> Option<String> {
+    match parse_sku_json(data) {
+        Err(why) => Some(why),
+        Ok(p) => session_mismatch(&p, asked),
+    }
+}
+
+/// Why these tiers are not the ones that were asked for, or None when they
+/// are. Both the event query and the inspection ask here, so a response
+/// about another session cannot be a failure in one and fine in the other.
+pub(crate) fn session_mismatch(p: &PerformSkus, asked: u64) -> Option<String> {
+    (p.perform_id != Some(asked)).then(|| {
+        format!(
+            "接口返回的是另一个场次（{}）",
+            p.perform_id
+                .map_or_else(|| "没有场次 ID".to_string(), |id| id.to_string())
+        )
     })
 }
 
