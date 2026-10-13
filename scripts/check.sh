@@ -10,7 +10,15 @@ echo "== backend (Rust)"
   cd backend
   cargo fmt --check
   cargo clippy --all-targets -- -D warnings
-  cargo test
+  # Tests never reach the real damai.cn: a test process that sends a request
+  # to anything but this machine goes to a proxy nothing listens on and
+  # fails. Tests that start the theflash binary replace this with a tripwire
+  # that says what was attempted (backend/tests/support/mod.rs).
+  dead=http://127.0.0.1:9
+  HTTP_PROXY=$dead HTTPS_PROXY=$dead ALL_PROXY=$dead \
+    http_proxy=$dead https_proxy=$dead all_proxy=$dead \
+    NO_PROXY=127.0.0.1,localhost,::1 no_proxy=127.0.0.1,localhost,::1 \
+    cargo test
   cargo build
 )
 

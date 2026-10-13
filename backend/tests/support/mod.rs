@@ -7,7 +7,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
 use std::time::Instant;
 
@@ -183,20 +183,61 @@ pub fn output_within(mut cmd: Command, secs: u64) -> std::process::Output {
     }
 }
 
-/// The theflash binary with its damai.cn requests sent to `base_url` and
-/// the machine's proxies cleared.
+/// The theflash binary with its damai.cn requests sent to `base_url`, and
+/// every request that is not for this machine caught by `offline`.
 pub fn theflash(base_url: &str) -> Command {
     let mut c = Command::new(env!("CARGO_BIN_EXE_theflash"));
     c.env("THEFLASH_DAMAI_BASE_URL", base_url);
-    for v in [
-        "HTTP_PROXY",
-        "http_proxy",
-        "HTTPS_PROXY",
-        "https_proxy",
-        "ALL_PROXY",
-        "all_proxy",
-    ] {
-        c.env_remove(v);
-    }
+    offline(&mut c);
     c
+}
+
+/// Makes `cmd` unable to reach the real damai.cn: its proxies become a
+/// tripwire, and only this machine's addresses skip the proxy. A test that
+/// forgets THEFLASH_DAMAI_BASE_URL sends its request to the tripwire, which
+/// ends the test process with a message saying so. Every test that starts
+/// the binary goes through here (tests/repo_guard.rs checks that).
+pub fn offline(cmd: &mut Command) {
+    let proxy = tripwire();
+    for v in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"] {
+        cmd.env(v, proxy);
+        cmd.env(v.to_lowercase(), proxy);
+    }
+    cmd.env("NO_PROXY", "127.0.0.1,localhost,::1");
+    cmd.env("no_proxy", "127.0.0.1,localhost,::1");
+}
+
+/// The address of a proxy that fails the test run for any request it
+/// receives. One per test binary, started on first use; it ends with the
+/// binary, and nothing a test starts depends on it.
+fn tripwire() -> &'static str {
+    static ADDR: OnceLock<String> = OnceLock::new();
+    ADDR.get_or_init(|| {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                tripped(stream);
+            }
+        });
+        format!("http://{addr}")
+    })
+}
+
+/// A request reached the tripwire, so something tried to leave this
+/// machine. Panicking here would only end this thread, and the test that
+/// caused it might still pass, so the whole run ends with exit code 101,
+/// the code of a failed test. stderr is written directly because the test
+/// harness hides what `eprintln!` prints from a passing or a killed test.
+fn tripped(stream: TcpStream) {
+    let mut request = String::new();
+    let _ = BufReader::new(stream).read_line(&mut request);
+    let message = format!(
+        "\n测试试图访问真实大麦：theflash 发出了 `{}`，目标不是本机。\n\
+         测试必须把 THEFLASH_DAMAI_BASE_URL 指向本地假服务器（MockDamai）。\
+         测试进程已终止。\n",
+        request.trim()
+    );
+    let _ = std::io::stderr().write_all(message.as_bytes());
+    std::process::exit(101);
 }
