@@ -30,15 +30,21 @@ pub(crate) fn tier_url(base: &str, item_id: u64, perform_id: u64) -> String {
     )
 }
 
-pub(crate) fn parse_sku_jsonp(body: &str) -> Result<PerformSkus, String> {
+/// The JSON a JSONP response carries, which is what the tier endpoint
+/// answers inside its callback. Public so the structure inspection sees
+/// damai.cn's own shape rather than what `parse_sku_jsonp` read out of it.
+pub fn tier_json(body: &str) -> Result<Value, String> {
     let (Some(open), Some(close)) = (body.find('('), body.rfind(')')) else {
         return Err(format!("不是 JSONP：{}", head(body)));
     };
     if close <= open {
         return Err(format!("不是 JSONP：{}", head(body)));
     }
-    let data: Value =
-        serde_json::from_str(&body[open + 1..close]).map_err(|e| format!("JSON 无效：{e}"))?;
+    serde_json::from_str(&body[open + 1..close]).map_err(|e| format!("JSON 无效：{e}"))
+}
+
+pub(crate) fn parse_sku_jsonp(body: &str) -> Result<PerformSkus, String> {
+    let data = tier_json(body)?;
 
     let info = &data["responseInfo"];
     if info["responseSuccess"].as_str() == Some("false") {

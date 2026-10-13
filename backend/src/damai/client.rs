@@ -10,6 +10,11 @@ use super::sku::{parse_sku_jsonp, tier_url};
 
 pub const DEFAULT_BASE_URL: &str = "https://detail.damai.cn";
 
+/// damai.cn's home page, the only place the structure inspection takes new
+/// samples from: the search endpoint answers its first anonymous request
+/// with a slider challenge (0001).
+pub const DEFAULT_HOME_URL: &str = "https://www.damai.cn";
+
 const USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36";
 
 /// Between two tier requests. A calendar event has a session a day (18 on
@@ -32,6 +37,7 @@ pub struct Client {
     base: String,
     request_gap: Duration,
     next_request: Mutex<Option<Instant>>,
+    home: String,
 }
 
 impl Client {
@@ -55,7 +61,37 @@ impl Client {
             base: base.into().trim_end_matches('/').to_string(),
             request_gap,
             next_request: Mutex::new(None),
+            home: DEFAULT_HOME_URL.to_string(),
         })
+    }
+
+    /// Where the home page is. Tests point it at the same local server as
+    /// the detail pages, so no test reaches www.damai.cn either.
+    pub fn with_home(mut self, home: impl Into<String>) -> Self {
+        self.home = home.into().trim_end_matches('/').to_string();
+        self
+    }
+
+    /// The detail page as damai.cn sent it, for the structure inspection
+    /// and for recording a fixture. The event itself is `event`.
+    pub async fn item_page(&self, item_id: u64) -> Result<String, Error> {
+        self.get(&self.item_page_url(item_id), None).await
+    }
+
+    /// One session's tier response as damai.cn sent it.
+    pub async fn tier_page(&self, item_id: u64, perform_id: u64) -> Result<String, Error> {
+        let url = tier_url(&self.base, item_id, perform_id);
+        self.get(&url, Some(&self.item_page_url(item_id))).await
+    }
+
+    /// The home page, which is where new samples come from.
+    pub async fn home_page(&self) -> Result<String, Error> {
+        let url = format!("{}/", self.home);
+        self.get(&url, None).await
+    }
+
+    pub fn item_page_url(&self, item_id: u64) -> String {
+        format!("{}/item.htm?id={item_id}", self.base)
     }
 
     /// The event and the tiers of each of its sessions. A risk-control page
@@ -72,7 +108,7 @@ impl Client {
         item_id: u64,
         keep: impl Fn(Option<&str>) -> bool,
     ) -> Result<Event, Error> {
-        let page_url = format!("{}/item.htm?id={item_id}", self.base);
+        let page_url = self.item_page_url(item_id);
         let html = self.get(&page_url, None).await?;
         let page = parse_item_page(&html)
             .map_err(|reason| Error::Parse {

@@ -15,6 +15,7 @@
 | 推 tag 发布 macOS 和 Linux 的程序 | [发布](release.md) |
 | Mac 上独立于终端的定时验证及 issue 摘要 | [launchd 验证任务](validation.md) |
 <!-- docs-index:end -->
+| 发现大麦改了页面或接口的结构 | [大麦改版巡检](damai-inspect.md) |
 
 ## 维护参考文档
 

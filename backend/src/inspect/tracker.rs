@@ -1,0 +1,314 @@
+//! Where an inspection's findings go: a GitHub issue, or a comment on the
+//! open issue a previous run already made. Nothing else in theFlash talks
+//! to GitHub, so this is deliberately one small interface: the inspection
+//! takes a `Tracker`, tests pass one that replays saved `gh` output, and no
+//! automated test reaches GitHub.
+
+use std::process::Command;
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub struct Issue {
+    pub number: u64,
+    pub title: String,
+    #[serde(default)]
+    pub body: String,
+}
+
+pub trait Tracker {
+    fn open_issues(&self) -> Result<Vec<Issue>, String>;
+    /// The new issue's URL.
+    fn create(&self, title: &str, body: &str) -> Result<String, String>;
+    /// The new comment's URL.
+    fn comment(&self, number: u64, body: &str) -> Result<String, String>;
+}
+
+/// What [`post`] did, so the run can say where its findings went.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Posted {
+    Created { number: Option<u64>, url: String },
+    Commented { number: u64, url: String },
+}
+
+impl std::fmt::Display for Posted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Posted::Created { url, .. } => write!(f, "开了新 issue：{url}"),
+            Posted::Commented { number, url } => {
+                write!(f, "在已有的 issue #{number} 上追加了评论：{url}")
+            }
+        }
+    }
+}
+
+/// The line that makes an issue this inspection's own. A run looks for it
+/// in the open issues and comments there instead of opening a second one;
+/// a human-written issue about the same change is not taken over.
+pub const MARKER: &str = "<!-- theflash-inspect: damai-structure -->";
+
+/// Puts `body` where the next agent will see it: a comment on the open
+/// inspection issue, or a new issue when there is none.
+pub fn post(tracker: &dyn Tracker, title: &str, body: &str) -> Result<Posted, String> {
+    let body = format!("{}\n\n{MARKER}\n", body.trim_end());
+    match tracker
+        .open_issues()?
+        .into_iter()
+        .find(|i| i.body.contains(MARKER))
+    {
+        Some(issue) => Ok(Posted::Commented {
+            number: issue.number,
+            url: tracker.comment(issue.number, &body)?,
+        }),
+        None => {
+            let url = tracker.create(title, &body)?.trim().to_string();
+            Ok(Posted::Created {
+                number: url
+                    .rsplit('/')
+                    .next()
+                    .and_then(|n| n.trim().parse::<u64>().ok()),
+                url,
+            })
+        }
+    }
+}
+
+type Runner = Box<dyn Fn(&[&str]) -> Result<String, String> + Send + Sync>;
+
+/// GitHub through the `gh` command, which already holds this machine's
+/// login. `gh` is not a dependency of theFlash: when it is missing, the
+/// inspection says so and still prints its report.
+pub struct Gh {
+    repo: Option<String>,
+    run: Runner,
+}
+
+impl Gh {
+    pub fn new(repo: Option<String>) -> Gh {
+        Gh {
+            repo,
+            run: Box::new(gh),
+        }
+    }
+
+    /// With `gh` replaced, which is how tests check the argv and the
+    /// parsing without reaching GitHub.
+    pub fn with_runner(repo: Option<String>, run: Runner) -> Gh {
+        Gh { repo, run }
+    }
+
+    fn call(&self, args: &[&str]) -> Result<String, String> {
+        let mut full: Vec<&str> = args.to_vec();
+        if let Some(repo) = &self.repo {
+            full.push("--repo");
+            full.push(repo);
+        }
+        (self.run)(&full)
+    }
+}
+
+impl Tracker for Gh {
+    fn open_issues(&self) -> Result<Vec<Issue>, String> {
+        let out = self.call(&[
+            "issue",
+            "list",
+            "--state",
+            "open",
+            "--limit",
+            "100",
+            "--json",
+            "number,title,body",
+        ])?;
+        serde_json::from_str(&out).map_err(|e| format!("看不懂 gh issue list 的输出：{e}"))
+    }
+
+    fn create(&self, title: &str, body: &str) -> Result<String, String> {
+        let out = self.call(&["issue", "create", "--title", title, "--body", body])?;
+        Ok(url_in(&out))
+    }
+
+    fn comment(&self, number: u64, body: &str) -> Result<String, String> {
+        let number = number.to_string();
+        let out = self.call(&["issue", "comment", &number, "--body", body])?;
+        Ok(url_in(&out))
+    }
+}
+
+/// `gh` prints the URL it made on its own line, sometimes after a notice.
+fn url_in(output: &str) -> String {
+    output
+        .lines()
+        .map(str::trim)
+        .rfind(|l| l.starts_with("https://"))
+        .unwrap_or_else(|| output.trim())
+        .to_string()
+}
+
+fn gh(args: &[&str]) -> Result<String, String> {
+    let out = Command::new("gh")
+        .args(args)
+        .output()
+        .map_err(|e| format!("运行 gh 失败（{e}）：巡检需要已登录的 GitHub CLI"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "gh {} 失败：{}",
+            args.first().unwrap_or(&""),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use super::*;
+
+    /// A tracker that records what it was asked to do.
+    struct Fake {
+        issues: Vec<Issue>,
+        calls: Mutex<Vec<String>>,
+    }
+
+    impl Tracker for Fake {
+        fn open_issues(&self) -> Result<Vec<Issue>, String> {
+            Ok(self.issues.clone())
+        }
+
+        fn create(&self, title: &str, body: &str) -> Result<String, String> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("create {title}: {body}"));
+            Ok("https://github.com/o/r/issues/77\n".into())
+        }
+
+        fn comment(&self, number: u64, body: &str) -> Result<String, String> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("comment {number}: {body}"));
+            Ok(format!(
+                "https://github.com/o/r/issues/{number}#issuecomment-1"
+            ))
+        }
+    }
+
+    fn fake(issues: Vec<Issue>) -> Fake {
+        Fake {
+            issues,
+            calls: Mutex::new(Vec::new()),
+        }
+    }
+
+    #[test]
+    fn with_no_issue_of_its_own_a_run_opens_one_and_marks_it() {
+        let t = fake(vec![Issue {
+            number: 5,
+            title: "别的事".into(),
+            body: "和巡检无关".into(),
+        }]);
+        assert_eq!(
+            post(&t, "标题", "正文").unwrap(),
+            Posted::Created {
+                number: Some(77),
+                url: "https://github.com/o/r/issues/77".into()
+            }
+        );
+        let calls = t.calls.lock().unwrap().clone();
+        assert_eq!(calls.len(), 1);
+        assert!(calls[0].starts_with("create 标题: 正文"), "{:?}", calls[0]);
+        assert!(calls[0].contains(MARKER), "{:?}", calls[0]);
+    }
+
+    #[test]
+    fn a_second_run_comments_on_the_issue_the_first_one_opened() {
+        let t = fake(vec![
+            Issue {
+                number: 5,
+                title: "别的事".into(),
+                body: "和巡检无关".into(),
+            },
+            Issue {
+                number: 9,
+                title: "大麦改版巡检发现变化".into(),
+                body: format!("上一次的报告\n\n{MARKER}\n"),
+            },
+        ]);
+        assert_eq!(
+            post(&t, "标题", "正文").unwrap(),
+            Posted::Commented {
+                number: 9,
+                url: "https://github.com/o/r/issues/9#issuecomment-1".into()
+            }
+        );
+        let calls = t.calls.lock().unwrap().clone();
+        assert_eq!(calls.len(), 1, "没有开第二个 issue：{calls:?}");
+        assert!(calls[0].starts_with("comment 9: 正文"), "{:?}", calls[0]);
+    }
+
+    /// Recorded `gh` output, so the argv and the parsing are checked
+    /// without a test reaching GitHub. Taken from this repository on
+    /// 2026-10-14 with the same command `open_issues` runs.
+    fn recorded(name: &str) -> String {
+        std::fs::read_to_string(format!(
+            "{}/testdata/github/{name}",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn gh_asks_for_the_open_issues_of_one_repository_and_reads_them_back() {
+        let seen: &'static Mutex<Vec<Vec<String>>> = Box::leak(Box::new(Mutex::new(Vec::new())));
+        let gh = Gh::with_runner(
+            Some("zbtzbtzbt/theFlash".into()),
+            Box::new(move |args| {
+                seen.lock()
+                    .unwrap()
+                    .push(args.iter().map(|a| a.to_string()).collect());
+                Ok(recorded("issue_list_open.json"))
+            }),
+        );
+        let issues = gh.open_issues().unwrap();
+        assert_eq!(
+            seen.lock().unwrap()[0],
+            [
+                "issue",
+                "list",
+                "--state",
+                "open",
+                "--limit",
+                "100",
+                "--json",
+                "number,title,body",
+                "--repo",
+                "zbtzbtzbt/theFlash",
+            ]
+        );
+        assert_eq!(issues.len(), 3);
+        assert_eq!(issues[0].number, 34);
+        assert!(issues.iter().all(|i| !i.title.is_empty()));
+        // None of the real open issues is the inspection's own, so a run
+        // with findings opens one rather than commenting on someone's.
+        assert!(
+            issues.iter().all(|i| !i.body.contains(MARKER)),
+            "录下来的 issue 里不该有巡检自己的标记"
+        );
+    }
+
+    #[test]
+    fn a_failing_gh_is_reported_and_not_mistaken_for_no_issues() {
+        let gh = Gh::with_runner(None, Box::new(|_| Err("gh: not logged in".into())));
+        assert!(gh.open_issues().is_err());
+        assert!(post(&gh, "标题", "正文").is_err());
+    }
+
+    #[test]
+    fn the_url_is_taken_from_what_gh_prints() {
+        assert_eq!(
+            url_in("Creating issue in o/r\n\nhttps://github.com/o/r/issues/77\n"),
+            "https://github.com/o/r/issues/77"
+        );
+        assert_eq!(url_in("奇怪的输出"), "奇怪的输出");
+    }
+}

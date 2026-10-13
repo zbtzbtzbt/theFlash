@@ -1,8 +1,9 @@
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
 use theflash::watch::{self, Filter, Options, WatchError};
-use theflash::{damai, presentation, report};
+use theflash::{damai, inspect, presentation, report};
 
 const USAGE: &str = "用法：
   theflash event <大麦演出链接或ID>   查询演出的场次、票档和售卖状态
@@ -12,6 +13,19 @@ const USAGE: &str = "用法：
       --tier <票档>                   只盯名称含这段文字的票档，例如 380
       --interval <秒>                 开售后每隔多少秒查一次，默认 30，最少 10
       --no-system-notify              只在终端提醒，不发系统通知
+  theflash inspect [选项]             巡检真实大麦的页面结构，变了就报出来
+      --samples <文件>                样本集，默认放在用户状态目录里
+      --candidates <目录>             把脱敏后的候选 fixture 写到这里
+      --max-events <场数>             最多查几场，默认 5，上限 8
+      --gap <秒>                      相邻请求至少隔几秒，默认 2
+      --open-issue                    发现变化时开 issue 或追加评论（用 gh）
+      --repo <owner/repo>             开 issue 开在哪个仓库，默认当前目录的
+  theflash inspect record <链接或ID|home> [选项]
+                                      把真实响应脱敏后录成 fixture
+      --as <名字>                     文件名，默认 item_<ID>
+      --dir <目录>                    写到哪里，默认 backend/testdata/damai
+      --sessions <场次数>             录几个场次的票档，默认 2
+      --gap <秒>                      相邻请求至少隔几秒，默认 2
   theflash version                    显示版本";
 
 #[tokio::main]
@@ -22,6 +36,7 @@ async fn main() -> ExitCode {
         ["event", input] => event(input, false).await,
         ["event-json", input] => event(input, true).await,
         ["watch", rest @ ..] => watch_command(rest).await,
+        ["inspect", rest @ ..] => inspect_command(rest).await,
         ["version" | "--version"] => {
             println!("theflash {}", theflash::version());
             ExitCode::SUCCESS
@@ -36,10 +51,13 @@ fn usage() -> ExitCode {
 }
 
 /// Tests point this at a local server that replays saved damai.cn pages.
+/// The same server stands in for the home page, so no test reaches
+/// www.damai.cn either.
 fn client() -> Result<damai::Client, damai::Error> {
-    let base = std::env::var("THEFLASH_DAMAI_BASE_URL")
-        .unwrap_or_else(|_| damai::DEFAULT_BASE_URL.to_string());
-    damai::Client::new(base)
+    match std::env::var("THEFLASH_DAMAI_BASE_URL") {
+        Ok(base) => Ok(damai::Client::new(&base)?.with_home(base)),
+        Err(_) => damai::Client::new(damai::DEFAULT_BASE_URL),
+    }
 }
 
 async fn event(input: &str, json: bool) -> ExitCode {
@@ -139,6 +157,202 @@ async fn watch_command(args: &[&str]) -> ExitCode {
         _ = tokio::signal::ctrl_c() => {
             println!("\n已停止盯票");
             ExitCode::SUCCESS
+        }
+    }
+}
+
+/// `theflash inspect` and `theflash inspect record`: the two commands that
+/// an agent, not a user, points at the real damai.cn. Why they exist and
+/// what they cost in requests: docs/subsystems/damai-inspect.md.
+async fn inspect_command(args: &[&str]) -> ExitCode {
+    match args {
+        ["record", rest @ ..] => inspect_record(rest).await,
+        rest => inspect_run(rest).await,
+    }
+}
+
+/// Seconds between requests. Asking for less than the default is only
+/// allowed when the requests go to a local replay server, so a mistyped
+/// flag cannot turn an inspection into a burst at the real damai.cn.
+fn request_gap(asked: Option<u64>) -> Duration {
+    let real_damai = std::env::var_os("THEFLASH_DAMAI_BASE_URL").is_none();
+    match asked.map(Duration::from_secs) {
+        Some(gap) if real_damai && gap < inspect::DEFAULT_REQUEST_GAP => {
+            eprintln!(
+                "--gap 小于 {0} 秒，对真实大麦按 {0} 秒处理：所有 agent 共用一个出口 IP",
+                inspect::DEFAULT_REQUEST_GAP.as_secs()
+            );
+            inspect::DEFAULT_REQUEST_GAP
+        }
+        Some(gap) => gap,
+        None => inspect::DEFAULT_REQUEST_GAP,
+    }
+}
+
+async fn inspect_run(args: &[&str]) -> ExitCode {
+    let mut samples: Option<String> = None;
+    let mut candidates: Option<String> = None;
+    let mut max_events = inspect::DEFAULT_MAX_EVENTS;
+    let mut gap = None;
+    let mut open_issue = false;
+    let mut repo = None;
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        match *arg {
+            "--samples" => match it.next() {
+                Some(v) => samples = Some(v.to_string()),
+                None => return usage(),
+            },
+            "--candidates" => match it.next() {
+                Some(v) => candidates = Some(v.to_string()),
+                None => return usage(),
+            },
+            "--repo" => match it.next() {
+                Some(v) => repo = Some(v.to_string()),
+                None => return usage(),
+            },
+            "--max-events" => match it.next().and_then(|v| v.parse().ok()) {
+                Some(n) if n >= 1 => max_events = n,
+                _ => return usage(),
+            },
+            "--gap" => match it.next().and_then(|v| v.parse().ok()) {
+                Some(s) => gap = Some(s),
+                None => return usage(),
+            },
+            "--open-issue" => open_issue = true,
+            _ => return usage(),
+        }
+    }
+    let samples_path = match samples {
+        Some(p) => PathBuf::from(p),
+        None => match inspect::state_dir() {
+            Ok(dir) => dir.join("inspect-samples.json"),
+            Err(e) => {
+                eprintln!("{e}");
+                return ExitCode::FAILURE;
+            }
+        },
+    };
+    let opts = inspect::Options {
+        samples_path,
+        candidates_dir: candidates.map(PathBuf::from),
+        max_events,
+        gap: request_gap(gap),
+    };
+    let client = match client() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let report = match inspect::run(&client, &opts).await {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    print!("{}", inspect::render(&report));
+    if open_issue {
+        match inspect::report_findings(&report, &inspect::tracker::Gh::new(repo)) {
+            Ok(Some(posted)) => println!("{posted}"),
+            Ok(None) => {}
+            Err(e) => {
+                eprintln!("没能把变化写到 GitHub 上：{e}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+    // Something changed, or a sample could not be read: an agent has to
+    // look at this run, so the exit code says so.
+    if report.has_findings() {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+async fn inspect_record(args: &[&str]) -> ExitCode {
+    const DEFAULT_DIR: &str = "backend/testdata/damai";
+    let mut target = None;
+    let mut name = None;
+    let mut dir = None;
+    let mut sessions = 2;
+    let mut gap = None;
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        match *arg {
+            "--as" => match it.next() {
+                Some(v) => name = Some(v.to_string()),
+                None => return usage(),
+            },
+            "--dir" => match it.next() {
+                Some(v) => dir = Some(v.to_string()),
+                None => return usage(),
+            },
+            "--sessions" => match it.next().and_then(|v| v.parse().ok()) {
+                Some(n) => sessions = n,
+                None => return usage(),
+            },
+            "--gap" => match it.next().and_then(|v| v.parse().ok()) {
+                Some(s) => gap = Some(s),
+                None => return usage(),
+            },
+            s if s.starts_with("--") || target.is_some() => return usage(),
+            s => target = Some(s),
+        }
+    }
+    let Some(target) = target else { return usage() };
+    let (target, default_name) = if target == "home" || target == "首页" {
+        (inspect::Target::Home, "home".to_string())
+    } else {
+        match damai::parse_item_id(target) {
+            Ok(id) => (inspect::Target::Item(id), id.to_string()),
+            Err(e) => {
+                eprintln!("{e}");
+                return ExitCode::from(2);
+            }
+        }
+    };
+    let dir = PathBuf::from(dir.unwrap_or_else(|| DEFAULT_DIR.to_string()));
+    if !dir.is_dir() {
+        eprintln!(
+            "{} 不是一个目录：请在仓库根目录运行，或者用 --dir 指定把 fixture 写到哪里",
+            dir.display()
+        );
+        return ExitCode::from(2);
+    }
+    let client = match client() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match inspect::record(
+        &client,
+        target,
+        &dir,
+        &name.unwrap_or(default_name),
+        sessions,
+        request_gap(gap),
+    )
+    .await
+    {
+        Ok(written) if written.is_empty() => {
+            eprintln!("没有写出任何 fixture");
+            ExitCode::FAILURE
+        }
+        Ok(written) => {
+            for path in written {
+                println!("{}", path.display());
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            ExitCode::FAILURE
         }
     }
 }

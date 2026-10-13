@@ -19,7 +19,7 @@
 
 ## 数据从哪里来
 
-详情页 HTML 里有两个隐藏的 `div`，内容是 JSON（没有 HTML 转义）。[`embedded_json`](../../backend/src/damai/page.rs) 从开始标签之后读出第一个完整的 JSON 值，所以字符串里出现 `</div>` 也不会截断。
+详情页 HTML 里有两个隐藏的 `div`，内容是 JSON（没有 HTML 转义）。[`embedded_json`](../../backend/src/damai/page.rs) 从开始标签之后读出第一个完整的 JSON 值，所以字符串里出现 `</div>` 也不会截断。[`item_page_json`](../../backend/src/damai/page.rs) 把这两块按页面给的名字放在一起（`dataDefault`、`staticDataDefault`），票档接口的 JSONP 由 [`tier_json`](../../backend/src/damai/sku.rs) 剥开；[改版巡检](damai-inspect.md) 看的是这两份原样的 JSON，而不是解析之后的结果。
 
 | 输出 | 来源 |
 | --- | --- |
@@ -86,7 +86,7 @@ CA 证书和 HTTP 客户端这两种失败发生在 [`Client::new`](../../backen
 
 - `make check`。
 - [`backend/tests/cli.rs`](../../backend/tests/cli.rs) 用本地假服务器回放 [`backend/testdata/damai/`](../../backend/testdata/damai/) 里的真实响应，运行编译出的程序；不访问真实大麦。`THEFLASH_DAMAI_BASE_URL` 只给测试用，用来把请求指向假服务器。
-- 大麦改版后，用 `curl` 匿名请求详情页和票档接口，和 `testdata/` 里的旧响应对比结构；再用浏览器打开同一场演出，核对场次和票档的显示。
+- 大麦有没有改版由 [`theflash inspect`](damai-inspect.md) 定期检查：它拿真实响应对照程序依赖的字段路径和状态码映射，变了就报出来并开 issue。**程序开始读一个新的大麦字段时，在同一个改动里把它加进 [`inspect/shape.rs`](../../backend/src/inspect/shape.rs)**，否则巡检不会守它。改版之后用 `theflash inspect record` 重新录 fixture，再用浏览器打开同一场演出核对场次和票档的显示。
 
 ## 浏览器展示
 
