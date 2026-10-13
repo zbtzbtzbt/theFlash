@@ -34,6 +34,8 @@ const CONFIRM_FOR_MS: i64 = 60_000;
 /// The wall and monotonic clocks parting by more than this means the
 /// machine slept or its clock was set.
 const CLOCK_JUMP_MS: i64 = 2_000;
+/// A quiet watch says it is still watching this often.
+const HEARTBEAT_MS: i64 = 600_000;
 
 pub struct Options {
     pub item_id: u64,
@@ -279,13 +281,32 @@ async fn restock<E: Env>(
 ) -> Result<(), WatchError> {
     let interval = opts.interval.as_millis() as i64;
     let mut failures = 0u32;
+    // Since the last "still watching" line: queries made, and how many failed.
+    let (mut beat_at, mut queries, mut failed) = (env.now(), 0u32, 0u32);
     loop {
         if env.stopped() {
             return Ok(());
         }
         let wait = backoff(interval, failures);
         env.sleep_until(env.now() + wait).await;
-        match env.event().await {
+        let result = env.event().await;
+        queries += 1;
+        if result.is_err() {
+            failed += 1;
+        }
+        if env.now() - beat_at >= HEARTBEAT_MS {
+            let how = if failed == 0 {
+                "都正常".to_string()
+            } else {
+                format!("失败 {failed} 次")
+            };
+            env.say(&format!(
+                "仍在盯：过去 10 分钟查了 {queries} 次，{how}（{}）",
+                time_line(env, None)
+            ));
+            (beat_at, queries, failed) = (env.now(), 0, 0);
+        }
+        match result {
             Ok(ev) => {
                 failures = 0;
                 for s in &ev.sessions {

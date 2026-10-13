@@ -295,6 +295,38 @@ async fn a_restock_alerts_once_each_time_the_tier_comes_back() {
     assert_eq!(f.sleeps, [30_000; 5]);
 }
 
+// Hours with nothing to report must not read like a hung watch: every ten
+// minutes it says how many queries it made and how many failed.
+#[tokio::test]
+async fn a_quiet_watch_says_every_ten_minutes_that_it_is_still_watching() {
+    let mut f = Fake::new(
+        SALE + 3_600_000,
+        0,
+        Box::new(|n, _| {
+            if n == 30 {
+                Err(network())
+            } else {
+                Ok(on_sale(TierStatus::OutOfStock))
+            }
+        }),
+    );
+    f.stop_after_calls = 41;
+    run(&mut f, &opts(Filter::default())).await.unwrap();
+    let beats: Vec<&String> = f
+        .log
+        .iter()
+        .map(|(_, l)| l)
+        .filter(|l| l.starts_with("say 仍在盯"))
+        .collect();
+    assert_eq!(beats.len(), 2, "{beats:#?}");
+    assert!(
+        beats[0].contains("过去 10 分钟查了 20 次，都正常"),
+        "{beats:#?}"
+    );
+    assert!(beats[1].contains("失败 1 次"), "{beats:#?}");
+    assert!(f.alerts().is_empty());
+}
+
 #[tokio::test]
 async fn network_failures_back_off_and_the_watch_carries_on() {
     let mut f = Fake::new(
