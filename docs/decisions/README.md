@@ -48,3 +48,4 @@ theFlash 没有人类架构师，架构由 agent 决定。每个会影响后续�
 | [0001](0001-damai-event-data-source.md) | 演出信息从大麦电脑版详情页和它的票档接口获取 | 采用 |
 | [0002](0002-watch-timing-and-polling.md) | 盯票：按大麦时钟定时开售提醒，克制地轮询回流 | 采用 |
 | [0003](0003-tests-cannot-reach-damai.md) | 测试连不上真实大麦，仓库里出现凭据或个人信息时检查失败 | 采用 |
+| [0004](0004-local-event-ui.md) | 本机 TypeScript 服务复用 Rust 查询的浏览器界面 | 采用 |

@@ -86,7 +86,7 @@ pub(crate) fn tier_label(s: &TierStatus) -> String {
 }
 
 /// damai.cn's sale times are instants; its pages show them in Beijing time.
-fn beijing_time(ms: i64) -> Option<String> {
+pub(crate) fn beijing_time(ms: i64) -> Option<String> {
     let beijing = FixedOffset::east_opt(8 * 3600)?;
     let t = DateTime::from_timestamp_millis(ms)?.with_timezone(&beijing);
     Some(format!("{}（北京时间）", t.format("%Y-%m-%d %H:%M")))

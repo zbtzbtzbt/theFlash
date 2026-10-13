@@ -7,11 +7,14 @@
     "lint": "biome check .",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "check": "biome check . && tsc --noEmit && vitest run"
+    "check": "biome check . && tsc --noEmit && npm run build && vitest run",
+    "build": "tsc -p tsconfig.build.json",
+    "serve": "node dist/server.js"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.15",
     "@types/node": "^26.6.5",
+    "happy-dom": "^21.0.1",
     "typescript": "^7.0.2",
     "vitest": "^5.0.4"
   }

@@ -17,5 +17,8 @@
         "organizeImports": "on"
       }
     }
+  },
+  "files": {
+    "includes": ["**", "!!dist"]
   }
 }
