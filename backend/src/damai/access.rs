@@ -291,7 +291,7 @@ fn request_gap() -> Result<Duration, Error> {
     match std::env::var("THEFLASH_REQUEST_GAP_MS") {
         Ok(value) => gap_from(Some(&value)),
         Err(std::env::VarError::NotPresent) => gap_from(None),
-        Err(_) => Err(Error::InvalidInput("THEFLASH_REQUEST_GAP_MS 无效".into())),
+        Err(_) => Err(invalid_request_gap()),
     }
 }
 
@@ -307,9 +307,14 @@ fn gap_from(value: Option<&str>) -> Result<Duration, Error> {
         .ok()
         .filter(|ms| *ms <= 86_400_000)
         .map(|ms| Duration::from_millis(ms).max(MIN_REQUEST_GAP))
-        .ok_or_else(|| {
-            Error::InvalidInput("THEFLASH_REQUEST_GAP_MS 必须是 0 到 86400000 毫秒".into())
-        })
+        .ok_or_else(invalid_request_gap)
+}
+
+fn invalid_request_gap() -> Error {
+    Error::InvalidConfig {
+        name: "THEFLASH_REQUEST_GAP_MS",
+        expected: "必须是 0 到 86400000 毫秒的整数（含两端）",
+    }
 }
 
 fn running_command() -> String {

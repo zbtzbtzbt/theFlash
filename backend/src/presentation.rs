@@ -51,6 +51,7 @@ pub fn event(e: &Event) -> Value {
 pub fn error(e: &Error) -> Value {
     let code = match e {
         Error::InvalidInput(_) => "invalid-input",
+        Error::InvalidConfig { .. } => "invalid-config",
         Error::NotFound(_) => "not-found",
         // This query ran into risk control. Nothing retries it.
         Error::RiskControl(_) | Error::RiskNotRecorded { .. } => "risk-control",
