@@ -1,4 +1,4 @@
-<!-- reviewed-through: 01b5cd5 (2026-10-14 11:35 +0800) -->
+<!-- reviewed-through: 18924ae (2026-10-14 11:42 +0800) -->
 # 已合并工作的教训
 
 本项目的代码由 agent 编写、审查、合并和发布。每天夜里有一个复盘 agent 检查当天的 commit：哪些改动后来又被返工、哪些不该合并、哪些验证得太薄。学到的东西记在这里。改代码之前先读这份文件。
@@ -73,7 +73,7 @@
 - `fd68bd7`（#4）的 Test run [38503286512](https://github.com/zbtzbtzbt/theFlash/actions/runs/38503286512) 双平台 failure，annotation 为 account payments failed / spending limit；检查未运行。已开 issue 给 owner。
 - 怎么避免：work-tick / hygiene 判 main 红前读 job annotation 或 `gh run view --json jobs`；命中 billing 就停手报告 owner，不改业务代码。
 - Seen 1× (2026-10-14)。
-- `01b5cd5` 的 [Test 38506998475](https://github.com/zbtzbtzbt/theFlash/actions/runs/38506998475) Ubuntu 已真正跑完并 success（不再是 billing 空失败）；macOS 当时仍 in_progress。#63 在双平台都有真实结论前不要关。
+- Done right on 10-14: `01b5cd5` 的 [Test 38506998475](https://github.com/zbtzbtzbt/theFlash/actions/runs/38506998475) 双平台 success，#63 已关。`18924ae`（#84）补 validation 终态保护的离线守护（删三行就红）；其 Test 合入后另跑。
 
 **GitHub Actions 因账单无法启动时，不要把“空 failure”当成已验证通过；合入须在 issue 写明“未跑远程 CI”，恢复后立刻补跑。**
 - `89d371e`（#14 dispatch）正文写明 Actions 全仓库空失败、未以红 CI 为否决；`d5c4798` 合入 LESSONS（PR #56）同样。合理权宜，但 #63 未关前 main 上连续合入都没有一次真正跑完的检查。
