@@ -794,6 +794,10 @@ fn became_of(item_id: u64, tried: &[u64], failures: &[Failed]) -> String {
 ///   one of the backups kept behind it;
 /// - another event held that place in the sample set this run started
 ///   from;
+/// - this run read that event, because only a page it asked for can tell
+///   it the event stopped covering `category`; the budget can run out
+///   before a saved sample, and nothing is known against one it never
+///   asked about;
 /// - that event stopped showing `category` — one that is still showing it
 ///   is kept too, and which of the two is read first is this run's
 ///   ordering, not a replacement.
@@ -817,10 +821,12 @@ fn took_over(
         return None;
     }
     let was = samples::ids_for(saved, category).first().copied()?;
-    if was == item_id
-        || pages
-            .iter()
-            .any(|p| p.item_id == was && p.category == Some(category))
+    if was == item_id || !tried.contains(&was) {
+        return None;
+    }
+    if pages
+        .iter()
+        .any(|p| p.item_id == was && p.category == Some(category))
     {
         return None;
     }

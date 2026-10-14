@@ -699,6 +699,97 @@ fn a_replacement_that_did_not_reach_the_file_is_not_reported_as_done() {
     );
 }
 
+/// The seed sample set every #79 test starts from, with the first event
+/// of each situation: the five events the real runs read.
+const SEED_SAMPLES: &str = r#"{"updatedAt":"2026-10-14 03:00（北京时间）","samples":[
+             {"itemId":1086791513717,"category":"onSale"},
+             {"itemId":1092337348536,"category":"notYetOnSale"},
+             {"itemId":1077137031347,"category":"soldOut"},
+             {"itemId":1084537866279,"category":"calendar"},
+             {"itemId":1080486727522,"category":"notOnPcChannel"}]}"#;
+
+/// The budget can run out before a saved sample's page is asked for. An
+/// event whose own sale ended joins that situation and is read first, so
+/// it goes to the front and the untouched sample stays behind it as a
+/// backup — but nothing was learned about that sample, and a report may
+/// not say an event it never asked about was swapped out (#79). "这次没读
+/// 到" is not evidence that a sample stopped covering its situation.
+#[test]
+fn a_sample_this_run_never_read_is_not_said_to_have_been_replaced() {
+    let home = Home::new("old-sample-unread");
+    let samples = home.path().join("samples.json");
+    std::fs::write(&samples, SEED_SAMPLES).unwrap();
+    // The 已开售 sample is sold out now, so it joins 已售罄, where
+    // 1077137031347 is the saved sample. One request is all the run gets,
+    // so 1077137031347's page is never asked for.
+    let routes = changed(unchanged_routes(), "/item.htm?id=1086791513717", |_| {
+        support::fixture("item_sold_out.html")
+    });
+    let damai = support::MockDamai::start_bodies(routes);
+    let out = run(
+        &home,
+        &damai,
+        &["--samples", samples.to_str().unwrap(), "--max-events", "1"],
+    );
+    let text = stdout(&out);
+    assert!(
+        !damai
+            .hits()
+            .iter()
+            .any(|h| h.contains("/item.htm?id=1077137031347")),
+        "这次复现不成立：预算该用完了，原样本的页面却被读了：{:?}",
+        damai.hits()
+    );
+    assert_eq!(
+        saved_ids(&samples, "soldOut"),
+        [1086791513717, 1077137031347],
+        "原样本该留在后面作备用：{text}"
+    );
+    assert!(
+        !event_block(&text, 1086791513717).contains("换掉了"),
+        "原样本这次根本没读、仍留作备用，只是先读谁的顺序变了，报告却说换掉了：{text}"
+    );
+}
+
+/// The same pages and the same sample set as the test above, with budget
+/// for the saved sample's page: this run does read it, it is still 已售罄
+/// and keeps its place behind the event read first, and the report still
+/// reports no replacement. The difference between the two is only how
+/// much was asked, which is why "没读到" may not stand in for evidence.
+#[test]
+fn the_same_run_with_budget_for_the_old_sample_also_reports_no_replacement() {
+    let home = Home::new("old-sample-read");
+    let samples = home.path().join("samples.json");
+    std::fs::write(&samples, SEED_SAMPLES).unwrap();
+    let routes = changed(unchanged_routes(), "/item.htm?id=1086791513717", |_| {
+        support::fixture("item_sold_out.html")
+    });
+    let damai = support::MockDamai::start_bodies(routes);
+    let out = run(
+        &home,
+        &damai,
+        &["--samples", samples.to_str().unwrap(), "--max-events", "3"],
+    );
+    let text = stdout(&out);
+    assert!(
+        damai
+            .hits()
+            .iter()
+            .any(|h| h.contains("/item.htm?id=1077137031347")),
+        "这次复现不成立：预算够了，原样本的页面却没被读：{:?}",
+        damai.hits()
+    );
+    assert_eq!(
+        saved_ids(&samples, "soldOut"),
+        [1086791513717, 1077137031347],
+        "两场都还是已售罄，顺序和预算小的那次一样：{text}"
+    );
+    assert!(
+        !event_block(&text, 1086791513717).contains("换掉了"),
+        "原样本读到了、还是已售罄，没有被换掉：{text}"
+    );
+}
+
 /// What #39 is about: when a situation has no candidate left anywhere,
 /// the inspection stops being able to see that situation. It says so,
 /// says what to put where, and fails, so a scheduled run is noticed
