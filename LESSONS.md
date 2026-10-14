@@ -1,4 +1,4 @@
-<!-- reviewed-through: ff15558 (2026-10-14 11:08 +0800) -->
+<!-- reviewed-through: dabd956 (2026-10-14 12:55 +0800) -->
 # 已合并工作的教训
 
 本项目的代码由 agent 编写、审查、合并和发布。每天夜里有一个复盘 agent 检查当天的 commit：哪些改动后来又被返工、哪些不该合并、哪些验证得太薄。学到的东西记在这里。改代码之前先读这份文件。
@@ -36,18 +36,36 @@
 
 ## 用户的数据和设置
 
-（暂无）
+**从 `import.meta.url` / URL 拼本地文件路径必须用 `fileURLToPath`；路径含中文或空格时要用真实副本跑前端测试，不能只链 `src`。**
+- Done right on 10-14: `01b5cd5`（#49）——修 `URL.pathname` 导致的 ENOENT；守护把 frontend 拷到含中文和空格的临时 checkout 再跑一遍，并探针防止 vitest 跟着 symlink 逃回 ASCII 路径。
+- Seen 1× (2026-10-14)。
+
 
 ## 验证
+
+**第三方推送有硬限制时，渠道出口要压缩/拒绝并在启动时校验；边界用「恰好上限」实测，不要想当然。**
+- Done right on 10-14: `ddd0c5e`（#11/#93）——ntfy 4096 字节限制；日历场次长提醒压缩；topic 长度启动校验；审查发现恰好 4096 也被拒，改为 4095。改动前有真正 FAIL 的长正文/topic 测试。
+- Seen 1× (2026-10-14)。
+
+**按字节窗口截中文 HTML / UTF-8 字符串时，禁止用可能落在字符中间的 `&s[i..j]`；先按 bytes 扫，或先找 `is_char_boundary`。**
+- Done right on 10-14: `41a1965`（#75/#86）——首页链接后中文使 `&html[from..from+200]` panic，整次巡检退出 101、状态码报告和 `--open-issue` 全丢；改为 `as_bytes()` 扫描，并钉住超长数字不被窗口截断。改动前失败测试用「777 + 100 个中」复现。
+- 怎么避免：处理大麦 HTML 的切片一律按字节或先确认边界；grep `&[` / 固定长度窗口时检查是否可能切 UTF-8。
+- Seen 1× (2026-10-14)。
 
 **大改动的「Not tried」若包含真实环境核心路径，合入后要有跟进 issue，不能默认可继续往上堆。**
 - `64d0fbe`（#10 inspect，+5k 行）：有决定记录 0011 和子系统文档；正文写明本轮未重跑真实大麦巡检，自动换样本曾受 #39 卡住。`524222e`（#39）已合入补候选池逻辑；在 #63 账单恢复、Test 真跑绿并完成一次真实巡检前，仍不算闭环。
 - 怎么避免：合并大功能时，把 Not tried 里挡验收的项链到仍 open 的 issue；hygiene / work-tick 下一轮优先那些 issue，而不是再开平行功能。
 - Seen 1× (2026-10-14)。
 
+**访问大麦的统一层必须自己跟重定向、每跳过熔断；进程内只一份预算；可写性要真写文件验证，不能只靠“锁文件打得开”。**
+- Done right on 10-14: `1c1a821`（#74/#70/#100）——reqwest 自动跟随重定向时滑块只在 Location 上，程序会当成普通页继续；多 Client 多份预算；预约时隙延迟唤醒会突发；只读目录里旧 lock 误判可写。五处一起修，改动前 `cargo test --test access` 会红。
+- 怎么避免：凡新增出站路径（含 HEAD）必须走同一 `send`；审查时故意开自动 redirect / 第二个 Client / 只读状态目录，看测试是否抓住。
+- Seen 1× (2026-10-14)。
+
 **以某个保证命名的测试，在保证被破坏时必须失败；只断言宽泛的退出码或“文字里有文件名”不算。**
 - #53（PR #50 / `78b5a4e`）：docs 索引的三个格式守护（缺状态、标题编号、标题里的 `|`）被删掉后，`scripts/tests/test_docs_index.py` 仍全绿——测试只在索引未更新时跑 `--check`，没把破坏后的生成器再跑一遍。
 - #48（#30 / `a5b9169`）：状态样式颜色测试在 happy-dom 里对“有背景色”的断言永远过；删掉整条 `.not-yet-on-sale` 规则仍全绿。同 issue：`browser_event_json_preserves_cli_content` 名字说保留 CLI 内容，实际只比 `report` 字段。
+- Done right on 10-14: `dabd956`（#48）——颜色看真实徽标相对无状态类的差、五种两两不同；`event-json` 用多份真实回放按页面字段拼回 CLI 逐字比；presentation 六个“未知”名都查。只改测试与文档。
 - #44（#11 / `dab6050`）：`finish_push` 删掉后全仓测试仍绿。Done right on 10-14: `ff15558`（#44/#66）——风控退出手机提醒与拼错配置有真正会红的离线守护；同窗还合入 `e2eaf65`（#51）、`3dbeabc`（#17）。CI 仍被 #63 挡住未跑。
 - 怎么避免：审查时按 code-standards 故意破坏命名保证；合并前 `git show` 里每个新测试都要有一条“破坏后 FAIL”的记录。未修前不要在相关模块上继续堆功能。
 - Seen 1× (2026-10-14)。
@@ -58,6 +76,11 @@
 - Seen 1× (2026-10-14)。
 
 ## 并发与测试
+
+**测试里的假 sleep / 让出不能用“空转一次就够”的假设；忙机器上要用会真正让出的短 sleep 或注入调度。**
+- #101 / `1d787d9`：`Fake.sleep` 的 `time.sleep(0)` 在忙 macOS runner 上不保证切换到管道读线程。
+- 怎么避免：时序测试用注入延迟复现，断言不要靠“跑得够快”；Seen 升级条件见 code-standards 时序节。
+- Seen 1× (2026-10-14)。
 
 **并行 PR 不要手改同一张生成出来的索引表；表应由文件生成，check 守护过期。**
 - #45：当晚多次因 `docs/decisions/README.md` / `docs/subsystems/README.md` 把 PR 打回。`78b5a4e` 做成 `make docs-index` + `--check`。
@@ -70,6 +93,7 @@
 - `fd68bd7`（#4）的 Test run [38503286512](https://github.com/zbtzbtzbt/theFlash/actions/runs/38503286512) 双平台 failure，annotation 为 account payments failed / spending limit；检查未运行。已开 issue 给 owner。
 - 怎么避免：work-tick / hygiene 判 main 红前读 job annotation 或 `gh run view --json jobs`；命中 billing 就停手报告 owner，不改业务代码。
 - Seen 1× (2026-10-14)。
+- Done right on 10-14: `01b5cd5` 的 [Test 38506998475](https://github.com/zbtzbtzbt/theFlash/actions/runs/38506998475) 双平台 success，#63 已关。`18924ae`（#84）补 validation 终态保护的离线守护（删三行就红）；其 Test 合入后另跑。
 
 **GitHub Actions 因账单无法启动时，不要把“空 failure”当成已验证通过；合入须在 issue 写明“未跑远程 CI”，恢复后立刻补跑。**
 - `89d371e`（#14 dispatch）正文写明 Actions 全仓库空失败、未以红 CI 为否决；`d5c4798` 合入 LESSONS（PR #56）同样。合理权宜，但 #63 未关前 main 上连续合入都没有一次真正跑完的检查。
@@ -77,10 +101,12 @@
 - Seen 1× (2026-10-14)。
 
 **判断 main 红不红只看 Test 工作流；被设计拒绝的 Release run 不算 main 红。**
+- `eaf63f6`：版本升到 0.1.0-rc.2；tag/release [v0.1.0-rc.2](https://github.com/zbtzbtzbt/theFlash/releases/tag/v0.1.0-rc.2) 已出（两台 macOS + install.sh）。
 - Done right on 10-14: `3b1cc18`（#5）——Release gate 拒绝未跑完的 Test 时，不带 `--workflow` 的 `gh run list` 会把拒绝显示成 main 红，误导 work-tick。
 - Seen 1× (2026-10-14)。
 
 **main 红着不要往上叠新功能。**
+- `ddd0c5e` 合入后 [Test 38509196670](https://github.com/zbtzbtzbt/theFlash/actions/runs/38509196670) macOS 红：`test_inhibitor_start_failure…`。Done right on 10-14: `1d787d9`（#101）——假 `sleep` 用 `time.sleep(0.001)` 真正让出，避免忙 runner 上空转到上限；生产代码未改。其 [Test 38510851009](https://github.com/zbtzbtzbt/theFlash/actions/runs/38510851009) 双平台 success；issue 仍待验收。
 - Done right on 10-14: `f12b84d` 专修 `f56b3c0` 引入后暴露的 Ubuntu 红，不叠功能。合入后仍等该 commit 的 Test 双平台绿再继续发版。
 - Seen 1× (2026-10-14)。
 
