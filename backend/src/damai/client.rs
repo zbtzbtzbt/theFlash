@@ -265,7 +265,7 @@ impl Client {
             if let Some(r) = referer {
                 req = req.header(reqwest::header::REFERER, r);
             }
-            self.gate.enter().await?;
+            let _slot = self.gate.enter_slot().await?;
             let sent = Instant::now();
             let resp = req.send().await.map_err(|e| Error::Network {
                 url: at.clone(),

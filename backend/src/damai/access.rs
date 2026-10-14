@@ -114,7 +114,38 @@ pub struct Gate {
     /// The earliest monotonic ms the next request may leave. Every caller
     /// in this process takes its slot from here.
     next_slot_ms: Mutex<i64>,
+    /// Serialises the breaker read and the outbound hop that follows it so
+    /// a slow or contended breaker lock (#110) or a delayed send (#108)
+    /// pushes the next slot back instead of letting the next caller burst
+    /// out alongside it.
+    turn: tokio::sync::Mutex<()>,
     by: String,
+}
+
+/// Held from `Gate::enter_slot` until the outbound hop has received its
+/// response headers (or failed). Updating `next_slot_ms` again when the
+/// guard drops counts the gap from when the hop actually completed on the
+/// wire, so a first request stalled between `enter` and the server cannot
+/// leave the next hop or a concurrent client less than `gap_ms` behind it
+/// (#108).
+#[derive(Debug)]
+pub(crate) struct Slot<'a> {
+    gate: &'a Gate,
+    _turn: tokio::sync::MutexGuard<'a, ()>,
+}
+
+impl Drop for Slot<'_> {
+    fn drop(&mut self) {
+        let mut next = self
+            .gate
+            .next_slot_ms
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let after = self.gate.clock.now_ms() + self.gate.gap_ms;
+        if after > *next {
+            *next = after;
+        }
+    }
 }
 
 impl std::fmt::Debug for Gate {
@@ -193,6 +224,7 @@ impl Gate {
             gap_ms: gap.as_millis() as i64,
             clock,
             next_slot_ms: Mutex::new(0),
+            turn: tokio::sync::Mutex::new(()),
             by,
         })
     }
@@ -200,37 +232,64 @@ impl Gate {
     /// Waits for this process's next slot, then refuses to let the request
     /// out if any theFlash process has run into risk control.
     ///
-    /// The slot is taken when the caller actually gets it, not when it
-    /// starts waiting: callers that queued for 300 ms and 600 ms but were
-    /// woken a second late (a loaded machine, a busy executor) would
-    /// otherwise both leave at once, which is the burst the gap exists to
-    /// prevent (#74). So the wait is recomputed after every sleep and the
-    /// gap is counted from the request that really went out.
+    /// The slot is taken when the caller actually gets it — after waiting
+    /// out the clock AND after the breaker read and its file lock return:
+    /// callers that queued for 300 ms and 600 ms but were woken late (#74)
+    /// or blocked on `risk-stop.lock` (#110) would otherwise both leave at
+    /// once.
     pub async fn enter(&self) -> Result<(), Error> {
+        self.enter_slot().await.map(|_| ())
+    }
+
+    /// Like [`Gate::enter`], holding the turn and refreshing `next_slot_ms`
+    /// when the returned [`Slot`] drops after the outbound HTTP hop has
+    /// completed (#108).
+    pub(crate) async fn enter_slot(&self) -> Result<Slot<'_>, Error> {
         loop {
-            let wait = {
-                let mut next = self
+            let (now, wait) = {
+                let next = self
                     .next_slot_ms
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
                 let now = self.clock.now_ms();
+                (now, if now >= *next { 0 } else { *next - now })
+            };
+            if wait > 0 {
+                self.clock.sleep_ms(wait).await;
+                continue;
+            }
+            let turn = self.turn.lock().await;
+            let wait = {
+                let next = self
+                    .next_slot_ms
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
                 if now >= *next {
-                    *next = now + self.gap_ms;
                     0
                 } else {
-                    *next - now
+                    let now = self.clock.now_ms();
+                    if now >= *next { 0 } else { *next - now }
                 }
             };
-            if wait <= 0 {
-                break;
+            if wait > 0 {
+                drop(turn);
+                self.clock.sleep_ms(wait).await;
+                continue;
             }
-            self.clock.sleep_ms(wait).await;
-        }
-        // Checked after the wait, so a breaker another process tripped
-        // while this request was queued still stops it.
-        match self.stop()? {
-            Some(stop) => Err(Error::RiskStopped(Box::new(stop))),
-            None => Ok(()),
+            // Checked after the wait, so a breaker another process tripped
+            // while this request was queued still stops it.
+            if let Some(stop) = self.stop()? {
+                return Err(Error::RiskStopped(Box::new(stop)));
+            }
+            let mut next = self
+                .next_slot_ms
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            *next = self.clock.now_ms() + self.gap_ms;
+            return Ok(Slot {
+                gate: self,
+                _turn: turn,
+            });
         }
     }
 
