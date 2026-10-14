@@ -150,6 +150,17 @@ impl Running {
         mode: u32,
         args: &[&str],
     ) -> Self {
+        Self::start_configured(damai, push, config, mode, args, |_, _| {})
+    }
+
+    fn start_configured(
+        damai: &Server,
+        push: &Server,
+        config: Option<serde_json::Value>,
+        mode: u32,
+        args: &[&str],
+        configure: impl FnOnce(&PathBuf, &mut std::process::Command),
+    ) -> Self {
         static NEXT: AtomicUsize = AtomicUsize::new(0);
         let home = std::env::temp_dir().join(format!(
             "theflash-push-{}-{}",
@@ -164,16 +175,17 @@ impl Running {
             std::fs::write(&path, config.to_string()).unwrap();
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
         }
-        let mut child = support::theflash(&damai.url())
+        let mut command = support::theflash(&damai.url());
+        command
             .env("HOME", &home)
             .env_remove("XDG_CONFIG_HOME")
             .arg("watch")
             .args(args)
             .args(["--interval", "10", "--no-system-notify"])
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
+            .stderr(Stdio::piped());
+        configure(&home, &mut command);
+        let mut child = command.spawn().unwrap();
         let output = Arc::new(Mutex::new(String::new()));
         let pipe = child.stdout.take().unwrap();
         let log = output.clone();
@@ -260,6 +272,10 @@ fn risk_control_push_finishes_before_the_watch_exits() {
         let out = run.wait_exit(1);
         assert!(out.contains("【提醒】触发风控，已停止盯票"));
         assert_no_secrets(&out);
+        assert!(
+            !out.contains("手机推送失败（服务器拒绝推送；topic/token：***），继续盯票"),
+            "an exiting watch must not claim it will continue watching"
+        );
         assert_eq!(damai.count(), 1, "risk control must stop Damai requests");
         let requests = push.requests.lock().unwrap();
         assert_eq!(requests.len(), 1, "risk-control alert was not pushed once");
@@ -520,4 +536,276 @@ fn available_at_start_pushes_the_desktop_title_and_body() {
             "desktop and phone differ"
         );
     }
+}
+
+// Acceptance F1: the recorded calendar event has 18 sessions and six tiers.
+// Only availability (and the opening clock in the second test) is changed.
+fn calendar_damai(opening: bool) -> Server {
+    const SALE: i64 = 1_791_944_280_000;
+    let mut page = support::fixture("item_calendar.html");
+    if opening {
+        let start = page.find("id=\"dataDefault\"").unwrap();
+        let start = start + page[start..].find('>').unwrap() + 1;
+        let mut parsed =
+            serde_json::Deserializer::from_str(&page[start..]).into_iter::<serde_json::Value>();
+        let mut data = parsed.next().unwrap().unwrap();
+        let end = start + parsed.byte_offset();
+        data["buyBtnStatus"] = "106".into();
+        data["sellStartTime"] = SALE.into();
+        page.replace_range(start..end, &data.to_string());
+    }
+    let sku = support::fixture("sku_calendar_286938129.jsonp");
+    let mut queried = 0;
+    Server::with_clock(
+        Box::new(move |first, _| {
+            if first.starts_with("HEAD") {
+                return (200, String::new());
+            }
+            if first.contains("/item.htm") {
+                return (200, page.clone());
+            }
+            let id = first
+                .split("dataId=")
+                .nth(1)
+                .unwrap()
+                .split('&')
+                .next()
+                .unwrap();
+            let mut data: serde_json::Value = serde_json::from_str(&sku[6..sku.len() - 1]).unwrap();
+            data["perform"]["performId"] = id.into();
+            data["itemBuyBtn"]["btnStatus"] = if opening && queried < 18 {
+                "106"
+            } else {
+                "206"
+            }
+            .into();
+            queried += 1;
+            for tier in data["perform"]["skuList"].as_array_mut().unwrap() {
+                tier["frontEndStatus"] = "1".into();
+                tier["skuSalable"] = "true".into();
+            }
+            (200, format!("__jp0({data})"))
+        }),
+        opening.then_some(SALE - 15_000),
+    )
+}
+
+fn size_limited_push() -> Server {
+    Server::start(Box::new(|_, body| {
+        let payload: serde_json::Value = serde_json::from_str(body).unwrap();
+        // Reproduce ntfy's rejection at the protocol boundary, locally.
+        if payload["message"].as_str().unwrap().len() >= 4096 {
+            (
+                500,
+                r#"{"code":50001,"http":500,"error":"internal server error"}"#.into(),
+            )
+        } else {
+            (
+                200,
+                include_str!("../testdata/ntfy/received-calendar-summary.json").into(),
+            )
+        }
+    }))
+}
+
+fn assert_calendar_summary(payload: &serde_json::Value, out: &str) {
+    let title = payload["title"].as_str().unwrap();
+    let after = out.split(&format!("【提醒】{title}\n")).nth(1).unwrap();
+    let full: Vec<&str> = after
+        .lines()
+        .take_while(|line| line.starts_with("  "))
+        .map(|line| line.strip_prefix("  ").unwrap())
+        .collect();
+    assert_eq!(full.len(), 110, "terminal must retain all 108 tiers");
+    assert!(
+        full.join("\n").len() > 4096,
+        "fixture no longer reproduces F1"
+    );
+    let body = payload["message"].as_str().unwrap();
+    assert!(
+        body.len() <= 4095,
+        "ntfy body has {} bytes, limit 4095",
+        body.len()
+    );
+    let lines: Vec<&str> = body.lines().collect();
+    assert_eq!(lines[0], full[0], "event name lost");
+    assert_eq!(
+        lines.last(),
+        full.last(),
+        "time or opening confirmation lost"
+    );
+    let kept = lines.len() - 3; // name, omission summary, time
+    assert!(kept > 0 && kept < 108);
+    assert_eq!(
+        &lines[1..1 + kept],
+        &full[1..1 + kept],
+        "tier lines must stay complete"
+    );
+    assert_eq!(
+        lines[1 + kept],
+        format!("……另有 {} 个票档，详见终端", 108 - kept)
+    );
+}
+
+#[test]
+fn long_calendar_push_fits_ntfy_and_retains_the_full_terminal_alert() {
+    let damai = calendar_damai(false);
+    let push = size_limited_push();
+    let mut run = Running::start_args(&damai, &push, Some(config()), 0o600, &["1084537866279"]);
+    push.wait_for(1, 20);
+    let out = run.stop();
+    let requests = push.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    let payload: serde_json::Value = serde_json::from_str(&requests[0].2).unwrap();
+    assert_eq!(payload["title"], "现在就可以买");
+    assert_calendar_summary(&payload, &out);
+    assert!(!out.contains("手机推送失败"));
+    assert_no_secrets(&out);
+}
+
+#[test]
+fn long_calendar_opening_pushes_keep_due_and_confirmed_states() {
+    let damai = calendar_damai(true);
+    let push = size_limited_push();
+    let mut run = Running::start_args(&damai, &push, Some(config()), 0o600, &["1084537866279"]);
+    push.wait_for(2, 40);
+    let out = run.stop();
+    let requests = push.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    for (request, title) in requests.iter().zip(["开售时间到", "已经可以买了"]) {
+        let payload: serde_json::Value = serde_json::from_str(&request.2).unwrap();
+        assert_eq!(payload["title"], title);
+        assert_calendar_summary(&payload, &out);
+        let body = payload["message"].as_str().unwrap();
+        assert_eq!(body.contains("正在确认能不能买"), title == "开售时间到");
+        assert_eq!(body.contains("可售"), title == "已经可以买了");
+    }
+    assert!(!out.contains("手机推送失败"));
+    assert_no_secrets(&out);
+}
+
+#[test]
+fn topic_length_is_checked_at_startup_and_64_characters_can_publish() {
+    for length in [64, 65, 128, 129, 0] {
+        let damai = damai(vec![true]);
+        let push = size_limited_push();
+        let mut cfg = config();
+        let topic = "x".repeat(length);
+        cfg["topic"] = topic.clone().into();
+        let mut run = Running::start(&damai, &push, Some(cfg), 0o600);
+        run.wait_text("时间：");
+        if length == 64 {
+            push.wait_for(1, 10);
+        }
+        let out = run.stop();
+        assert_eq!(
+            out.contains("topic 格式无效"),
+            length != 64,
+            "topic of {length} characters must be validated at startup"
+        );
+        assert_eq!(push.count(), usize::from(length == 64));
+        if length > 0 {
+            assert!(!out.contains(&topic));
+        }
+        assert!(out.contains("【提醒】现在就可以买"));
+        assert_no_secrets(&out);
+    }
+}
+
+#[test]
+fn xdg_config_takes_precedence_and_relative_empty_and_missing_paths_are_handled() {
+    for case in ["absolute", "relative", "empty", "missing"] {
+        let damai = damai(vec![true]);
+        let push = size_limited_push();
+        let url = push.url();
+        let mut run = Running::start_configured(
+            &damai,
+            &push,
+            Some(config()),
+            0o600,
+            &["1086791513717", "--session", "10-15", "--tier", "C-178"],
+            |home, command| match case {
+                "absolute" => {
+                    let dir = home.join("alternate/theflash");
+                    std::fs::create_dir_all(&dir).unwrap();
+                    let path = dir.join("push.json");
+                    let mut cfg = config();
+                    cfg["server"] = url.into();
+                    cfg["topic"] = "xdg-test-placeholder".into();
+                    std::fs::write(&path, cfg.to_string()).unwrap();
+                    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+                        .unwrap();
+                    command.env("XDG_CONFIG_HOME", home.join("alternate"));
+                }
+                "relative" => {
+                    command.env("XDG_CONFIG_HOME", "relative-path");
+                }
+                "empty" => {
+                    command.env("XDG_CONFIG_HOME", "");
+                }
+                "missing" => {
+                    command.env("XDG_CONFIG_HOME", home.join("missing"));
+                }
+                _ => unreachable!(),
+            },
+        );
+        run.wait_text("时间：");
+        if case != "missing" {
+            push.wait_for(1, 10);
+        }
+        let out = run.stop();
+        assert_no_secrets(&out);
+        assert!(!out.contains("xdg-test-placeholder"));
+        let requests = push.requests.lock().unwrap();
+        assert_eq!(
+            requests.len(),
+            usize::from(case != "missing"),
+            "XDG case {case}"
+        );
+        if let Some(request) = requests.first() {
+            let payload: serde_json::Value = serde_json::from_str(&request.2).unwrap();
+            assert_eq!(
+                payload["topic"],
+                if case == "absolute" {
+                    "xdg-test-placeholder"
+                } else {
+                    "test-topic-placeholder"
+                },
+                "XDG case {case}"
+            );
+        }
+        assert!(!out.contains("手机推送未启用"));
+    }
+}
+
+#[test]
+fn a_hanging_ntfy_request_times_out_and_the_next_alert_can_publish() {
+    let damai = damai(vec![true, false, true]);
+    let mut count = 0;
+    let push = Server::start(Box::new(move |_, _| {
+        count += 1;
+        if count == 1 {
+            // Keep the connection open beyond the 3-second client timeout.
+            // With the timeout removed it eventually succeeds, so the test
+            // fails on the missing error, not on a deadlocked test server.
+            std::thread::sleep(Duration::from_secs(6));
+        }
+        (200, include_str!("../testdata/ntfy/received.json").into())
+    }));
+    let mut run = Running::start(&damai, &push, Some(config()), 0o600);
+    push.wait_for(2, 40);
+    run.wait_text("【提醒】有票了");
+    let out = run.stop();
+    assert!(
+        out.contains("网络失败或超时"),
+        "hanging ntfy request never reported a timeout"
+    );
+    assert!(out.contains("又没票了"));
+    assert_eq!(
+        push.count(),
+        2,
+        "timeout must not disable later delivery or retry the failed alert"
+    );
+    assert_eq!(out.matches("手机推送失败").count(), 1);
+    assert_no_secrets(&out);
 }

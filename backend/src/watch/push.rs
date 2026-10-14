@@ -13,6 +13,8 @@ use tokio::sync::mpsc;
 
 const TIMEOUT: Duration = Duration::from_secs(3);
 const CONFIG_LIMIT: u64 = 65_536;
+// ntfy.sh rejects exactly 4096 bytes in JSON publishes (PR #93, 2026-10-14).
+const NTFY_MESSAGE_LIMIT: usize = 4095;
 
 /// Each channel consumes the same desktop notification; channels do not deduplicate.
 trait PushChannel: Send + 'static {
@@ -108,7 +110,7 @@ impl Ntfy {
             return Err("服务器须为 HTTPS 根地址（本机测试可用 HTTP），不能包含凭据或参数");
         }
         if topic.is_empty()
-            || topic.len() > 128
+            || topic.len() > 64
             || !topic
                 .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
@@ -146,12 +148,64 @@ impl Ntfy {
     }
 }
 
+// Keep the complete desktop text at the alert boundary. Only ntfy has this
+// protocol limit; splitting would turn one state change into several pushes.
+fn ntfy_message(message: &str) -> String {
+    if message.len() <= NTFY_MESSAGE_LIMIT {
+        return message.into();
+    }
+    let lines: Vec<&str> = message.split('\n').collect();
+    if lines.len() == 1 {
+        return shorten(message, NTFY_MESSAGE_LIMIT);
+    }
+    let details = &lines[1..lines.len() - 1];
+    // The last line carries the time and, for opening, the unconfirmed state.
+    // Leave space even if an upstream field produces an unusually long line.
+    let footer = shorten(lines[lines.len() - 1], NTFY_MESSAGE_LIMIT / 2);
+    let summary = |omitted| {
+        if omitted == 0 {
+            "……内容过长，详见终端".to_string()
+        } else {
+            format!("……另有 {omitted} 个票档，详见终端")
+        }
+    };
+    let reserved = footer.len() + summary(details.len()).len() + 2;
+    let mut result = shorten(lines[0], NTFY_MESSAGE_LIMIT - reserved);
+    let mut kept = 0;
+    for line in details {
+        // Three separators: header/tier, tier/summary, summary/time.
+        if result.len() + line.len() + footer.len() + summary(details.len() - kept - 1).len() + 3
+            > NTFY_MESSAGE_LIMIT
+        {
+            break;
+        }
+        result.push('\n');
+        result.push_str(line);
+        kept += 1;
+    }
+    result.push('\n');
+    result.push_str(&summary(details.len() - kept));
+    result.push('\n');
+    result.push_str(&footer);
+    result
+}
+
+fn shorten(text: &str, limit: usize) -> String {
+    if text.len() <= limit {
+        return text.into();
+    }
+    let mut end = limit - "…".len();
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &text[..end])
+}
+
 impl PushChannel for Ntfy {
     async fn send(&self, alert: &Alert) -> Result<(), &'static str> {
         // JSON handles Chinese titles without non-ASCII HTTP headers.
         // Topic is in the body, never in a request URL or error message.
-        let body =
-            serde_json::json!({"topic":self.topic, "title":alert.title, "message":alert.message});
+        let body = serde_json::json!({"topic":self.topic, "title":alert.title, "message":ntfy_message(&alert.message)});
         let mut request = self
             .client
             .post(self.server.clone())
@@ -198,7 +252,7 @@ impl PhonePush {
         let task = tokio::spawn(async move {
             while let Some(alert) = receiver.recv().await {
                 if let Err(why) = channel.send(&alert).await {
-                    println!("手机推送失败（{why}；topic/token：***），继续盯票");
+                    println!("手机推送失败（{why}；topic/token：***）");
                 }
             }
         });
@@ -241,6 +295,57 @@ mod tests {
     use std::os::unix::fs::{PermissionsExt, symlink};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn ntfy_size_boundary_counts_bytes_and_preserves_utf8() {
+        for size in [4094, 4095] {
+            let text = "票".repeat(size / 3) + &"x".repeat(size % 3);
+            assert_eq!(ntfy_message(&text), text);
+        }
+        for text in ["x".repeat(4096), "票".repeat(1365) + "x"] {
+            assert_eq!(text.len(), 4096);
+            let body = ntfy_message(&text);
+            assert!(
+                body.len() <= 4095,
+                "4096-byte message must be shortened; got {} bytes",
+                body.len()
+            );
+            assert!(body.ends_with('…'));
+            assert!(text.starts_with(body.strip_suffix('…').unwrap()));
+        }
+        let footer = "时间：2026-10-14 11:00（大麦时间），正在确认能不能买";
+        for text in [
+            "票🎫".repeat(1000),
+            format!("{}\n票档\n{footer}", "演出🎫".repeat(1000)),
+            format!("演出\n{}\n{footer}", "票档🎫".repeat(1000)),
+            format!("演出\n{}", "很长的时间备注🎫".repeat(1000)),
+        ] {
+            let body = ntfy_message(&text);
+            assert!(body.len() <= 4095, "body has {} bytes", body.len());
+            assert!(!body.contains('\u{fffd}'));
+            assert!(body.contains('…'));
+            if text.ends_with(footer) {
+                assert!(body.ends_with(footer));
+            }
+        }
+    }
+
+    #[test]
+    fn ntfy_summary_budget_stays_below_the_rejected_4096_byte_boundary() {
+        let footer = "时间：2026-10-14 11:00（大麦时间），正在确认能不能买";
+        // An oversized ASCII name uses every available byte of the summary budget.
+        // This guards compressed messages as well as the unchanged-message path.
+        let text = format!("{}\n票档 · 可售\n{footer}", "x".repeat(5000));
+        let body = ntfy_message(&text);
+        assert!(
+            body.len() <= 4095,
+            "compressed message must stay below 4096; got {} bytes",
+            body.len()
+        );
+        assert!(body.ends_with(footer));
+        assert!(body.contains("……另有 1 个票档，详见终端"));
+        assert!(body.lines().next().unwrap().ends_with('…'));
+    }
 
     #[test]
     fn config_rejects_symlinks_invalid_json_and_oversized_files_without_values() {
