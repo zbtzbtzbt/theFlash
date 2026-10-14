@@ -576,6 +576,123 @@ fn an_answer_in_several_pages_reads_as_one_list() {
     assert!(bad.contains("open PRs"), "{bad}");
 }
 
+// ---- which issues a merge hands over to acceptance (#102) ----
+
+/// The fixture body of a pull request, with `declares` where an agent
+/// writes it: above the `Agent:` trailer.
+fn body_declaring(declares: &str) -> String {
+    format!("修好了巡检的两处停机判断。\n\n{declares}\n\nAgent: Claude\n")
+}
+
+#[test]
+fn the_body_says_which_issues_the_pull_request_implemented() {
+    // Every markup an agent writes a trailer in, the way `Agent:` is read.
+    for line in [
+        "实现: #102",
+        "实现：#102",
+        "- 实现: #102",
+        "* **实现**：#102",
+        "实现的 issue: #102",
+        "实现: `#102`",
+        "实现: #102（合并闸门交接）",
+    ] {
+        assert_eq!(
+            issues_to_hand_off(
+                "merge-gate: 交接（#102） (#134)",
+                &body_declaring(line),
+                134
+            ),
+            HandOff::Declared(vec![102]),
+            "{line}"
+        );
+    }
+    assert_eq!(
+        issues_to_hand_off("x (#19)", &body_declaring("实现: #87、#88、#90"), 19),
+        HandOff::Declared(vec![87, 88, 90])
+    );
+}
+
+#[test]
+fn a_pull_request_that_only_mentions_issue_numbers_declares_nothing() {
+    // The titles of 10-14's lessons pull requests. Reading a number out of
+    // any of them handed another agent's pull request, or an issue that was
+    // only quoted, over to acceptance (#102 的验收结论).
+    for title in [
+        "lessons: 水位线到 c6d20ab（#156/#163，绕闸续发）",
+        "lessons: 水位线到 abc1234（#17 验收未通过，等返工）",
+        "lessons: 水位线到 b36c8e3（rc.3，#168 绕闸）",
+        "lessons: 补记（#79/#54/#76）",
+    ] {
+        let body = "复盘读到的教训，正文只引用号。\n\nAgent: Claude\n";
+        let decided = issues_to_hand_off(title, body, 142);
+        assert!(
+            matches!(decided, HandOff::Undeclared(_)),
+            "标题里的号不是声明：{title} → {decided:?}"
+        );
+    }
+    // A pull request that implements no issue says so, and then the gate
+    // has nothing to print either.
+    for line in ["实现: 无", "实现：无（只改 LESSONS.md）", "实现: none"] {
+        assert_eq!(
+            issues_to_hand_off("lessons: 水位线（#79）", &body_declaring(line), 142),
+            HandOff::Nothing,
+            "{line}"
+        );
+    }
+}
+
+#[test]
+fn a_number_that_is_not_this_repositorys_issue_is_not_declared() {
+    let declared = |line: &str| issues_to_hand_off("x (#19)", &body_declaring(line), 19);
+    // Another repository's issue, a padded number, the pull request's own
+    // number, a comment anchor and prose that starts the same way: none of
+    // them names an issue this pull request implemented.
+    for line in [
+        "实现: other/repo#5",
+        "实现: zbtzbtzbt/theFlash#5",
+        "实现: #012",
+        "实现: #19",
+        "实现: #0",
+        "实现: ＃45",
+        "实现了 #3 的回流提醒",
+        "参考 #3",
+    ] {
+        assert!(
+            matches!(declared(line), HandOff::Undeclared(_)),
+            "{line} 不该被读成“实现了某个 issue”：{:?}",
+            declared(line)
+        );
+    }
+    // A URL that ends in a comment anchor is not a reference either, but a
+    // real number on the same line still is.
+    assert_eq!(
+        declared("实现: #71（见 https://github.com/zbtzbtzbt/theFlash/issues/71#issuecomment-1）"),
+        HandOff::Declared(vec![71])
+    );
+    // The placeholder AGENTS.md shows is not a declaration.
+    assert!(matches!(declared("实现: #<issue>"), HandOff::Undeclared(_)));
+}
+
+#[test]
+fn the_title_is_only_a_hint_about_what_was_left_undeclared() {
+    assert_eq!(
+        issues_to_hand_off(
+            "fix: 修 PR #12 引入的回归（#3） (#19)",
+            "没有声明。\n\nAgent: Claude\n",
+            19
+        ),
+        HandOff::Undeclared(vec![12, 3])
+    );
+    assert_eq!(
+        issues_in_title("lessons: 补记 v0.1.0-rc.3 (#169)", 169),
+        Vec::<u64>::new()
+    );
+    assert_eq!(
+        issues_in_title("docs: C# 不算引用 (#19)", 19),
+        Vec::<u64>::new()
+    );
+}
+
 // ---- the merge lock ----
 //
 // Several sessions run the gate at once (#20), so the lock is the only

@@ -55,7 +55,7 @@ gh pr list --state open --label 待审查
 
 先查危害：改了 CI 配置、发布脚本、新增网络地址或依赖、读写凭据、带二进制或混淆代码，任何一项都停下，评论说明是哪一行，等 owner。
 
-没有危害就按 [code-standards 的“合并”](../docs/code-standards.md#合并) 审：拉下来合到当前 main 上，跑验收检查，故意破坏它守护的代码，在 PR 上写一条[审查记录](../docs/subsystems/merge-gate.md#审查记录的格式)（被审查的 SHA、合到的 main、审查者、结论、跑了什么），然后 `scripts/merge-gate merge --pr <号>` 合并，合并后给对应 issue 加 `待验收`。漏了这一步，issue 会以原来的优先级留在队列里，像是没人做过。要修改就把标签换成 `要修改` 并写明问题。不在 PR 被打开的同一轮里合并它。
+没有危害就按 [code-standards 的“合并”](../docs/code-standards.md#合并) 审：拉下来合到当前 main 上，跑验收检查，故意破坏它守护的代码，在 PR 上写一条[审查记录](../docs/subsystems/merge-gate.md#审查记录的格式)（被审查的 SHA、合到的 main、审查者、结论、跑了什么），然后 `scripts/merge-gate merge --pr <号>` 合并。闸门会按 PR 正文的 `实现: #<号>` 自动给对应 issue 加 `待验收`（见[交接给验收](../docs/subsystems/merge-gate.md#交接给验收)）；正文没有这一行时它只打印要手动跑的命令，你来确认哪个号是这个 PR 实现的 issue 并跑掉。漏了这一步，issue 会以原来的优先级留在队列里，像是没人做过。要修改就把标签换成 `要修改` 并写明问题。不在 PR 被打开的同一轮里合并它。
 
 自己手动 `gh pr merge` 绕过闸门不行：#13 那次合并就是这样发生在审查记录之前的，而且事后查不出是谁合的。CI 起不来的时候也不合并（见第 1 步），审查记录照写，等 CI 恢复、补跑变绿再合。
 
