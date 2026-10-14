@@ -2259,16 +2259,50 @@ fn the_issue_an_inspection_opens_carries_no_credential_from_the_response() {
     }
 }
 
+/// A clock that lets the first `before` requests through without waiting
+/// and runs `prepare` right as the next request enters the gate, so each
+/// of the four stop errors can be aimed at `read_page` (`before = 0`),
+/// `read_tiers` (`before = 5`), or `read_home` (`before = 5`).
+struct StopAtRequest {
+    damai: std::sync::Arc<support::MockDamai>,
+    before: usize,
+    dir: PathBuf,
+    prepare: fn(&Path),
+    tripped: std::sync::atomic::AtomicBool,
+}
+
+impl theflash::damai::Clock for StopAtRequest {
+    fn now_ms(&self) -> i64 {
+        if self.damai.hits().len() >= self.before
+            && !self.tripped.swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            (self.prepare)(&self.dir);
+        }
+        0
+    }
+
+    fn sleep_ms(
+        &self,
+        _ms: i64,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        Box::pin(async {})
+    }
+}
+
 /// Everything that stops damai access ends the whole inspection, not just
-/// the event being read: risk control, the breaker another theFlash
-/// process wrote, a breaker that cannot be read, and — the one that
-/// matters most — risk control whose breaker could not be written, where
-/// nothing else is left to stop the next request (#70, #74). Reported as
-/// one event's failure, the run went on to read four more pages and three
-/// tier endpoints, and then called the slider challenge a missing sample.
+/// the event or the home page being read: risk control, the breaker
+/// another theFlash process wrote, a breaker that cannot be read, and —
+/// the one that matters most — risk control whose breaker could not be
+/// written, where nothing else is left to stop the next request (#70, #74,
+/// #113). Every exit (`read_page`, `read_tiers`, `read_home`) has to stop
+/// on all four; a test that only stopped on the first detail page left
+/// `read_tiers` and `read_home` unchecked (#113).
 #[tokio::test]
 async fn anything_that_stops_damai_access_ends_the_whole_inspection() {
+    use theflash::damai::Error;
+
     type Prepare = fn(&Path);
+    type Check = fn(&Error) -> bool;
     let breaker: Prepare = |dir| {
         std::fs::write(
             dir.join("risk-stop.json"),
@@ -2278,66 +2312,167 @@ async fn anything_that_stops_damai_access_ends_the_whole_inspection() {
         )
         .unwrap()
     };
-    let cases: [(&str, Prepare, usize); 4] = [
-        ("风控，熔断记下来了", |_| {}, 1),
+    let block_breaker_write: Prepare = |dir| {
+        // A directory where the breaker's temporary file goes: the write
+        // fails, while reading the breaker still works.
+        std::fs::create_dir(dir.join(format!("risk-stop.json.{}.tmp", std::process::id()))).unwrap()
+    };
+    let cases: [(&str, Prepare, usize, Check); 4] = [
+        (
+            "风控，熔断记下来了",
+            |_| {},
+            1,
+            |e| matches!(e, Error::RiskControl(_)),
+        ),
         (
             "风控，但熔断写不进去",
-            // A directory where the breaker's temporary file goes: the
-            // write fails, while reading the breaker still works.
-            |dir| {
-                std::fs::create_dir(dir.join(format!("risk-stop.json.{}.tmp", std::process::id())))
-                    .unwrap()
-            },
+            block_breaker_write,
             1,
+            |e| matches!(e, Error::RiskNotRecorded { .. }),
         ),
-        ("别的进程写下的熔断", breaker, 0),
+        ("别的进程写下的熔断", breaker, 0, |e| {
+            matches!(e, Error::RiskStopped(_))
+        }),
         (
             "读不懂的熔断状态",
             |dir| std::fs::write(dir.join("risk-stop.json"), "{").unwrap(),
             0,
+            |e| matches!(e, Error::RiskState { .. }),
         ),
     ];
-    for (what, prepare, want_hits) in cases {
-        let home = Home::new(&format!("stops-{}", want_hits));
-        let dir = home.path().join("state");
-        std::fs::create_dir_all(&dir).unwrap();
-        prepare(&dir);
-        // Whatever the run asks for, it gets the saved slider challenge.
-        let damai = support::MockDamai::start_bodies(vec![(
-            "/".to_string(),
-            support::fixture("risk_control.html"),
-        )]);
-        let gate = std::sync::Arc::new(
-            theflash::damai::Gate::new(
-                dir.clone(),
-                std::time::Duration::ZERO,
-                std::sync::Arc::new(theflash::damai::SystemClock::default()),
-                "theflash test".into(),
-            )
-            .unwrap(),
-        );
-        let client = theflash::damai::Client::with_gate(damai.base_url(), gate)
-            .unwrap()
-            .with_home(damai.base_url());
-        let opts = theflash::inspect::Options {
-            samples_path: home.path().join("inspect-samples.json"),
-            candidates_dir: None,
-            max_events: 8,
-            gap: std::time::Duration::ZERO,
-        };
 
-        let e = theflash::inspect::run(&client, &opts)
-            .await
-            .err()
-            .unwrap_or_else(|| panic!("{what}：巡检照常结束了"));
-        assert!(e.stops_damai_access(), "{what}：{e}");
-        assert_eq!(
-            damai.hits().len(),
-            want_hits,
-            "{what}：停下之后又请求了大麦 {:?}",
-            damai.hits()
-        );
+    let exits = [
+        (
+            "详情页（read_page）",
+            0,
+            vec![("/".to_string(), support::fixture("risk_control.html"))],
+        ),
+        (
+            "票档接口（read_tiers）",
+            5,
+            changed(unchanged_routes(), "dataId=286937788", |_| {
+                support::fixture("risk_control.html")
+            }),
+        ),
+        (
+            "首页（read_home）",
+            5,
+            vec![
+                (
+                    "/item.htm".to_string(),
+                    support::fixture("item_not_found.html"),
+                ),
+                ("/".to_string(), support::fixture("risk_control.html")),
+            ],
+        ),
+    ];
+
+    for (exit_name, before, routes) in &exits {
+        for (what, prepare, extra_hits, check) in cases {
+            let home = Home::new(&format!("stops-{before}-{extra_hits}"));
+            let dir = home.path().join("state");
+            std::fs::create_dir_all(&dir).unwrap();
+            let damai = std::sync::Arc::new(support::MockDamai::start_bodies(routes.clone()));
+            let clock = std::sync::Arc::new(StopAtRequest {
+                damai: damai.clone(),
+                before: *before,
+                dir: dir.clone(),
+                prepare,
+                tripped: std::sync::atomic::AtomicBool::new(false),
+            });
+            let gate = std::sync::Arc::new(
+                theflash::damai::Gate::new(
+                    dir,
+                    std::time::Duration::ZERO,
+                    clock,
+                    "theflash test".into(),
+                )
+                .unwrap(),
+            );
+            let client = theflash::damai::Client::with_gate(damai.base_url(), gate)
+                .unwrap()
+                .with_home(damai.base_url());
+            let opts = theflash::inspect::Options {
+                samples_path: home.path().join("inspect-samples.json"),
+                candidates_dir: None,
+                max_events: 8,
+                gap: std::time::Duration::ZERO,
+            };
+
+            let e = theflash::inspect::run(&client, &opts)
+                .await
+                .err()
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{exit_name} / {what}：巡检照常结束了，发了 {} 个请求：{:?}",
+                        damai.hits().len(),
+                        damai.hits()
+                    )
+                });
+            assert!(
+                e.stops_damai_access() && check(&e),
+                "{exit_name} / {what}：{e:?}"
+            );
+            assert_eq!(
+                damai.hits().len(),
+                before + extra_hits,
+                "{exit_name} / {what}：停下之后又请求了大麦 {:?}",
+                damai.hits()
+            );
+        }
     }
+}
+
+/// When the home page runs into risk control whose breaker cannot be
+/// written, the events already read in this run still have their tier
+/// requests ahead of them: failing to stop at `read_home` would go on
+/// to send those three tier requests (#113).
+#[tokio::test]
+async fn a_stop_error_on_the_home_page_stops_before_any_tier_is_requested() {
+    use theflash::damai::Error;
+
+    let home = Home::new("stops-home-before-tiers");
+    let dir = home.path().join("state");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::create_dir(dir.join(format!("risk-stop.json.{}.tmp", std::process::id()))).unwrap();
+    let routes = with_route(
+        changed(unchanged_routes(), "/item.htm?id=1086791513717", |_| {
+            support::fixture("item_not_found.html")
+        }),
+        ("/".to_string(), support::fixture("risk_control.html")),
+    );
+    let damai = support::MockDamai::start_bodies(routes);
+    let gate = std::sync::Arc::new(
+        theflash::damai::Gate::new(
+            dir,
+            std::time::Duration::ZERO,
+            std::sync::Arc::new(theflash::damai::SystemClock::default()),
+            "theflash test".into(),
+        )
+        .unwrap(),
+    );
+    let client = theflash::damai::Client::with_gate(damai.base_url(), gate)
+        .unwrap()
+        .with_home(damai.base_url());
+    let opts = theflash::inspect::Options {
+        samples_path: home.path().join("inspect-samples.json"),
+        candidates_dir: None,
+        max_events: 8,
+        gap: std::time::Duration::ZERO,
+    };
+    let result = theflash::inspect::run(&client, &opts).await;
+    assert!(
+        matches!(result, Err(Error::RiskNotRecorded { .. })),
+        "首页的 RiskNotRecorded 被吞掉了，发了 {} 个请求：{:?}",
+        damai.hits().len(),
+        damai.hits()
+    );
+    assert_eq!(
+        damai.hits().len(),
+        6,
+        "首页停机后还继续去查了后面场次的票档：{:?}",
+        damai.hits()
+    );
 }
 
 /// What the agent running the inspection sees: the command stops, says
