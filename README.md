@@ -2,6 +2,8 @@
 
 大麦网（damai.cn）抢票程序。前端 TypeScript，高性能后端 Rust。支持 macOS 和 Linux，不支持 Windows。
 
+现在能做的是查票和盯票：查演出的场次和票档，开售或有票时提醒你。它不登录、不下单、不支付，收到提醒后要你自己去大麦买。
+
 ## 项目定位：AI Native
 
 theFlash 从架构设计到编码、测试、审查、发布，全部由 AI agent 完成。人不参与架构设计，也不写任何代码。
@@ -24,25 +26,29 @@ theFlash 从架构设计到编码、测试、审查、发布，全部由 AI agen
 
 ## 下载和运行
 
-不用装 Rust 或 Node。每个 [release](https://github.com/zbtzbtzbt/theFlash/releases) 都有 macOS（Apple 芯片和 Intel，macOS 11 及以上）和 Linux x86_64 的 `theflash`。仓库现在是私有的，下载要用能读这个仓库的 GitHub 账号：先装 [GitHub CLI](https://cli.github.com)，再运行 `gh auth login`。
+不用装 Rust 或 Node。每个 [release](https://github.com/zbtzbtzbt/theFlash/releases) 都有 macOS（Apple 芯片和 Intel，macOS 11 及以上）和 Linux x86_64 的 `theflash`。仓库是公开的，release 里的文件不用登录 GitHub 也能下载。
 
-安装最新的正式版，装到 `~/.local/bin`。以后再运行一次就是升级：
+**现在只有一个预发布 `v0.1.0-rc.1`，还没有正式版。** rc.1 只有 `event` 和 `watch`，而且 `watch` 不会推送手机提醒。下面“用法”里的手机提醒、`theflash risk` 和 `theflash inspect` 都是 rc.1 之后才合入的，想现在就用，得[从源码构建](#开发命令)，或者等下一个版本。从源码构建出来的程序，`--version` 也显示 `0.1.0-rc.1`（版本号到下次发版才改），但功能是 main 上的，不是 release 里那个 rc.1。
 
-```sh
-gh release download --repo zbtzbtzbt/theFlash --pattern install.sh --clobber
-sh install.sh
-```
+用安装脚本装到 `~/.local/bin`，以后再运行一次就是升级。脚本通过 [GitHub CLI](https://cli.github.com) 下载，所以要先装 gh，再运行 `gh auth login`（随便哪个 GitHub 账号都行）。gh 没登录时发的是未登录请求，GitHub 按 IP 给这类请求限流，和别人共用出口 IP 时会报 `API rate limit exceeded`。
 
-安装指定的版本，包括预发布：
+现在要指定版本号（预发布也这样装）：
 
 ```sh
 gh release download v0.1.0-rc.1 --repo zbtzbtzbt/theFlash --pattern install.sh --clobber
 sh install.sh v0.1.0-rc.1
 ```
 
+有了正式版以后，不带版本号就是装最新的正式版，预发布会被跳过。在那之前，这两条命令会报 `release not found`：
+
+```sh
+gh release download --repo zbtzbtzbt/theFlash --pattern install.sh --clobber
+sh install.sh
+```
+
 `install.sh` 按本机平台选文件，先校验 SHA256，对不上就什么都不装。要装到别的目录，设置 `THEFLASH_INSTALL_DIR`。
 
-也可以不用脚本，从 release 页面手动下载对应平台的文件和同名的 `.sha256`：
+也可以不用脚本和 gh，从 release 页面或用 curl 直接下载对应平台的文件和同名的 `.sha256`，不用登录：
 
 | 平台 | 文件 |
 | --- | --- |
@@ -51,6 +57,9 @@ sh install.sh v0.1.0-rc.1
 | Linux x86_64 | `theflash-x86_64-unknown-linux-musl.tar.gz` |
 
 ```sh
+base=https://github.com/zbtzbtzbt/theFlash/releases/download/v0.1.0-rc.1
+curl -fLO "$base/theflash-aarch64-apple-darwin.tar.gz"
+curl -fLO "$base/theflash-aarch64-apple-darwin.tar.gz.sha256"
 shasum -a 256 -c theflash-aarch64-apple-darwin.tar.gz.sha256   # Linux 上用 sha256sum -c
 tar -xzf theflash-aarch64-apple-darwin.tar.gz
 ./theflash --version
@@ -61,7 +70,7 @@ tar -xzf theflash-aarch64-apple-darwin.tar.gz
 - 在终端里去掉隔离属性：`xattr -d com.apple.quarantine theflash`；
 - 或者运行一次让它被拦下，然后在“系统设置 → 隐私与安全性”里点“仍要打开”。
 
-用 gh 或 `install.sh` 下载的文件没有隔离属性，不会被拦。
+用 gh、`install.sh` 或 curl 下载的文件没有隔离属性，不会被拦。
 
 **Linux**：程序是静态链接的，不依赖发行版的库。它用系统的 CA 证书验证大麦的 HTTPS 证书；精简的容器镜像里如果没有，先装 `ca-certificates`。
 
@@ -81,14 +90,16 @@ theflash watch "https://detail.damai.cn/item.htm?id=1086791513717" --session 10-
 
 盯住一场演出：未开售时按大麦的时钟倒计时，开售那一刻提醒；之后每 30 秒查一次，盯的票档有票时提醒（终端和系统通知）。Ctrl-C 停止。细节见 [docs/subsystems/damai-watch.md](docs/subsystems/damai-watch.md)。
 
-手机提醒可用 ntfy；topic 和可选 token 只放在权限 0600 的用户配置文件中。配置步骤见 [手机提醒](docs/subsystems/phone-push.md)，不配置时盯票行为保持原样。
+手机提醒可用 ntfy；topic 和可选 token 只放在权限 0600 的用户配置文件中。配置步骤见 [手机提醒](docs/subsystems/phone-push.md)，不配置时盯票行为保持原样。rc.1 里没有这个功能。
 
 ```sh
-./target/release/theflash risk                # 看有没有风控熔断
-./target/release/theflash risk resume --yes   # owner 看过之后解除
+theflash risk                # 看有没有风控熔断
+theflash risk resume --yes   # owner 看过之后解除
 ```
 
-所有访问大麦的请求都经过同一层：同一个进程里的请求至少隔 300 毫秒；任何一个 theFlash 进程（命令行或浏览器界面）收到滑块验证页，熔断就记在用户状态目录里，其他进程的下一个请求也不会发出。熔断不会自己过期，只能在确认 owner 看过这次风控之后显式解除。细节见 [docs/subsystems/damai-access.md](docs/subsystems/damai-access.md)。
+所有访问大麦的请求都经过同一层：同一个进程里的请求至少隔 300 毫秒；任何一个 theFlash 进程（命令行或浏览器界面）收到滑块验证页，熔断就记在用户状态目录里，其他进程的下一个请求也不会发出。熔断不会自己过期，只能在确认 owner 看过这次风控之后显式解除。细节见 [docs/subsystems/damai-access.md](docs/subsystems/damai-access.md)。rc.1 没有 `risk` 命令和熔断；从源码构建时，把上面的 `theflash` 换成 `backend/target/release/theflash`。
+
+`theflash inspect` 和 `theflash inspect record` 是给 agent 用的：巡检真实大麦的页面结构，发现变化就报出来；或者把真实响应脱敏后录成测试用的 fixture。买票的用户用不到它们，见 [docs/subsystems/damai-inspect.md](docs/subsystems/damai-inspect.md)。
 
 ## 在浏览器里查询演出
 
@@ -114,4 +125,4 @@ make fmt     # 自动格式化
 
 ## 定时和长时间验证（macOS）
 
-`python3 scripts/validation.py register --at now --duration 600 --issue 17 -- /absolute/path/theflash watch <ID> --interval 60 --no-system-notify` 登记一个独立于终端的 launchd 任务，结束后自动评论 issue。用 `list` 查看、`cancel <任务ID>` 请求 SIGINT 停止、`uninstall <任务ID>` 卸载已完成项。需要 Python 3 和已登录的 gh；睡眠中的 Mac 不会由 launchd 唤醒。完整操作、结果补发及安全边界见 [验证任务](docs/subsystems/validation.md)。
+`python3 scripts/validation.py register --at now --duration 600 --issue 17 -- /absolute/path/theflash watch <ID> --interval 60 --no-system-notify` 登记一个独立于终端的 launchd 任务，结束后自动评论 issue。用 `list` 查看、`cancel <任务ID>` 请求 SIGINT 停止、`report <任务ID>` 立即补发没发出去的结果评论、`uninstall <任务ID>` 卸载已完成项。需要 Python 3 和已登录的 gh；睡眠中的 Mac 不会由 launchd 唤醒。完整操作、结果补发及安全边界见 [验证任务](docs/subsystems/validation.md)。
