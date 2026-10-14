@@ -488,6 +488,91 @@ fn without_a_samples_file_the_run_seeds_one_in_the_state_directory() {
     }
 }
 
+/// Samples paths this machine cannot write, one for each step of saving
+/// that can fail. The first two fail whoever runs them: a parent that is
+/// a regular file stops the directory from being made, and a path that is
+/// already a directory stops the write itself.
+fn unwritable_samples_paths(home: &Path) -> Vec<(&'static str, PathBuf, String)> {
+    let block = home.join("block");
+    std::fs::write(&block, "不是目录").unwrap();
+    let a_directory = home.join("samples.json");
+    std::fs::create_dir_all(&a_directory).unwrap();
+    let mut cases = vec![
+        (
+            "上级是一个普通文件",
+            block.join("samples.json"),
+            block.display().to_string(),
+        ),
+        (
+            "路径本身是一个目录",
+            a_directory.clone(),
+            a_directory.display().to_string(),
+        ),
+    ];
+    // A state directory nobody may write in, which is the other way a
+    // machine loses the sample set. root may write in it whatever its
+    // mode says, so this case is added only where the operating system
+    // can express it; the two above hold either way.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let read_only = home.join("read-only");
+        std::fs::create_dir_all(&read_only).unwrap();
+        std::fs::set_permissions(&read_only, std::fs::Permissions::from_mode(0o500)).unwrap();
+        if std::fs::write(read_only.join("probe"), "x").is_err() {
+            let path = read_only.join("samples.json");
+            let shown = path.display().to_string();
+            cases.push(("目录不可写", path, shown));
+        }
+    }
+    cases
+}
+
+/// A run whose sample set did not reach the disk did not finish its job:
+/// the coverage it worked out is lost, and the next run starts again from
+/// the samples this one was replacing. It used to print 样本没保存下来 and
+/// 结论：没有变化 in the same report and exit 0, so a scheduled run counted
+/// it as a success (#77).
+#[test]
+fn a_run_that_could_not_save_its_samples_fails_and_says_what_to_do() {
+    let home = Home::new("samples-unwritable");
+    let damai = support::MockDamai::start_bodies(unchanged_routes());
+    for (what, samples, shown) in unwritable_samples_paths(home.path()) {
+        let out = run(&home, &damai, &["--samples", samples.to_str().unwrap()]);
+        let text = stdout(&out);
+        assert_eq!(
+            out.status.code(),
+            Some(1),
+            "{what}：样本没保存下来，定时任务却按退出码当成这次成功了：{text}"
+        );
+        assert!(
+            !text.contains("结论：没有变化。"),
+            "{what}：样本没写下去，报告却说这次没有变化：{text}"
+        );
+        assert!(text.contains("样本没保存下来"), "{what}：{text}");
+        assert!(text.contains(&shown), "{what}：没说是哪个路径：{text}");
+        assert!(text.contains("--samples"), "{what}：没说该怎么办：{text}");
+        assert!(
+            !text.contains("大麦很可能改版了"),
+            "{what}：本机的磁盘问题被说成了大麦改版：{text}"
+        );
+        assert!(
+            !samples.is_file(),
+            "{what}：这次复现没走到保存失败那条路，文件写出来了"
+        );
+    }
+
+    // The same run on a path it can write is a success again: a disk that
+    // works is not news.
+    let good = home.path().join("good/inspect-samples.json");
+    let out = run(&home, &damai, &["--samples", good.to_str().unwrap()]);
+    let text = stdout(&out);
+    assert!(text.contains("结论：没有变化。"), "{text}");
+    assert!(!text.contains("样本没保存下来"), "{text}");
+    assert_eq!(out.status.code(), Some(0), "{text}");
+    assert!(good.is_file(), "样本没写出来：{text}");
+}
+
 /// One run has a budget, because every agent shares the owner's one
 /// address and #2's watch is usually running at the same time.
 #[test]
@@ -848,6 +933,86 @@ fn a_response_that_cannot_be_read_is_kept_as_a_candidate() {
         candidate(&dir, "item_1092337348536.html"),
         broken,
         "读不懂的详情页没留下来"
+    );
+}
+
+/// A candidate response is the only copy of what damai.cn sent: fetching
+/// it again costs another request from the one address every agent
+/// shares. A run that could not write one down says so in the same words
+/// as a sample set it could not write down, and does not call either a
+/// revision (#77).
+#[test]
+fn a_candidate_that_could_not_be_written_is_said_with_the_rest_of_the_report() {
+    let home = Home::new("candidate-unwritable");
+    // A candidates directory that cannot be made: its parent is a file.
+    let block = home.path().join("block");
+    std::fs::write(&block, "不是目录").unwrap();
+    let dir = block.join("candidates");
+    let routes = changed(unchanged_routes(), "dataId=286937788", |body| {
+        body.replace("\"frontEndStatus\":\"2\"", "\"frontEndStatus\":\"777\"")
+    });
+    let damai = support::MockDamai::start_bodies(routes);
+    let out = run(&home, &damai, &["--candidates", dir.to_str().unwrap()]);
+    let text = stdout(&out);
+    assert!(text.contains("没见过的票档状态码：777"), "{text}");
+    assert!(
+        text.contains("候选响应没保存下来") && text.contains(&block.display().to_string()),
+        "没说这次的响应没留下来、也没说是哪个位置：{text}"
+    );
+    assert!(
+        text.contains("inspect record"),
+        "没说怎么重新取一份：{text}"
+    );
+    assert!(
+        text.contains("不是大麦改版"),
+        "写不下来这件事要说成本机的问题：{text}"
+    );
+    assert_eq!(out.status.code(), Some(1), "{text}");
+}
+
+/// `theflash inspect record` is run for the files it writes. One it could
+/// not write is the command failing, however many of the others landed:
+/// it used to say so on stderr and exit 0, so a caller that checks the
+/// exit code believed it had a full set of fixtures (#77).
+#[test]
+fn record_fails_when_a_fixture_it_fetched_could_not_be_written() {
+    let home = Home::new("record-unwritable");
+    let dir = home.path().join("testdata");
+    std::fs::create_dir_all(&dir).unwrap();
+    // The tier fixture's name, taken by a directory: the page is written
+    // and this one cannot be, which is the half-done run.
+    let taken = dir.join("sku_on_sale_286937788.jsonp");
+    std::fs::create_dir_all(&taken).unwrap();
+    let damai = support::MockDamai::start_bodies(unchanged_routes());
+    let mut cmd = home.theflash(&damai.base_url());
+    cmd.args([
+        "inspect",
+        "record",
+        "1086791513717",
+        "--as",
+        "on_sale",
+        "--dir",
+        dir.to_str().unwrap(),
+        "--sessions",
+        "1",
+        "--gap",
+        "0",
+    ]);
+    let out = support::output_within(cmd, 60);
+    let said = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "fixture 没写下来，命令却算成功：{said}{}",
+        stdout(&out)
+    );
+    assert!(
+        said.contains(&taken.display().to_string()) && said.contains("写不进去"),
+        "没说是哪个 fixture 没写下来：{said}"
+    );
+    assert!(
+        said.contains(&dir.join("item_on_sale.html").display().to_string()),
+        "没说这次写下来的是哪些，半成品没法收拾：{said}"
     );
 }
 

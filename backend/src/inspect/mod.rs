@@ -169,6 +169,12 @@ pub struct Report {
     pub expiring: Vec<Expiring>,
     /// Where the sample set is kept, so a report can say what to edit.
     pub samples_path: PathBuf,
+    /// What this run worked out but could not write down on this machine:
+    /// the sample set, and the candidate responses behind a change. Not a
+    /// revision at damai.cn — a path or a disk — but not a finished run
+    /// either, so it is kept apart from `notes` and makes the run fail
+    /// (#77).
+    pub unsaved: Vec<String>,
     /// Anything else worth saying that is not a finding about damai.cn.
     pub notes: Vec<String>,
 }
@@ -176,11 +182,15 @@ pub struct Report {
 impl Report {
     /// Whether an agent has to look at this run. A situation nothing
     /// covers any more counts: an inspection that quietly stops checking
-    /// one of the five situations is the failure #39 was opened for.
+    /// one of the five situations is the failure #39 was opened for. So
+    /// does a result that did not reach the disk: the next run starts
+    /// again from the samples this one was replacing, and a scheduled run
+    /// reads nothing but the exit code (#77).
     pub fn has_findings(&self) -> bool {
         self.events.iter().any(|e| !e.is_clean())
             || self.nothing_left() > 0
             || !self.expiring.is_empty()
+            || !self.unsaved.is_empty()
     }
 
     pub fn changes(&self) -> usize {
@@ -282,6 +292,7 @@ pub async fn run(client: &Client, opts: &Options) -> Result<Report, Error> {
         uncovered: Vec::new(),
         expiring: Vec::new(),
         samples_path: opts.samples_path.clone(),
+        unsaved: Vec::new(),
         notes: note.into_iter().collect(),
     };
     let budget = opts.max_events.clamp(1, MAX_MAX_EVENTS);
@@ -498,21 +509,25 @@ pub async fn run(client: &Client, opts: &Options) -> Result<Report, Error> {
         if !event.is_clean()
             && let Some(dir) = &opts.candidates_dir
         {
-            write_candidate(
+            if let Err(why) = write_candidate(
                 dir,
                 &format!("item_{id}.html"),
                 &page.body,
                 &mut event,
                 &mut report.notes,
-            );
-            if let Some((perform_id, body)) = &tier_body {
-                write_candidate(
+            ) {
+                report.unsaved.push(candidate_lost(why));
+            }
+            if let Some((perform_id, body)) = &tier_body
+                && let Err(why) = write_candidate(
                     dir,
                     &format!("sku_{id}_{perform_id}.jsonp"),
                     body,
                     &mut event,
                     &mut report.notes,
-                );
+                )
+            {
+                report.unsaved.push(candidate_lost(why));
             }
         }
         report.events.push(event);
@@ -535,22 +550,30 @@ pub async fn run(client: &Client, opts: &Options) -> Result<Report, Error> {
         // change most needs to replay, so it is kept too.
         if let Some(body) = &failed.body
             && let Some(dir) = &opts.candidates_dir
-        {
-            write_candidate(
+            && let Err(why) = write_candidate(
                 dir,
                 &format!("item_{}.html", failed.item_id),
                 body,
                 &mut event,
                 &mut report.notes,
-            );
+            )
+        {
+            report.unsaved.push(candidate_lost(why));
         }
         report.events.push(event);
     }
 
+    // The sample set is what this run leaves behind: which event covers
+    // each situation next time, and the replacements it just found. A run
+    // that could not write it down checked damai.cn but kept nothing, so
+    // it is not a success however unchanged the pages were (#77).
     if !kept.is_empty()
         && let Err(e) = samples::save(&opts.samples_path, &kept, &at)
     {
-        report.notes.push(format!("样本没保存下来：{e}"));
+        report.unsaved.push(format!(
+            "样本没保存下来：{e}。这次定下来的样本没有留下，下一次巡检还是按上一次的样本跑；\
+             腾出这个路径，或者用 --samples 指一个能写的文件，再跑一次"
+        ));
     }
     Ok(report)
 }
@@ -768,13 +791,29 @@ async fn read_home(
     }
 }
 
+/// What a candidate response that could not be written down costs: the
+/// change is still reported, but the bytes behind it stayed on damai.cn,
+/// and fetching them again costs another request from the one address
+/// every agent shares.
+fn candidate_lost(why: String) -> String {
+    format!(
+        "候选响应没保存下来：{why}。发现的变化照常在下面，但这份响应没有留在本机，\
+         要复现得按报告里的 inspect record 命令重新取一份"
+    )
+}
+
+/// Writes one response where whoever fixes the change replays it from.
+/// `Err` is this machine failing to keep a response it has already
+/// fetched, which is not something a run can shrug off (#77); a response
+/// the redaction rule refuses whole is that rule working as the owner
+/// decided, and goes in `notes`.
 fn write_candidate(
     dir: &Path,
     name: &str,
     body: &str,
     event: &mut EventReport,
     notes: &mut Vec<String>,
-) {
+) -> Result<(), String> {
     let redacted = redact::redact(body);
     let left = redact::sensitive(&redacted);
     if !left.is_empty() {
@@ -783,17 +822,13 @@ fn write_candidate(
             left[0].line,
             left[0].rule.name()
         ));
-        return;
+        return Ok(());
     }
-    if let Err(e) = std::fs::create_dir_all(dir) {
-        notes.push(format!("{} 建不出来：{e}", dir.display()));
-        return;
-    }
+    std::fs::create_dir_all(dir).map_err(|e| format!("{} 建不出来：{e}", dir.display()))?;
     let path = dir.join(name);
-    match std::fs::write(&path, redacted) {
-        Ok(()) => event.candidates.push(path),
-        Err(e) => notes.push(format!("{} 写不进去：{e}", path.display())),
-    }
+    std::fs::write(&path, redacted).map_err(|e| format!("{} 写不进去：{e}", path.display()))?;
+    event.candidates.push(path);
+    Ok(())
 }
 
 fn event_name(json: &Value) -> Option<String> {
@@ -874,6 +909,10 @@ pub async fn record(
     let mut pacer = Pacer { gap, last: None };
     let mut written = Vec::new();
     let mut notes = Vec::new();
+    // Responses this machine fetched and then could not write down. The
+    // point of the command is the files, so it fails rather than printing
+    // the ones that did land and exiting 0 (#77).
+    let mut lost: Vec<String> = Vec::new();
     let mut event = EventReport {
         item_id: 0,
         name: None,
@@ -890,21 +929,27 @@ pub async fn record(
         Target::Home => {
             pacer.wait().await;
             let html = client.home_page().await?;
-            write_candidate(dir, &format!("{name}.html"), &html, &mut event, &mut notes);
+            if let Err(why) =
+                write_candidate(dir, &format!("{name}.html"), &html, &mut event, &mut notes)
+            {
+                lost.push(why);
+            }
             written.append(&mut event.candidates);
-            return finish(written, notes);
+            return finish(written, notes, lost);
         }
         Target::Item(id) => id,
     };
     pacer.wait().await;
     let html = client.item_page(item_id).await?;
-    write_candidate(
+    if let Err(why) = write_candidate(
         dir,
         &format!("item_{name}.html"),
         &html,
         &mut event,
         &mut notes,
-    );
+    ) {
+        lost.push(why);
+    }
     let json = item_page_json(&html)
         .map_err(|reason| Error::Parse {
             what: "演出详情页",
@@ -916,23 +961,48 @@ pub async fn record(
     for perform_id in performs {
         pacer.wait().await;
         let body = client.tier_page(item_id, perform_id).await?;
-        write_candidate(
+        if let Err(why) = write_candidate(
             dir,
             &format!("sku_{name}_{perform_id}.jsonp"),
             &body,
             &mut event,
             &mut notes,
-        );
+        ) {
+            lost.push(why);
+        }
     }
     written.append(&mut event.candidates);
-    finish(written, notes)
+    finish(written, notes, lost)
 }
 
-fn finish(written: Vec<PathBuf>, notes: Vec<String>) -> Result<Vec<PathBuf>, Error> {
+/// What `record` has to say, and whether it did what it was asked. A
+/// response it fetched and could not write down is the command failing:
+/// the fixture it was run for is not there, and saying so on stderr while
+/// exiting 0 left whoever called it believing it was (#77). What did get
+/// written is named too, so a half-finished run can be cleaned up.
+fn finish(
+    written: Vec<PathBuf>,
+    notes: Vec<String>,
+    lost: Vec<String>,
+) -> Result<Vec<PathBuf>, Error> {
     for note in &notes {
         eprintln!("{note}");
     }
-    Ok(written)
+    if lost.is_empty() {
+        return Ok(written);
+    }
+    let kept = match written.as_slice() {
+        [] => "这次一个文件都没写下来".to_string(),
+        paths => format!(
+            "写下来的是 {}",
+            paths
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join("、")
+        ),
+    };
+    Err(Error::NotWritten(format!("{}。{kept}", lost.join("；"))))
 }
 
 fn perform_ids(json: &Value) -> Vec<u64> {
@@ -1000,6 +1070,9 @@ pub fn render(report: &Report) -> String {
     ));
     for note in &report.notes {
         out.push_str(&format!("说明：{note}\n"));
+    }
+    for lost in &report.unsaved {
+        out.push_str(&format!("{lost}\n"));
     }
     for (category, why) in &report.uncovered {
         match why {
@@ -1096,6 +1169,16 @@ pub fn render(report: &Report) -> String {
     if report.events.iter().any(|e| e.failed.is_some()) {
         out.push_str("结论：有样本读不了，见上面的“查不了”。\n");
     }
+    // A disk or a path on this machine, said as what it is: calling it a
+    // damai.cn revision would send whoever reads this looking at the
+    // wrong thing, and calling it nothing made a run that kept none of
+    // its result exit 0 (#77).
+    if !report.unsaved.is_empty() {
+        out.push_str(
+            "结论：这次的结果没全部保存下来（见上面那几行）。不是大麦改版，是跑巡检这台机器上的路径或磁盘；\
+             下一次巡检不会接着这次的样本走，修好之后再跑一次。\n",
+        );
+    }
     out
 }
 
@@ -1150,6 +1233,14 @@ pub fn issue_body(report: &Report) -> String {
              并加进 backend/src/inspect/samples.rs 的候选池（为什么要人来找：0014）。\n\n",
         );
     }
+    if !report.unsaved.is_empty() {
+        what_to_do.push_str(&format!(
+            "没保存下来的东西：这是跑巡检那台机器上的路径或磁盘，不是大麦改版。\
+             看报告里那几行说的是哪个位置（样本集在 `{}`），\
+             腾出这个路径或者换一个能写的，再跑一次巡检——这次定下来的样本没有留给下一次。\n\n",
+            report.samples_path.display()
+        ));
+    }
     format!(
         "{lead}\n\n```\n{}```\n\n{what_to_do}这条是 `theflash inspect` 自动写的。\n",
         render(report)
@@ -1173,6 +1264,9 @@ pub fn issue_title(report: &Report) -> String {
     }
     if !report.expiring.is_empty() {
         parts.push(format!("{} 个样本快过期", report.expiring.len()));
+    }
+    if !report.unsaved.is_empty() {
+        parts.push("结果没保存下来".to_string());
     }
     format!("大麦改版巡检：{}", parts.join("，"))
 }
