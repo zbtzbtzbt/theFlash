@@ -2,11 +2,11 @@
 
 > 推 tag 发布 macOS 和 Linux 的程序
 
-推一个 `v*` tag，[Release 工作流](../../.github/workflows/release.yml)就为 macOS（Apple 芯片、Intel）和 Linux（x86_64）构建 `theflash` 命令行程序，发布到 GitHub Release。为什么这样设计见 [0006](../decisions/0006-release-cli-binaries.md)；发版要满足的规则和产物清单见 [code-standards 的“发版”](../code-standards.md#发版)。界面现在不发布（#26）。
+推一个 `v*` tag，[Release 工作流](../../.github/workflows/release.yml)就为 macOS（Apple 芯片、Intel）和 Linux（x86_64）构建 `theflash` 单文件程序（同时包含命令行和 `theflash serve` 本地浏览器界面），发布到 GitHub Release。为什么这样设计见 [0006](../decisions/0006-release-cli-binaries.md) 和 [0013](../decisions/0013-standalone-event-ui.md)；发版要满足的规则和产物清单见 [code-standards 的“发版”](../code-standards.md#发版)。
 
 ## 职责和事实来源
 
-- [`scripts/release.sh`](../../scripts/release.sh) 决定发不发、发什么：`gate`（发布前检查）、`notes`（变更说明）、`package`（检查并打包一个平台的程序）、`stage`（加上 install.sh 并核对产物齐全）、`publish`（草稿 → 核对 → 公开 → 再核对）。工作流只负责在哪台机器上、按什么顺序运行它们。
+- [`scripts/release.sh`](../../scripts/release.sh) 决定发不发、发什么：`gate`（发布前检查）、`notes`（变更说明）、`build`（构建前端资源与 release 二进制）、`package`（检查版本与 `theflash serve` 界面子命令并打包一个平台的程序）、`stage`（加上 install.sh 并核对产物齐全）、`publish`（草稿 → 核对 → 公开 → 再核对）。工作流只负责在哪台机器上、按什么顺序运行它们。
 - 产物清单只有一份：`release.sh` 的 `TARGETS` 和 `assets`。工作流的构建矩阵列的是同样的平台；两边不一致时，`stage` 会失败。
 - 版本号只有一份：`backend/Cargo.toml`。tag 必须等于它，构建出的程序的 `--version` 也必须等于它。
 - [`scripts/install.sh`](../../scripts/install.sh) 是用户的安装和升级入口，随每个 release 发布。
@@ -44,7 +44,7 @@
 
 ## 安装和升级
 
-`install.sh [<tag>]`：按 `uname -s`/`uname -m` 选平台（Darwin arm64、Darwin x86_64、Linux x86_64，其他平台直接说明没有构建），用 `gh release download` 下载归档和 `.sha256`（不写 tag 就是最新的正式版），校验 SHA256 对不上就什么都不装，解出 `theflash`，复制到 `$THEFLASH_INSTALL_DIR`（默认 `~/.local/bin`）旁边的临时文件再 `mv` 过去，最后运行 `theflash --version`。再运行一次就是升级；正在运行的旧程序不受影响。用户怎么用见 [README](../../README.md#下载和运行)。
+`install.sh [<tag>]`：按 `uname -s`/`uname -m` 选平台（Darwin arm64、Darwin x86_64、Linux x86_64，其他平台直接说明没有构建），用 `gh release download` 下载归档和 `.sha256`（不写 tag 就是最新的正式版），校验 SHA256 对不上就什么都不装，解出 `theflash`，复制到 `$THEFLASH_INSTALL_DIR`（默认 `~/.local/bin`）旁边的临时文件再 `mv` 过去，最后运行 `theflash --version`。再运行一次就是升级（命令行和 `theflash serve` 本地界面在同一个二进制里一起升级，重启 `theflash serve` 即使用新界面）；正在运行的旧程序不受影响。用户怎么用见 [README](../../README.md#下载和运行)。
 
 ## 验证
 

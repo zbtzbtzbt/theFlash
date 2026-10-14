@@ -1,16 +1,31 @@
 import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { EventError, type EventView, type QueryError } from "./protocol.js";
 
-export const binary = fileURLToPath(
-  new URL("../../backend/target/debug/theflash", import.meta.url),
+const releaseBinary = fileURLToPath(
+  new URL("../../backend/target/release/theflash", import.meta.url),
 );
+const debugBinary = fileURLToPath(new URL("../../backend/target/debug/theflash", import.meta.url));
+
+export function resolveBinary(
+  env: NodeJS.ProcessEnv = process.env,
+  exists: (path: string) => boolean = existsSync,
+): string {
+  const configured = env.THEFLASH_BIN?.trim();
+  if (configured) return configured;
+  if (exists(releaseBinary)) return releaseBinary;
+  return debugBinary;
+}
+
+export const binary = resolveBinary();
+
 // Never run a shell or use the input as a URL. Rust extracts an ID and uses
 // the fixed damai endpoint; its JSON and CLI outputs share one query path.
 export function loadEvent(input: string, signal: AbortSignal): Promise<EventView> {
   return new Promise((resolve, reject) => {
     execFile(
-      binary,
+      resolveBinary(),
       ["event-json", input],
       { signal, maxBuffer: 4 * 1024 * 1024 },
       (error, stdout) => {

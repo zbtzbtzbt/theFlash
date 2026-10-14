@@ -11,8 +11,11 @@
 #       The version in backend/Cargo.toml at <commit>.
 #   release.sh notes <tag> <commit>
 #       Release notes: the commit titles since the last final release.
+#   release.sh build <target>
+#       Builds frontend assets (when npm is present) and the release binary.
 #   release.sh package <target> <version> <binary>
-#       Checks one built binary and packs it into dist/ with its checksum.
+#       Checks one built binary (version and embedded UI `serve`) and packs it
+#       into dist/ with its checksum.
 #   release.sh stage <dir>
 #       Adds install.sh to <dir> and checks <dir> holds every asset.
 #   release.sh publish <tag> <commit> <prerelease> <dir> <notes-file>
@@ -151,9 +154,17 @@ notes() {
   fi
 }
 
+build() {
+  local target=${1:?usage: release.sh build <target>}
+  if command -v npm >/dev/null 2>&1 && [ -f frontend/package.json ]; then
+    (cd frontend && { [ -d node_modules ] || npm ci --no-audit --no-fund; } && npm run build)
+  fi
+  (cd backend && cargo build --release --locked --target "$target")
+}
+
 package() {
   local usage="usage: release.sh package <target> <version> <binary>"
-  local target=${1:?$usage} version=${2:?$usage} bin=${3:?$usage} want desc got name
+  local target=${1:?$usage} version=${2:?$usage} bin=${3:?$usage} want desc got help_out name
   case $target in
     aarch64-apple-darwin) want="Mach-O 64-bit executable arm64" ;;
     x86_64-apple-darwin) want="Mach-O 64-bit executable x86_64" ;;
@@ -169,10 +180,13 @@ package() {
   # An Intel build runs under Rosetta on Apple silicon.
   if [ "$target" = x86_64-apple-darwin ] && [ "$(uname -m)" = arm64 ]; then
     got=$(arch -x86_64 "$bin" --version)
+    help_out=$(arch -x86_64 "$bin" --help 2>&1 || true)
   else
     got=$("$bin" --version)
+    help_out=$("$bin" --help 2>&1 || true)
   fi
   [ "$got" = "theflash $version" ] || refuse "$bin --version 输出的是 ${got}，应该是 theflash ${version}"
+  [[ $help_out == *"theflash serve"* ]] || refuse "$bin 没有包含本地界面子命令 theflash serve"
   name=theflash-$target.tar.gz
   mkdir -p dist
   COPYFILE_DISABLE=1 tar --no-xattrs -czf "dist/$name" -C "$(dirname "$bin")" theflash
@@ -249,7 +263,7 @@ publish() {
 cmd=${1:-}
 [ $# -eq 0 ] || shift
 case $cmd in
-  gate | version | notes | package | stage | publish) "$cmd" "$@" ;;
+  gate | version | notes | build | package | stage | publish) "$cmd" "$@" ;;
   *)
     sed -n '2,/^set -euo/p' "$0" | sed '$d' >&2
     exit 2

@@ -5,8 +5,13 @@ use std::time::Duration;
 use theflash::watch::{self, Filter, Options, WatchError};
 use theflash::{damai, inspect, presentation, report};
 
+mod ui;
+
 const USAGE: &str = "用法：
   theflash event <大麦演出链接或ID>   查询演出的场次、票档和售卖状态
+  theflash serve [选项]               启动本机浏览器查询界面，Ctrl-C 停止
+      --port <端口>                   绑定 127.0.0.1 的端口，默认 0（由系统分配）
+      --no-open                       只打印本机地址，不自动打开浏览器
   theflash watch <大麦演出链接或ID> [选项]
                                       开售或有票时提醒，Ctrl-C 停止
       --session <场次>                只盯名称含这段文字的场次，例如 10-17
@@ -39,6 +44,7 @@ async fn main() -> ExitCode {
     match args.as_slice() {
         ["event", input] => event(input, false).await,
         ["event-json", input] => event(input, true).await,
+        ["serve", rest @ ..] => serve_command(rest).await,
         ["watch", rest @ ..] => watch_command(rest).await,
         ["inspect", rest @ ..] => inspect_command(rest).await,
         ["risk", rest @ ..] => risk_command(rest),
@@ -70,10 +76,33 @@ fn base_url() -> Option<String> {
 /// Tests point this at a local server that replays saved damai.cn pages.
 /// The same server stands in for the home page, so no test reaches
 /// www.damai.cn either.
-fn client() -> Result<damai::Client, damai::Error> {
+pub(crate) fn client() -> Result<damai::Client, damai::Error> {
     match base_url() {
         Some(base) => Ok(damai::Client::new(&base)?.with_home(base)),
         None => damai::Client::new(damai::DEFAULT_BASE_URL),
+    }
+}
+
+async fn serve_command(args: &[&str]) -> ExitCode {
+    let mut port = 0u16;
+    let mut open_browser = true;
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        match *arg {
+            "--port" => match it.next().and_then(|s| s.parse::<u16>().ok()) {
+                Some(p) => port = p,
+                None => return usage(),
+            },
+            "--no-open" => open_browser = false,
+            _ => return usage(),
+        }
+    }
+    match ui::serve(port, open_browser).await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("{e}");
+            ExitCode::FAILURE
+        }
     }
 }
 
