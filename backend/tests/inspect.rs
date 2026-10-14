@@ -625,6 +625,79 @@ fn only_the_sample_that_stopped_covering_its_situation_is_reported_as_replaced()
     );
 }
 
+/// A sample file that did not take this run's samples still holds the
+/// old one, so the replacement this run worked out did not happen: the
+/// next run reads the same sample again. Saying 换掉了 about a file whose
+/// bytes never changed is the mistake #79 was opened for, in the other
+/// direction — the report has to say the new sample was picked and not
+/// kept, and say what the next run will still read.
+#[test]
+fn a_replacement_that_did_not_reach_the_file_is_not_reported_as_done() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = Home::new("replacement-unsaved");
+    let samples = home.path().join("samples.json");
+    // The same real replacement as the test above: the 已开售 sample sold
+    // out, and the pool's 1086791513717 is on sale.
+    std::fs::write(
+        &samples,
+        r#"{"updatedAt":"2026-10-14 03:00（北京时间）","samples":[
+             {"itemId":1077137031347,"category":"onSale"},
+             {"itemId":1092337348536,"category":"notYetOnSale"},
+             {"itemId":1111111111111,"category":"soldOut"},
+             {"itemId":1084537866279,"category":"calendar"},
+             {"itemId":1080486727522,"category":"notOnPcChannel"}]}"#,
+    )
+    .unwrap();
+    let before = std::fs::read(&samples).unwrap();
+    std::fs::set_permissions(&samples, std::fs::Permissions::from_mode(0o444)).unwrap();
+    // root writes a read-only file whatever its mode says, so the run
+    // would save after all and this test would assert about a success.
+    let unwritable = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&samples)
+        .is_err();
+    let second_sold_out = (
+        "/item.htm?id=1111111111111".to_string(),
+        support::fixture("item_sold_out.html"),
+    );
+    let damai = support::MockDamai::start_bodies(with_route(unchanged_routes(), second_sold_out));
+    let out = run(
+        &home,
+        &damai,
+        &["--samples", samples.to_str().unwrap(), "--max-events", "8"],
+    );
+    let text = stdout(&out);
+    let after = std::fs::read(&samples).unwrap();
+    std::fs::set_permissions(&samples, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(
+        unwritable,
+        "这次复现没走到保存失败那条路：这个用户写得了只读文件"
+    );
+    assert_eq!(out.status.code(), Some(1), "{text}");
+    assert!(text.contains("样本没保存下来"), "{text}");
+    assert_eq!(before, after, "样本文件被改了，这次复现不成立");
+    assert_eq!(
+        saved_ids(&samples, "onSale"),
+        [1077137031347],
+        "样本文件没变，下一次巡检还是读它"
+    );
+    assert!(
+        !text.contains("换掉了"),
+        "文件一个字节都没变，报告却说已经换掉了：{text}"
+    );
+    // What it should say instead: picked, not kept, and what the next run
+    // still reads.
+    let block = event_block(&text, 1086791513717);
+    assert!(
+        block.contains("1077137031347"),
+        "没说这次选中它接替的是哪一场：{text}"
+    );
+    assert!(
+        block.contains("没保存下来") && block.contains("下一次"),
+        "没说这次的选择没留下来、下一次还是读原来那一场：{text}"
+    );
+}
+
 /// What #39 is about: when a situation has no candidate left anywhere,
 /// the inspection stops being able to see that situation. It says so,
 /// says what to put where, and fails, so a scheduled run is noticed

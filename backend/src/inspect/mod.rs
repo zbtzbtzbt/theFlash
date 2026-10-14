@@ -190,6 +190,11 @@ pub struct Report {
     /// either, so it is kept apart from `notes` and makes the run fail
     /// (#77).
     pub unsaved: Vec<String>,
+    /// Whether the samples this run worked out reached the sample file. A
+    /// replacement is a claim about that file, so a run that kept nothing
+    /// says what it picked instead of saying it swapped anything out: the
+    /// next run reads the old sample again (#79).
+    pub samples_saved: bool,
     /// Anything else worth saying that is not a finding about damai.cn.
     pub notes: Vec<String>,
 }
@@ -308,6 +313,7 @@ pub async fn run(client: &Client, opts: &Options) -> Result<Report, Error> {
         expiring: Vec::new(),
         samples_path: opts.samples_path.clone(),
         unsaved: Vec::new(),
+        samples_saved: true,
         notes: note.into_iter().collect(),
     };
     let budget = opts.max_events.clamp(1, MAX_MAX_EVENTS);
@@ -584,6 +590,7 @@ pub async fn run(client: &Client, opts: &Options) -> Result<Report, Error> {
     if !kept.is_empty()
         && let Err(e) = samples::save(&opts.samples_path, &kept, &at)
     {
+        report.samples_saved = false;
         report.unsaved.push(format!(
             "样本没保存下来：{e}。这次定下来的样本没有留下，下一次巡检还是按上一次的样本跑；\
              腾出这个路径，或者用 --samples 指一个能写的文件，再跑一次"
@@ -1216,10 +1223,19 @@ pub fn render(report: &Report) -> String {
         let name = event.name.as_deref().unwrap_or("名称未知");
         out.push_str(&format!("\n[{category}] {} {name}\n", event.item_id));
         if let Some(replaced) = &event.replaced {
-            out.push_str(&format!(
-                "  换掉了这一类原来的样本 {}（{}）\n",
-                replaced.was, replaced.became
-            ));
+            // Done, or only picked: a run whose sample file kept its old
+            // bytes swapped nothing out, however the pages read (#79).
+            out.push_str(&if report.samples_saved {
+                format!(
+                    "  换掉了这一类原来的样本 {}（{}）\n",
+                    replaced.was, replaced.became
+                )
+            } else {
+                format!(
+                    "  这次选中它接替这一类原来的样本 {}（{}），但样本没保存下来，下一次巡检还是先读 {}\n",
+                    replaced.was, replaced.became, replaced.was
+                )
+            });
         }
         if let Some(why) = &event.failed {
             out.push_str(&format!("  查不了：{why}\n"));
