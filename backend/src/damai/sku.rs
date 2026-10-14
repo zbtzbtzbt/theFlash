@@ -3,7 +3,7 @@
 
 use serde_json::Value;
 
-use super::page::BuyButton;
+use super::page::{BuyButton, perform_id};
 use super::text::{integer, string};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -88,7 +88,7 @@ pub(crate) fn parse_sku_json(data: &Value) -> Result<PerformSkus, String> {
     };
 
     Ok(PerformSkus {
-        perform_id: integer(&perform["performId"]).and_then(|i| u64::try_from(i).ok()),
+        perform_id: perform_id(&perform["performId"]),
         buy_button,
         skus,
     })

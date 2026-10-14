@@ -572,6 +572,116 @@ fn a_tier_response_about_another_session_is_reported() {
     assert_eq!(out.status.code(), Some(1), "{text}");
 }
 
+/// A detail page can carry a session id `theflash event` refuses — a word
+/// where the number was — with every field of the right kind in its
+/// place. The run used to skip that session and read the next readable
+/// one, so the same response failed a user's query and passed the
+/// inspection as 没有变化 (#73).
+#[test]
+fn a_session_id_a_query_refuses_is_reported_and_not_skipped_over() {
+    let home = Home::new("perform-id-not-a-number");
+    let routes = changed(unchanged_routes(), "/item.htm?id=1086791513717", |body| {
+        body.replacen(
+            "\"performId\":286937788",
+            "\"performId\":\"not-a-number\"",
+            1,
+        )
+    });
+    // The session after the broken one, whose tiers the run read instead
+    // of saying anything about the page.
+    let next = (
+        "dataId=286937790".to_string(),
+        support::fixture("sku_on_sale_286937790.jsonp"),
+    );
+    let damai = support::MockDamai::start_bodies(with_route(routes, next));
+
+    // The same response, asked the way a user asks: the query fails.
+    let mut query = home.theflash(&damai.base_url());
+    query.args(["event", "1086791513717"]);
+    let queried = support::output_within(query, 60);
+    let said = String::from_utf8_lossy(&queried.stderr).into_owned();
+    assert_eq!(queried.status.code(), Some(1), "{said}");
+    assert!(said.contains("场次缺少 performId"), "{said}");
+
+    let out = run(&home, &damai, &[]);
+    let text = stdout(&out);
+    let block = about(&text, "1086791513717");
+    assert!(
+        block.contains("查不了"),
+        "查询读不了这一页，巡检却说它没问题：{block}"
+    );
+    assert!(
+        block.contains("not-a-number"),
+        "没说是哪个 performId 读不了：{block}"
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "查询会失败的页面，巡检必须报出来：{text}"
+    );
+}
+
+/// The same page with every session id negative. -1 is a number, so every
+/// declared kind matched, and the run asked for no tiers at all: eight
+/// requests and 没有变化 for a page no user could buy from (#73).
+#[test]
+fn a_page_whose_session_ids_are_all_negative_is_a_finding() {
+    let home = Home::new("perform-id-negative");
+    let routes = changed(unchanged_routes(), "/item.htm?id=1086791513717", |body| {
+        let mut out = body.to_string();
+        for id in ["286937788", "286937789", "286937790"] {
+            out = out.replace(&format!("\"performId\":{id}"), "\"performId\":-1");
+        }
+        out
+    });
+    let damai = support::MockDamai::start_bodies(routes);
+    let out = run(&home, &damai, &[]);
+    let text = stdout(&out);
+    let block = about(&text, "1086791513717");
+    assert!(
+        block.contains("查不了"),
+        "场次 ID 是负数，票档根本请求不了，巡检却说没变化：{block}"
+    );
+    assert!(block.contains("-1"), "没说是哪个 performId 读不了：{block}");
+    assert_eq!(out.status.code(), Some(1), "{text}");
+}
+
+/// A page the query cannot read and a tier response it cannot read are
+/// two separate pieces of news: the second must not take the place of the
+/// first, or a revision would be reported half.
+#[test]
+fn a_page_and_a_tier_response_that_both_fail_are_both_reported() {
+    let home = Home::new("page-and-tier-fail");
+    // The second session on the page, so its first session's tiers are
+    // still asked for and can fail on their own.
+    let routes = changed(unchanged_routes(), "/item.htm?id=1086791513717", |body| {
+        body.replacen(
+            "\"performId\":286937790",
+            "\"performId\":\"not-a-number\"",
+            1,
+        )
+    });
+    let routes = changed(routes, "dataId=286937788", |body| {
+        body.replace(
+            r#""responseInfo":{"responseSuccess":"true","responseCode":""}"#,
+            r#""responseInfo":{"responseSuccess":"false","responseCode":"X1"}"#,
+        )
+    });
+    let damai = support::MockDamai::start_bodies(routes);
+    let out = run(&home, &damai, &[]);
+    let text = stdout(&out);
+    let block = about(&text, "1086791513717");
+    assert!(
+        block.contains("详情页：场次缺少 performId"),
+        "票档接口的问题把详情页的问题盖掉了：{block}"
+    );
+    assert!(
+        block.contains("票档接口：接口返回失败") && block.contains("X1"),
+        "{block}"
+    );
+    assert_eq!(out.status.code(), Some(1), "{text}");
+}
+
 /// The default command, which is what a scheduled run uses: a sample that
 /// went stale is replaced without anyone passing --max-events. A budget
 /// with no room for a replacement meant the home page was never read, and
@@ -996,6 +1106,53 @@ fn record_writes_the_pages_it_fetched_as_fixtures() {
     );
     assert!(text.contains("item_on_sale.html"), "{text}");
     assert_eq!(damai.hits().len(), 2, "{:?}", damai.hits());
+}
+
+/// Recording the page damai.cn changed is the point of `record`, so a
+/// page `theflash event` cannot read is kept — and said out loud, because
+/// the sessions it left out would otherwise look like all the page had
+/// (#73).
+#[test]
+fn record_says_when_the_page_it_saved_is_one_a_query_cannot_read() {
+    let home = Home::new("record-bad-perform-id");
+    let dir = home.path().join("testdata");
+    std::fs::create_dir_all(&dir).unwrap();
+    let routes = changed(unchanged_routes(), "/item.htm?id=1086791513717", |body| {
+        body.replacen(
+            "\"performId\":286937788",
+            "\"performId\":\"not-a-number\"",
+            1,
+        )
+    });
+    let next = (
+        "dataId=286937790".to_string(),
+        support::fixture("sku_on_sale_286937790.jsonp"),
+    );
+    let damai = support::MockDamai::start_bodies(with_route(routes, next));
+    let mut cmd = home.theflash(&damai.base_url());
+    cmd.args([
+        "inspect",
+        "record",
+        "1086791513717",
+        "--as",
+        "broken",
+        "--dir",
+        dir.to_str().unwrap(),
+        "--sessions",
+        "1",
+        "--gap",
+        "0",
+    ]);
+    let out = support::output_within(cmd, 60);
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        dir.join("item_broken.html").is_file(),
+        "读不了的页面才是要复现的那一份，它没被录下来：{stderr}"
+    );
+    assert!(
+        stderr.contains("theflash event 读不了") && stderr.contains("performId"),
+        "没说这一页查询读不了：{stderr}"
+    );
 }
 
 /// The owner's rule: no credential or personal data in the repository. A

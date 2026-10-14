@@ -71,6 +71,8 @@
 
 字段路径对得上，不代表这份响应能用。票档接口会用完全正确的形状回答“查询失败”（`responseInfo.responseSuccess` 是 `"false"`，`responseCode` 说原因）或者回答另一个场次。这两种 `theflash event` 本来就当失败处理，所以巡检问同一个函数 `damai::tier_answer_problem`，报成这一场“查不了”，退出码 1。
 
+详情页同样：`performId` 写成 `"not-a-number"` 或 `-1` 时，类型还是声明里的字符串或数字，`theflash event` 却整页失败（`场次缺少 performId`）。巡检问同一个 `damai::item_page_problem`，也报成这一场“查不了”。场次 ID 只有一个读法 `damai::perform_id`（数字或数字字符串，必须是 0 到 `i64::MAX` 之间的整数），查询、票档接口核对和巡检都用它；巡检不会跳过读不了的那一场去读后面一个正常的，因为那样会把一整页查询不了的演出报成“没有变化”（#73）。
+
 ### 退出码
 
 | 情况 | 退出码 |
@@ -117,6 +119,8 @@ cargo run -q -- inspect record home --as home
 ```
 
 ## 候选 fixture 怎么交接
+
+`theflash inspect record` 也一样：录到一页 `theflash event` 读不了的详情页时，页面照样存下来（那正是要复现的那一份），并在 stderr 说明这一页查询读不了、读不了的场次没有录票档。
 
 `--candidates <目录>` 写出来的是**大麦发的那份字节**（脱敏之后），文件名就是 `backend/testdata/damai/` 里的 fixture 名：详情页是 `item_<itemId>.html`，票档是 `sku_<itemId>_<performId>.jsonp`。拷进 `testdata/damai/` 就能被现有的 `item_page_json` / `tier_json` 回放，不用再转格式。读不懂的响应（比如大麦换成了另一套页面）也照样留下来——那正是要复现的那一份。
 

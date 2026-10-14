@@ -353,6 +353,42 @@ fn the_saved_responses_hold_no_status_code_theflash_has_not_mapped() {
     }
 }
 
+/// A detail page can have every field in place, of the kinds damai.cn
+/// always sends, and still be one no query can be answered from: a
+/// `performId` that is a word, a negative number or one past the integer
+/// range leaves `theflash event` with no session to ask tiers for. The
+/// run asks the same reader a query does, so such a page is a finding
+/// instead of a quiet jump to the next readable session (#73).
+#[test]
+fn a_page_whose_session_id_a_query_refuses_is_a_finding_with_every_field_in_place() {
+    let good = item_json("item_on_sale.html");
+    assert_eq!(damai::item_page_problem(&good), None);
+    assert_eq!(first_perform_id(&good), Some(286937788));
+
+    for bad in [
+        Value::from("not-a-number"),
+        Value::from(-1),
+        Value::from(1.5),
+        Value::from(u64::MAX),
+        Value::from(""),
+    ] {
+        let mut page = good.clone();
+        page["dataDefault"]["performBases"][0]["performs"][0]["performId"] = bad.clone();
+        assert!(
+            changes_in(&page, shape::ITEM_PAGE_FIELDS).is_empty(),
+            "{bad}：字段还在，类型也还是声明里的，只有值查询读不了"
+        );
+        let why = damai::item_page_problem(&page)
+            .unwrap_or_else(|| panic!("{bad} 被当成了能用的场次 ID"));
+        assert!(why.contains("performId"), "{bad}：{why}");
+        assert_eq!(
+            first_perform_id(&page),
+            None,
+            "{bad}：跳到后一个能读的场次，就把坏的这一场藏起来了"
+        );
+    }
+}
+
 #[test]
 fn the_first_session_of_a_page_is_the_one_whose_tiers_are_read() {
     assert_eq!(

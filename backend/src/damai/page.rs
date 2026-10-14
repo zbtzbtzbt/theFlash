@@ -37,6 +37,33 @@ pub(crate) fn parse_item_page(html: &str) -> Result<Option<ItemPage>, String> {
     let Some(json) = item_page_json(html)? else {
         return Ok(None);
     };
+    read_item_page(&json).map(Some)
+}
+
+/// A session id as damai.cn writes it: a number on the detail page, the
+/// same value as a string on the tier endpoint. Only a value theFlash can
+/// put in a tier request counts, because `dataId=<performId>` is the only
+/// thing a session id is for: a word, a negative number, a fraction or one
+/// past the integer range is not a session. One definition, so the query,
+/// the tier reader and the structure inspection cannot disagree about
+/// which ids damai.cn's page offers (#73).
+pub fn perform_id(v: &Value) -> Option<u64> {
+    integer(v).and_then(|i| u64::try_from(i).ok())
+}
+
+/// Why theFlash cannot read this detail page, or None when it can. Kept
+/// apart from `parse_item_page` so "what this response means" has one
+/// definition: the fields can all be in place and of the kinds declared
+/// while a `performId` is a word, which leaves a query with no session to
+/// ask tiers for. The structure inspection asks here rather than reading
+/// ids its own looser way (#73), the way it asks
+/// [`super::tier_answer_problem`] about a tier response.
+pub fn item_page_problem(json: &Value) -> Option<String> {
+    read_item_page(json).err()
+}
+
+/// The page's data out of the JSON damai.cn embedded in it.
+fn read_item_page(json: &Value) -> Result<ItemPage, String> {
     let data = &json["dataDefault"];
     let stat = &json["staticDataDefault"];
 
@@ -59,7 +86,7 @@ pub(crate) fn parse_item_page(html: &str) -> Result<Option<ItemPage>, String> {
     let mut performs: Vec<PerformRef> = Vec::new();
     for base in bases {
         for p in base["performs"].as_array().into_iter().flatten() {
-            let Some(id) = integer(&p["performId"]).and_then(|i| u64::try_from(i).ok()) else {
+            let Some(id) = perform_id(&p["performId"]) else {
                 return Err(format!("场次缺少 performId：{p}"));
             };
             if performs.iter().any(|known| known.id == id) {
@@ -74,7 +101,7 @@ pub(crate) fn parse_item_page(html: &str) -> Result<Option<ItemPage>, String> {
     }
     performs.sort_by_key(|p| (p.date_ms.is_none(), p.date_ms));
 
-    Ok(Some(ItemPage {
+    Ok(ItemPage {
         name: string(&stat["itemBase"]["itemName"]),
         city: string(&stat["itemBase"]["cityName"])
             .or_else(|| string(&stat["venue"]["venueCityName"])),
@@ -82,7 +109,7 @@ pub(crate) fn parse_item_page(html: &str) -> Result<Option<ItemPage>, String> {
         buy_button,
         sell_start_ms: integer(&data["sellStartTime"]),
         performs,
-    }))
+    })
 }
 
 /// The page's two embedded JSON blobs side by side, under the names the
@@ -193,5 +220,63 @@ mod tests {
     fn broken_data_is_an_error_not_an_empty_event() {
         let html = r#"<div id="dataDefault">{"performBases": [</div>"#;
         assert!(parse_item_page(html).is_err());
+    }
+
+    /// A session id is what goes into `dataId=<performId>`, so the only
+    /// values that are one are the ones a tier request can carry. damai.cn
+    /// writes them as numbers on the page and as strings on the tier
+    /// endpoint, and both read the same.
+    #[test]
+    fn a_session_id_is_a_number_or_a_numeric_string_within_range() {
+        use serde_json::json;
+        assert_eq!(perform_id(&json!(286937790)), Some(286937790));
+        assert_eq!(perform_id(&json!("286937790")), Some(286937790));
+        assert_eq!(perform_id(&json!(" 286937790 ")), Some(286937790));
+        assert_eq!(perform_id(&json!(0)), Some(0));
+        for not_one in [
+            json!("not-a-number"),
+            json!(""),
+            json!(-1),
+            json!("-1"),
+            json!(1.5),
+            json!("1.5"),
+            // Past the integer range theFlash reads, so a request built
+            // from it would not be about this session.
+            json!(u64::MAX),
+            json!("18446744073709551615"),
+            json!(null),
+            json!([286937790]),
+        ] {
+            assert_eq!(perform_id(&not_one), None, "{not_one}");
+        }
+    }
+
+    /// The fields can all be there, of the kinds damai.cn always sends,
+    /// and the page still be one theFlash cannot read: a performId it
+    /// refuses leaves the whole page without a session to ask tiers for.
+    /// `item_page_problem` answers that question once, for the query and
+    /// for the structure inspection alike (#73).
+    #[test]
+    fn a_page_with_a_session_id_the_reader_refuses_says_so() {
+        let html = std::fs::read_to_string(format!(
+            "{}/testdata/damai/item_on_sale.html",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap();
+        let json = item_page_json(&html).unwrap().unwrap();
+        assert_eq!(item_page_problem(&json), None);
+
+        for bad in ["\"not-a-number\"", "-1", "1.5"] {
+            let broken_html =
+                html.replace("\"performId\":286937788", &format!("\"performId\":{bad}"));
+            let broken = item_page_json(&broken_html).unwrap().unwrap();
+            let why = item_page_problem(&broken).unwrap_or_else(|| panic!("{bad} 被当成了场次 ID"));
+            assert!(why.contains("performId"), "{bad}：{why}");
+            assert_eq!(
+                parse_item_page(&broken_html).unwrap_err(),
+                why,
+                "{bad}：查询和巡检读到的不是同一件事"
+            );
+        }
     }
 }
