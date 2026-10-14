@@ -234,12 +234,11 @@ pub fn classify(page: &Value) -> Option<Category> {
 /// only because it costs one request and would start working again by
 /// itself; see the fixture test below, #39 and 0014.
 pub fn item_ids_on_home(html: &str) -> Vec<u64> {
-    const WINDOW: usize = 200;
+    let bytes = html.as_bytes();
     let mut ids: Vec<u64> = Vec::new();
     for (at, _) in html.match_indices("item.htm") {
         let from = at + "item.htm".len();
-        let window = &html[from..html.len().min(from + WINDOW)];
-        if let Some(id) = first_item_id(window)
+        if let Some(id) = first_item_id(bytes, from)
             && !ids.contains(&id)
         {
             ids.push(id);
@@ -248,25 +247,35 @@ pub fn item_ids_on_home(html: &str) -> Vec<u64> {
     ids
 }
 
-/// The first run of 10 to 19 digits, which is the shape of an item id
-/// (13 digits today, 1086791513717). Shorter runs are the `id` of
-/// something else on the page, such as a category or a timestamp's
-/// milliseconds.
-fn first_item_id(window: &str) -> Option<u64> {
-    let bytes = window.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if !bytes[i].is_ascii_digit() {
+/// How far after a link an id may start. The page is read as bytes rather
+/// than sliced as text: damai.cn writes its home page in Chinese, so this
+/// many bytes after a link lands inside a character more often than not,
+/// and slicing there used to panic and take the whole inspection with it
+/// (#75).
+const WINDOW: usize = 200;
+
+/// The first run of 10 to 19 digits starting within `WINDOW` bytes of
+/// `from`, which is the shape of an item id (13 digits today,
+/// 1086791513717). Shorter runs are the `id` of something else on the
+/// page, such as a category or a timestamp's milliseconds. A run that
+/// starts inside the window is read to its end even if that is past the
+/// window: half of a 25-digit number is a 13-digit id damai.cn never
+/// served, and asking for it costs a request.
+fn first_item_id(html: &[u8], from: usize) -> Option<u64> {
+    let last_start = html.len().min(from + WINDOW);
+    let mut i = from;
+    while i < last_start {
+        if !html[i].is_ascii_digit() {
             i += 1;
             continue;
         }
         let start = i;
-        while i < bytes.len() && bytes[i].is_ascii_digit() {
+        while i < html.len() && html[i].is_ascii_digit() {
             i += 1;
         }
-        let run = &window[start..i];
-        if (10..=19).contains(&run.len()) {
-            return run.parse().ok();
+        if (10..=19).contains(&(i - start)) {
+            // Digits are ASCII, so this run is text whatever surrounds it.
+            return std::str::from_utf8(&html[start..i]).ok()?.parse().ok();
         }
     }
     None
@@ -437,6 +446,70 @@ mod tests {
             Vec::<u64>::new(),
             "首页又有演出链接了：自动换样本可以重新打开，见 #39"
         );
+    }
+
+    /// damai.cn writes its pages in Chinese, so the bytes that bound the
+    /// window after a link almost never land on a character boundary.
+    /// Cutting the page there used to panic and take the whole inspection
+    /// with it (#75).
+    #[test]
+    fn an_id_is_read_when_the_link_is_followed_by_characters_wider_than_a_byte() {
+        for tail in [
+            "中".repeat(100),
+            "🎫".repeat(60),
+            format!("{}é{}{}", "中".repeat(10), "a".repeat(10), "🎫".repeat(60)),
+        ] {
+            let html = format!(r#"<a href="item.htm?id=1086791513717">{tail}</a>"#);
+            assert_eq!(item_ids_on_home(&html), [1086791513717], "{tail}");
+        }
+    }
+
+    /// The same cut, with the character that straddles it put exactly on
+    /// the last byte of the window instead of somewhere after it.
+    #[test]
+    fn an_id_is_read_when_a_character_straddles_the_end_of_the_window() {
+        for pad in 175..=181 {
+            let html = format!(
+                r#"<a href="item.htm?id=1086791513717">{}中中中</a>"#,
+                "a".repeat(pad)
+            );
+            assert_eq!(item_ids_on_home(&html), [1086791513717], "pad={pad}");
+        }
+    }
+
+    /// The window says how far after a link an id may start. An id that
+    /// starts beyond it belongs to the next thing on the page, not to this
+    /// link.
+    #[test]
+    fn an_id_that_starts_beyond_the_window_belongs_to_the_next_link() {
+        // The window is the 200 bytes after `item.htm`, of which `?">` is
+        // the first three: with 196 characters between, the id starts on
+        // the window's last byte.
+        let within = format!(
+            r#"<a href="item.htm?">{}1086791513717</a>"#,
+            "x".repeat(196)
+        );
+        assert_eq!(item_ids_on_home(&within), [1086791513717]);
+        let beyond = format!(
+            r#"<a href="item.htm?">{}1086791513717</a>"#,
+            "x".repeat(197)
+        );
+        assert_eq!(item_ids_on_home(&beyond), Vec::<u64>::new());
+    }
+
+    /// A run of digits that starts inside the window is read to its end,
+    /// so a 25-digit number is still too long to be an item id. Reading
+    /// only the part inside the window turned it into a 13-digit id that
+    /// damai.cn never served, and that costs a request.
+    #[test]
+    fn a_number_too_long_to_be_an_id_is_not_cut_down_into_one() {
+        // Placed so that exactly 13 of its 25 digits fall inside the
+        // window.
+        let html = format!(
+            r#"<a href="item.htm?">{}1234567890123456789012345</a>"#,
+            "x".repeat(184)
+        );
+        assert_eq!(item_ids_on_home(&html), Vec::<u64>::new());
     }
 
     #[test]
