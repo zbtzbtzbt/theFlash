@@ -198,7 +198,7 @@
 **没有写明「在哪个 head 上跑了什么」的独立审查记录，就不能合；squash 正文里必须有「合并闸门：审查者…」一段。**
 - #13：PR #12 在审查记录写完前已被合并（mergedBy 为 owner 账号，具体操作者未区分）。
 - Done right on 10-14: `f56b3c0` merge-gate ——CI 绿、独立审查、head 匹配才合。
-- **又见**：`02b5e52`（PR #157 / #103）——squash 合入 main，正文无「合并闸门」段；PR 上 comments/reviews 皆空，仅有 `待审查` 标签。业务补强有测试，但是一次闸门外合并。见跟踪 issue。
+- **又见**：`02b5e52`（PR #157 / #103）——squash 合入 main，正文无「合并闸门」段；PR 上 comments/reviews 皆空，仅有 `待审查` 标签。业务补强有测试，但是一次闸门外合并。见 #159。
 - 怎么避免：合入只用 `scripts/merge-gate merge`；hygiene 对每个无闸门段的 first-parent 提交开 issue。禁止 `gh pr merge` / 网页 Merge。
 - Seen 2× (2026-10-14)。
 
