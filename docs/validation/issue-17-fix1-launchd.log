@@ -1,0 +1,58 @@
+registered outage 0c47b8a9b3aa
+registered crash 6aa653d270f3
+outage 0.0 ('registered', 'pending', None)
+crash 0.0 ('registered', 'pending', None)
+outage 5.1 ('finished', 'pending', None)
+crash 5.1 ('running', 'pending', None)
+killed own runner 81313 child 83145
+outage 6.1 ('finished', 'pending', 1)
+crash 65.3 ('interrupted', 'pending', 1)
+outage 66.3 ('finished', 'pending', 2)
+crash 125.5 ('interrupted', 'pending', 2)
+fake network restored after >2 minutes 150.6
+outage 186.8 ('finished', 'posted', 0)
+crash 246.0 ('interrupted', 'posted', 0)
+PASS outage once only; automatic delivery posted
+### 验证任务 0c47b8a9b3aa
+
+- 状态：finished；停止原因：程序自行退出
+- 计划开始：2026-10-14T02:42:08+00:00
+- 实际开始：2026-10-14T02:42:08+00:00
+- 结束：2026-10-14T02:42:09+00:00
+- 退出码：7
+- 日志位置（本机）：`/var/folders/mt/_dls_b316hlf_395hzwc9y7w0000gn/T/fix17-live-_4ssyp36/state/0c47b8a9b3aa/output.log`
+
+关键输出（最多前 8 / 后 12 行；完整输出在本机日志）：
+<pre>[2026-10-14T02:42:08+00:00] 被测程序已启动
+[2026-10-14T02:42:09+00:00] local probe
+[2026-10-14T02:42:09+00:00] 任务结束；退出码：7</pre>
+
+<!-- theflash-validation:0c47b8a9b3aa -->
+Agent: validation runner
+
+PASS crash once only; automatic delivery posted
+### 验证任务 6aa653d270f3
+
+- 状态：interrupted；停止原因：runner 中断；没有重新运行命令
+- 计划开始：2026-10-14T02:42:08+00:00
+- 实际开始：2026-10-14T02:42:08+00:00
+- 结束：2026-10-14T02:43:09+00:00
+- 退出码：未启动
+- 日志位置（本机）：`/var/folders/mt/_dls_b316hlf_395hzwc9y7w0000gn/T/fix17-live-_4ssyp36/state/6aa653d270f3/output.log`
+
+关键输出（最多前 8 / 后 12 行；完整输出在本机日志）：
+<pre>[2026-10-14T02:42:08+00:00] 被测程序已启动
+[2026-10-14T02:42:09+00:00] local probe</pre>
+
+<!-- theflash-validation:6aa653d270f3 -->
+Agent: validation runner
+
+fake gh timestamps 1791945729.8344839
+1791945789.432674
+1791945790.260768
+1791945849.557129
+1791945910.4866729
+1791945969.738487
+
+unloaded own outage cn.theflash.validation.0c47b8a9b3aa
+unloaded own crash cn.theflash.validation.6aa653d270f3
