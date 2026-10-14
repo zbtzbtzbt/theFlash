@@ -1,4 +1,4 @@
-<!-- reviewed-through: f56b3c0 (2026-10-14 10:19 +0800) -->
+<!-- reviewed-through: f12b84d (2026-10-14 10:37 +0800) -->
 # 已合并工作的教训
 
 本项目的代码由 agent 编写、审查、合并和发布。每天夜里有一个复盘 agent 检查当天的 commit：哪些改动后来又被返工、哪些不该合并、哪些验证得太薄。学到的东西记在这里。改代码之前先读这份文件。
@@ -11,7 +11,7 @@
 
 从仓库第一个 commit 到 `f56b3c0`：约 24 个 commit（含 merge），0 个正式发版 tag 被本次核对为“等绿再发”违规；用户可见的业务能力从无到查询 / 盯票 / 本机界面 / 发版闸门 / 合并闸门。
 
-最主要的问题模式：**守护测试假阳性**（名字守的保证被删掉后测试仍绿）和 **流程上“独立”名不副实**（验收者自己修、审查记录写完前就合并）。另有一件立刻要修的：**main 在 Linux 上红**（`offline_guard`，见新开 issue）。
+最主要的问题模式：**守护测试假阳性**（名字守的保证被删掉后测试仍绿）和 **流程上“独立”名不副实**（验收者自己修、审查记录写完前就合并）。第一轮开出的 #55（main Linux 红 / offline_guard）已在 `f12b84d` 修掉；合入后的 Test 跑完前仍以 CI 为准。
 
 恶意代码扫描（eval / curl|sh / 陌生出站域名 / 硬编码凭据）：本轮未发现应立刻回滚的投毒；`osascript` / `child_process.execFile` 均有明确产品用途并带参数传入，不拼脚本。
 
@@ -47,9 +47,9 @@
 - 怎么避免：审查时按 code-standards 故意破坏命名保证；合并前 `git show` 里每个新测试都要有一条“破坏后 FAIL”的记录。未修前不要在相关模块上继续堆功能。
 - Seen 1× (2026-10-14)。
 
-**跨平台的护栏必须在 Linux 和 macOS 上都用真正会失败的方式验证；macOS 绿不能代替 Ubuntu。**
-- `f56b3c0` 的 CI run [38500413898](https://github.com/zbtzbtzbt/theFlash/actions/runs/38500413898)：`offline_guard::a_test_that_forgot_the_mock_server_fails_and_says_so` 仅 Ubuntu 失败——请求落到死代理 `127.0.0.1:9`，stderr 是 tunnel error，没有「测试试图访问真实大麦」。#7 / #34 的 tripwire 在一半平台上没按设计工作，main 因此红。
-- 怎么避免：main 红了先修（见对应 issue）；新加“平台相关”的守护时，在 commit 正文写明两个 OS 的失败信息，或在 PR 上贴两个 job 的日志片段。
+**跨平台的护栏必须在 Linux 和 macOS 上都用真正会失败的方式验证；macOS 绿不能代替 Ubuntu。陷阱在失败路径上不能先关连接再 exit。**
+- `f56b3c0` 的 CI run [38500413898](https://github.com/zbtzbtzbt/theFlash/actions/runs/38500413898)：`offline_guard` 仅 Ubuntu 失败。根因是 tripwire 的 `tripped()` 读完请求就关连接、之后才 `exit(101)`；theflash 先看到 tunnel EOF，探针偶发抢在 exit 前 panic（表面像“请求被放行到死代理”）。`f12b84d`（#55 / PR #57）改为连接保持到进程退出；注入 300ms 延迟后改动前稳定复现、改动后通过。
+- 怎么避免：写“失败即杀进程”的测试夹具时，对外可见的失败信号（exit / 文案）必须先于连接关闭；新护栏在两个 OS 的 commit 正文里都留下失败信息。
 - Seen 1× (2026-10-14)。
 
 ## 并发与测试
@@ -66,7 +66,7 @@
 - Seen 1× (2026-10-14)。
 
 **main 红着不要往上叠新功能。**
-- 当前水位线 `f56b3c0` 上 Ubuntu Test 红（offline_guard）。下一轮 hygiene / work-tick 的第一件事是修它或确认已有人认领，而不是继续合增强。
+- Done right on 10-14: `f12b84d` 专修 `f56b3c0` 引入后暴露的 Ubuntu 红，不叠功能。合入后仍等该 commit 的 Test 双平台绿再继续发版。
 - Seen 1× (2026-10-14)。
 
 ## 合并与关闭
