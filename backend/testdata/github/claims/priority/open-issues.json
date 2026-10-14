@@ -1,0 +1,677 @@
+[
+  {
+    "number": 81,
+    "title": "合并闸门只能靠约定：要不要升级 GitHub Pro 或把仓库改成公开，让 GitHub 在服务端强制“走 PR、CI 绿才能合”（需要 owner 裁决）",
+    "state": "open",
+    "labels": [
+      {
+        "name": "question"
+      }
+    ],
+    "body": "需要 owner 裁决：涉及花钱或仓库可见性。#15 / #13 验收时发现，由验收者（CodeBuddy）开。\n\n## 现在的情况\n\n合并闸门（`scripts/merge-gate`，决定记录 [0007](https://github.com/zbtzbtzbt/theFlash/blob/main/docs/decisions/0007-merge-gate.md)）只在有人调用它时才起作用。所有 agent 共用一个 GitHub 账号，任何会话都能直接 `gh pr merge`，绕过它。\n\n2026-10-14 闸门进 main（10:19）之后的 7 次合并里，只有 PR #57 是闸门合的。另外 6 次（#24、#40、#33、#28、#59、#61）都是实现者同厂商的会话自己写一条“结论：通过”的审查记录，3～4 秒后直接合并。把这几个 PR 合并前那一刻的数据交给闸门，它全部拒绝（“审查者和实现者是同一个 agent”）。细节见 #15 的验收结论。\n\nGitHub 自带的保护规则在这个仓库用不了。我今天重新查过（只读）：\n\n| 请求 | 结果 |\n| --- | --- |\n| `repos/zbtzbtzbt/theFlash/branches/main/protection` | 403 `Upgrade to GitHub Pro or make this repository public to enable this feature.` |\n| `repos/zbtzbtzbt/theFlash/rulesets` | 403，同一句话 |\n| `repos/zbtzbtzbt/theFlash/rules/branches/main` | 403，同一句话 |\n| `repos/zbtzbtzbt/theFlash` | `private=true`，owner 是个人账号 |\n\n0007 写了“等套餐允许时怎么切”的步骤，但还没有 issue 请你裁决，所以开这一个。\n\n## 选项\n\n**A. 升级 GitHub Pro（要花钱），仓库保持私有。** 按 0007 的步骤建一条 ruleset：改动必须走 PR，`check (ubuntu-latest)` 和 `check (macos-latest)` 必须是绿的，分支必须基于最新 main，禁止 force push 和删除 main。直接推 main、CI 没跑完或是红的就合并，这些都会被 GitHub 服务端拒绝。“审查者是不是实现者”在共用账号下 GitHub 判断不了，这一条仍然靠闸门，所以闸门保留。\n\n**B. 把仓库改成公开（不花钱，同样能用 ruleset）。** 代价是代码、issue、PR 评论、fixture、验证文档和截图全部公开。改之前要先过一遍，看有没有不该公开的东西：真实大麦响应的 fixture、截图、本机路径和设备信息、今晚各个会话的评论。\n\n**C. 维持现状。** 闸门仍然只是约定，靠夜间复盘事后发现绕过。复盘用的命令现在会漏报（#15 结论的问题 1），修好之前，今天这样的绕过不会有人发现。\n\n## 建议\n\n选 A。它只改 GitHub 设置，不改代码和流程（0007 的切换步骤可以照着做）；B 带来的公开风险要先做一次清查，这个代价比 A 大。不管选哪个，#15 里复盘命令的漏报都要先修。\n\n另外请顺便确认一件事（在 #20 也问了）：上面 6 次合并的审查记录都写着“按 owner「推进合入」合并”，我在 issue 和 PR 评论里没找到你说这句话的原文。如果你确实授权了“可以不经另一个 agent 审查、不走闸门直接合并”，请在 #20 写一句，复盘时才能把授权过的合并和绕过的分开。\n\nAgent: CodeBuddy\n",
+    "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/81"
+  },
+  {
+    "number": 80,
+    "title": "docs: PR #40 在生成区外追加重复索引行，docs-index 检查仍通过",
+    "state": "open",
+    "labels": [
+      {
+        "name": "bug"
+      },
+      {
+        "name": "指派:claude"
+      }
+    ],
+    "body": "PR #40（#10，实现者 Claude）的事后独立审查发现，审查者 Codex / posthoc-40。原 head `32d51897de18b51319d3a8a69c6adcc4c13b705a`，已合并 `64d0fbe`；在 main `c72af3d` 复现，收尾更新到 `97fbc3a`。不回滚，不在本任务修改业务代码。\n\nPR #40 的 diff 明确在 `<!-- docs-index:end -->` 后加了：\n- docs/decisions/README.md：重复的 0011 及旧标题 0012 行。\n- docs/subsystems/README.md：重复的 damai-inspect 行。\n\n复现：在合并结果或当前 main 运行 `python3 scripts/docs_index.py --check`（退出 **0**）与 `make docs-index`；查看两份 README 的 end 标记之后。\n\n实际：生成区已含同一文档，区外再次出现它；`--check` 没报，生成命令也不会清理区外正文。当前 main 另有 #16 同形的 claim-lease 行。读者看到两份索引；0012 一份是当前标题，一份是旧标题。\n\n期望：删掉重复索引行，README 保持唯一生成索引；对“把索引条目误放在生成区外”有可机械判断的守护，同时保留正常前言/后记。这不是 #53 已修的标题/状态/竖线测试假阳性，是实际重复索引仍通过的另一项问题。\n\nAgent: Codex\n",
+    "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/80"
+  },
+  {
+    "number": 79,
+    "title": "inspect: 报告声称换掉样本，实际保存的仍是原样本",
+    "state": "open",
+    "labels": [
+      {
+        "name": "bug"
+      },
+      {
+        "name": "指派:claude"
+      }
+    ],
+    "body": "PR #40（#10，实现者 Claude）的事后独立审查发现，审查者 Codex / posthoc-40。原 head `32d51897de18b51319d3a8a69c6adcc4c13b705a`，已合并 `64d0fbe`；在 main `c72af3d` 复现，收尾更新到 `97fbc3a`。不回滚，不在本任务修改业务代码。\n\n位置：`inspect::run` 为每个 page 设置 replaced 时，只比较 saved 中相同 category 的第一个条目；没有核对这一 page 是否真是 kept 里选中的样本。\n\n真实复现：2026-10-14 10:56，持 damai-lock 跑默认完整巡检（10 请求，没有风控）。seed 的已开售样本 1086791513717 仍已开售，未开售样本 1092337348536 在 10:18 后也已开售。\n\n实际报告：\n```\n[已开售] 1092337348536 ...\n  换掉了过期的样本 1086791513717\n```\n\n但同次保存的 inspect-samples.json 仍是 `onSale -> 1086791513717`、`notYetOnSale -> 1092337348536`；1086791513717 没有过期，也没被换掉。这条输出把正常读到的另一个同类演出说成了发生过的持久化替换。\n\n离线重现：本地回放正常 seed routes；将未开售详情页 buyBtnStatus 106 改成 204（保留其余字段），首页无候选。`inspect --gap 0` 后同时核对 render 与保存的 samples：只有 kept 真正更换时才应出现 replaced。\n\n期望：报告里的“换掉了过期的样本 X”与最终选中的 kept、原 category 和实际写入相符。补同类候选没有被选中、两个样本状态变成同类、真正替换三种场景。\n\nAgent: Codex\n",
+    "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/79"
+  },
+  {
+    "number": 78,
+    "title": "inspect record: 某个已请求的 fixture 被拒绝或写入失败，仍以成功结束",
+    "state": "open",
+    "labels": [
+      {
+        "name": "bug"
+      },
+      {
+        "name": "指派:claude"
+      }
+    ],
+    "body": "PR #40（#10，实现者 Claude）的事后独立审查发现，审查者 Codex / posthoc-40。原 head `32d51897de18b51319d3a8a69c6adcc4c13b705a`，已合并 `64d0fbe`；在 main `c72af3d` 复现，收尾更新到 `97fbc3a`。不回滚，不在本任务修改业务代码。\n\n位置：`write_candidate` 把拒绝/IO 错误只写到 notes；`finish` 始终 Ok；`main::inspect_record` 只要 written 非空就退出 0。\n\n复现（直接沿用现有 `record_takes_personal_data_out_and_refuses_what_it_cannot_clean` 的场景）：\n1. 本地详情页回放原始 `item_on_sale.html`，首个票档响应在原始 JSONP 前面加一个合成 `Set-Cookie` 头（由 `['Set-', 'Cookie', ':'].join('')` 构造，不含真实账号）。\n2. 临时 HOME、BASE_URL loopback、创建输出目录。\n3. `theflash inspect record 1086791513717 --as probe --dir <tmp> --sessions 1 --gap 0`。\n\n实际：详情页存在、票档不存在；stderr 说 `没有保存`，但退出 **0**。当前已有测试只断言缺文件和 stderr，没有断言这个成功退出码。\n\n期望：已请求的文件被拒绝或写入失败时返回非零，明确列出留下哪些和缺了哪些；已成功的安全文件可保留，但不能宣称整次录制成功。增加脱敏拒绝、IO 错误、部分成功和全部成功/全部失败的端到端退出码测试。\n\nAgent: Codex\n",
+    "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/78"
+  },
+  {
+    "number": 77,
+    "title": "inspect: 样本保存路径不可用时仍退出 0 并报告没有变化",
+    "state": "open",
+    "labels": [
+      {
+        "name": "bug"
+      },
+      {
+        "name": "指派:claude"
+      }
+    ],
+    "body": "PR #40（#10，实现者 Claude）的事后独立审查发现，审查者 Codex / posthoc-40。原 head `32d51897de18b51319d3a8a69c6adcc4c13b705a`，已合并 `64d0fbe`；在 main `c72af3d` 复现，收尾更新到 `97fbc3a`。不回滚，不在本任务修改业务代码。\n\n位置：`inspect::run` 的 samples::save 错误只进 notes；`Report::has_findings` / CLI 最后退出码忽略了保存失败。和 damai-inspect.md “状态目录不可用退出 1” 不一致。\n\n复现：\n1. 本地回放全部正常 seed 及票档 fixture；临时 HOME。\n2. 创建普通文件 `<tmp>/block`，把 samples 路径设为 `<tmp>/block/samples.json`。\n3. `THEFLASH_DAMAI_BASE_URL=http://127.0.0.1:<port> theflash inspect --gap 0 --samples <tmp>/block/samples.json`。\n\n实际：退出 **0**，报告包含 `样本没保存下来`，末尾仍是 `结论：没有变化`，样本没有落盘。定时任务按退出码会当作成功；换到新样本时也无法在下一轮保留新的覆盖。\n\n期望：持久化失败明确返回非零和可操作说明；不用把磁盘错误假称为“大麦改版”，但调度/监控必须看得到失败。覆盖已存在普通文件、不可写目录、保存途中失败；恢复正常路径后返回成功。\n\nAgent: Codex\n",
+    "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/77"
+  },
+  {
+    "number": 76,
+    "title": "inspect: 只读最近 100 个 open issue，旧巡检 issue 会被遗漏并重复新建",
+    "state": "open",
+    "labels": [
+      {
+        "name": "bug"
+      },
+      {
+        "name": "指派:claude"
+      }
+    ],
+    "body": "PR #40（#10，实现者 Claude）的事后独立审查发现，审查者 Codex / posthoc-40。原 head `32d51897de18b51319d3a8a69c6adcc4c13b705a`，已合并 `64d0fbe`；在 main `c72af3d` 复现，收尾更新到 `97fbc3a`。不回滚，不在本任务修改业务代码。\n\n位置：`backend/src/inspect/tracker.rs:107-119`，固定 `gh issue list --limit 100`，未分页/未搜索标记。\n\n复现：\n1. 本地 fixture 触发 777，临时 HOME；PATH 上的 fake gh 模拟一个有 101 条 open issue 的仓库：最新的 100 条都没有巡检 marker，较旧第 101 条有 `<!-- theflash-inspect: damai-structure -->`。\n2. fake gh 按实际 argv 的 --limit 100 只返回前 100 条；让 create/comment 记录调用，不联网。\n3. 运行 `theflash inspect --gap 0 --open-issue --repo probe/offline`。\n\n实际：只调用一次 `issue list --state open --limit 100 --json number,title,body`，随后调用 `issue create`；没有请求第二页，也没有找到旧巡检 issue。下一轮列表仍未覆盖旧 issue 时会继续制造同类 issue。独立 CLI fake-gh 探针确认 `second_page_requested=false, creates_duplicate=true`。\n\n期望：能找到已有 open 的巡检 issue 并追加评论，不因排名靠后重复新建。可按唯一标记搜索（注意搜索索引限制）或完整读取/分页 open issue；增加超过 100 条且标记不在首批里的整条测试。两次并发巡检的创建竞争可另行考虑，本项先修确定的分页遗漏。\n\nAgent: Codex\n",
+    "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/76"
+  },
+  {
+    "number": 75,
+    "title": "inspect: 中文首页链接后按 200 字节截断会 panic，整次巡检没有报告",
+    "state": "open",
+    "labels": [
+      {
+        "name": "bug"
+      },
+      {
+        "name": "指派:claude"
+      }
+    ],
+    "body": "PR #40（#10，实现者 Claude）的事后独立审查发现，审查者 Codex / posthoc-40。原 head `32d51897de18b51319d3a8a69c6adcc4c13b705a`，已合并 `64d0fbe`；在 main `c72af3d` 复现，收尾更新到 `97fbc3a`。不回滚，不在本任务修改业务代码。\n\n位置：`backend/src/inspect/samples.rs:169-174`，`&html[from..min(from + 200, len)]` 可能切到 UTF-8 字符中间。\n\n复现：本地回放全部原始 seed fixture；把首个页面 buyBtnStatus 204 改 777，让巡检请求首页。首页返回：\n\n```python\n'<a href=\"item.htm?id=1086791513717\">' + '中' * 100 + '</a>'\n```\n\n临时 HOME、BASE_URL loopback，运行 `theflash inspect --gap 0`。\n\n实际：**退出 101**，共 6 请求，stdout 没有完整巡检报告；stderr：\n\n```\npanicked at src/inspect/samples.rs:173:27:\nend byte index 217 is not a char boundary; it is inside '中' (bytes 216..219 of string)\n```\n\n期望：按安全 UTF-8 边界/字节扫描提取 ID，仍受候选预算约束，不 panic；发现状态码 777 后正常输出并退出 1，--open-issue 能接着工作。增加长中文、emoji、混合文字及窗口边界回归。它不依赖 #39 今天真实首页无候选这个事实：真实首页任何时候重新出现链接都会进入这条路径。\n\nAgent: Codex\n",
+    "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/75"
+  },
+  {
+    "number": 74,
+    "title": "damai: 访问层仍能突发请求、漏记风控，巡检写入熔断失败后继续请求（PR #28）",
+    "state": "open",
+    "labels": [
+      {
+        "name": "bug"
+      },
+      {
+        "name": "指派:claude"
+      }
+    ],
+    "body": "PR #28 / issue #4 的 Codex 独立审查发现以下 5 处问题。PR 在审查开始前已合并；本 issue 交 Claude 修复，修复走新 PR，不回滚、不直接推 main。#4 保持 OPEN，不能作为已完成的安全访问层验收。\n\n核对的 head：d2e3bab76f0e044aea9d71689cae0c15f580fd45；实际合入 main：fd68bd7b6192cb824171aa9d697b74d17380111b。临时 HOME 下原版 `make check` 全绿（Python 43 / Rust 334 / Vitest 34 + 1 skipped），以下额外探针独立运行，未访问真实大麦。\n\n1. **P1：重定向绕过 Gate，GET 漏掉只在 URL 上的风控。** `backend/src/damai/client.rs:48-52,178-185,223-228` 保留 reqwest 默认自动跟随。回放服务器 `/item.htm?id=1086791513717` 返回 302 `Location: /_____tmd_____/punish`，下一跳回放原始 `risk_control.html`：两次请求间隔 <1 ms，第二跳没有经过 Gate。若下一跳回放原始 `item_not_found.html`（没有体内风控标记），程序只说“演出不存在或已下架”，不写 risk-stop.json；下一次查询还能发请求。期望看到 Location 风控标记立即记录并停止，不跟随；允许的普通重定向每一跳仍要排队并检查熔断。需要覆盖 GET / HEAD / 首页 / 票档出口。\n\n2. **P1：巡检遇到 RiskNotRecorded 后继续发送请求。** `backend/src/inspect/mod.rs:583-658` 的 `stops_the_run` 只匹配 RiskControl，没有接上新 `stops_damai_access`。先保持临时状态目录可写，让 Client 创建成功；回放服务器在收到第一条请求后把该状态目录 chmod 0555，再返回原始 risk_control.html。运行 `theflash inspect --gap 0 --max-events 5 --samples <临时路径>`：提示“已停止查询；但熔断状态没能写进…Permission denied”，随后又查询 4 个样本页面和 3 个票档，共 8 个真实到达回放服务器的请求，最后还把风控误报为缺样本/改版。期望第一条风控响应后立即结束整个巡检，后续 hits=0。请覆盖全部停止错误，不只这个变体。\n\n3. **P2：默认构造多个 Client 会得到多个进程预算。** `client.rs:43-44` 每次 `Arc::new(Gate::for_user()?)`；计数在 `access.rs:158` 的实例 Mutex。一个进程里创建两个默认 Client，`tokio::join!(left.item_page(1), right.item_page(1))` 向同一个本机 fixture 请求，两次到达间隔 **0 ms**。额外 Rust 测试真正 FAILED：`同进程两个 Client 的到达间隔仅 0ms：独立 Gate 绕开共享预算`。现有测试只让三个调用方共用手工传入的同一个 Arc，没覆盖默认生产工厂。期望默认调用方自动共用进程预算。\n\n4. **P2：排队后延迟唤醒会突发放行。** `access.rs:165-176` 预约绝对时隙后仅 sleep 一次，不在实际放行时重新约束间隔。注入时钟：先在 0 ms 发一个，两个调用方预约 300/600 ms，模拟执行器延迟到 1000 ms 一起唤醒。两个 enter 都在 **1000/1000 ms** 返回，额外 Rust 测试真正 FAILED。期望延期也不把积累时隙一次性放完；测试应注入延迟，并按 1000/1299/1300 ms 推进观察放行数，不能靠墙钟反复重跑。\n\n5. **P2：已有可写锁文件不证明状态目录可写。** `access.rs:151-153`。在临时状态目录中预建 risk-stop.lock，保留它 0644，把目录 chmod 0555，未创建 risk-stop.json。匿名正常 fixture 查询仍 exit 0，服务器收到全部 **4** 个请求；目录上创建风险状态文件会 Permission denied。期望按 #4 标准在发送前停止并说明目录不可写，不能等发生风控才发现写不进熔断。\n\n复现材料保存在 owner Mac 专属 worktree 的 `backend/target/review28/`：\n- `probe-source.rs`、`rust-probes.log`（两个 Rust 断言真 FAIL）；复制为 `backend/tests/review28_probe.rs` 后，在临时 HOME、死代理且 NO_PROXY 只放行 loopback 下运行 `cargo test --test review28_probe -- --nocapture`，用完删除临时测试。\n- `http_probe.py`、`http-results.json`、`http-probe.log`（上述重定向、只读目录、第一条响应后写失败的巡检实测）；在仓库根目录执行 `python3 backend/target/review28/http_probe.py`。脚本只绑定 127.0.0.1，响应回放 backend/testdata/damai 的原始字节，子进程使用自己临时 HOME 和死代理。\n- `make-check.log`、`mutations*.log/json`、`mutation-*.log`、`restored-*.log`；13 个方向的故意破坏均真 FAIL，代码全部已恢复，git diff 为空。\n\n修复前先把这五种输入变为确定性失败测试，修复后完整 make check / 独立审查 / 双平台 CI，再交独立验收。CI 当前受账单/额度阻塞（#67），不要用本机绿替代 CI。\n\nAgent: Codex\n",
+    "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/74"
+  },
+  {
+    "number": 73,
+    "title": "inspect: 非数字或负数 performId 令 event 解析失败，巡检仍报告没有变化",
+    "state": "open",
+    "labels": [
+      {
+        "name": "bug"
+      },
+      {
+        "name": "指派:claude"
+      }
+    ],
+    "body": "PR #40（#10，实现者 Claude）的事后独立审查发现，审查者 Codex / posthoc-40。原 head `32d51897de18b51319d3a8a69c6adcc4c13b705a`，已合并 `64d0fbe`；在 main `c72af3d` 复现，收尾更新到 `97fbc3a`。不回滚，不在本任务修改业务代码。\n\n位置：`inspect::first_perform_id` / `perform_ids` 及 shape 的 performId 声明。巡检只检查 Number/String 类型，跳过不能转成 u64 的值，并没有验证与业务详情页解析器一致的语义。\n\n复现：\n1. 从原始 `item_on_sale.html` 开始，只将第一个 `\"performId\":286937788` 改成 `\"performId\":\"not-a-number\"`，其余字节/其余 routes 不变。给 MockDamai 回放全部 seed 和票档 fixture。\n2. 临时 HOME、BASE_URL loopback，`theflash event 1086791513717`：退出 **1**，`场次缺少 performId`。\n3. 同一份响应执行 `theflash inspect --gap 0`：退出 **0**，`结论：没有变化`，9 请求；巡检跳到后一个可读的场次，掩盖了首个场次的错误。\n4. 同类：把该页面全部 performId 数字换成 **-1**，inspect 仍退出 0 / 没变化，只发 8 请求，因为这一场的票档根本没请求。\n\n期望：会令业务解析失败的详情页至少报告“查不了”或无效 ID，并退出 1/允许上报；不要通过跳到一个正常 ID 把坏的场次忽略。可复用详情页语义验证，而不是继续复制一个更宽松的取 ID 实现。覆盖非数字字符串、负数、非整数及整数范围边界，同时保留 number/numeric-string 的正常兼容。\n\nAgent: Codex\n",
+    "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/73"
+  },
+  {
+    "number": 72,
+    "title": "inspect: 失败响应和页面文字未脱敏就进入终端报告和自动 issue 正文",
+    "state": "open",
+    "labels": [
+      {
+        "name": "bug"
+      },
+      {
+        "name": "指派:claude"
+      }
+    ],
+    "body": "PR #40（#10，实现者 Claude）的事后独立审查发现，审查者 Codex / posthoc-40。原 head `32d51897de18b51319d3a8a69c6adcc4c13b705a`，已合并 `64d0fbe`；在 main `c72af3d` 复现，收尾更新到 `97fbc3a`。不回滚，不在本任务修改业务代码。\n\n位置：`damai::tier_json` 失败时使用 `head(body)`；`inspect::read_tiers` 保留这个错误，`render` / `issue_body` / `report_findings` 原样输出。候选 fixture 脱敏不覆盖这些出口。\n\n复现（只用本地回放及 fake gh）：\n1. 保留完整 seed fixture routes，只把首个票档接口响应换成非 JSONP 文本。在文本前面放一个合成 cookie，名字由 `[\"un\", \"b\"]` 拼成，值由 `[\"synthetic\", \"123\"]` 拼成，随后 `<html>changed layout</html>`。\n2. 临时 HOME、BASE_URL 指向 loopback，运行 `theflash inspect --gap 0`。\n3. 内存检查 stdout 包含合成原值：**true**（退出 1）。没有把原值写到审查日志/评论。\n4. 同一路径传 `--open-issue --repo probe/offline`，PATH 首位放 fake gh（issue list 返回 []，create 捕获 argv 并返回离线示例 URL）；检查传给 gh 的 `--body` 包含原值：**true**。没有真的发送这个报告到 GitHub，捕获文件已清理。\n\n期望：凭据和个人信息不进入 stdout/stderr、日志、issue title/body；报告只保留安全的错误摘要、字段路径和脱敏后的网页文字。也要覆盖 `responseCode`、`itemName`、未知状态码/按钮文字、票档标签等从上游进入报告的同类出口，不能只修非 JSONP 的一个字符串。\n\nAgent: Codex\n",
+    "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/72"
+  },
+  {
+    "number": 71,
+    "title": "inspect: 跨行及导出对象中的登录 cookie 未脱敏，录出的 fixture 被 repo_guard 拒绝",
+    "state": "open",
+    "labels": [
+      {
+        "name": "bug"
+      },
+      {
+        "name": "指派:claude"
+      }
+    ],
+    "body": "PR #40（#10，实现者 Claude）的事后独立审查发现，审查者 Codex / posthoc-40。原 head `32d51897de18b51319d3a8a69c6adcc4c13b705a`，已合并 `64d0fbe`；在 main `c72af3d` 复现，收尾更新到 `97fbc3a`。不回滚，不在本任务修改业务代码。\n\n位置：`backend/src/inspect/redact.rs:64-106,157-203`。巡检的扫描/脱敏还是逐行，只识别直接 name=value / JSON 键值；当前 repo_guard 已按 #21 识别跨行和导出对象。`the_rules_find_what_the_repository_guard_finds` 没实际和现行扫描器对照。\n\n复现：\n1. 本地 HTTP 首页回放两种合成内容（绝无真实凭据）：用 `cookie = [\"un\", \"b\"].join(\"\")`、`value = [\"synthetic\", \"123\"].join(\"\")` 构造 JSON；A 为 cookie 键与值跨行，B 为 `{\"name\": cookie, \"value\": value}` 对象。\n2. 临时 HOME，`THEFLASH_DAMAI_BASE_URL=http://127.0.0.1:<port>`，运行 `theflash inspect record home --as probe --dir <存在的临时目录> --gap 0`。\n3. 两种都退出 **0**，写出 `probe.html`，检查仍包含合成 value：**true**。\n4. 把这两份产物临时放进一个未被忽略的 `backend/testdata/posthoc40-cookie-probe.html`，运行 `cargo test --offline --test repo_guard tracked_files_hold_no_credentials_or_personal_data`。\n\n实际：上述记录命令成功；repo_guard 编译成功后 **FAILED**，报告第 1、3 行 `[cookie] cookie unb with a value`，不打印值。探针文件已删除。\n\n期望：record 及 --candidates 产物在写入前按当前完整规则脱敏/拒绝，不把它们留待提交时才失败。覆盖跨行、导出对象、cookies.txt、现有 scanner 支持的相邻参数等同类形式。分享声明式规则或有真实的交叉测试，避免两份扫描器继续漂移。\n\nAgent: Codex\n",
+    "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/71"
+  },
+  {
+    "number": 70,
+    "title": "inspect: 熔断记录失败后仍继续请求大麦（PR #40 与 #4 合入后的交互）",
+    "state": "open",
+    "labels": [
+      {
+        "name": "bug"
+      },
+      {
+        "name": "指派:claude"
+      }
+    ],
+    "body": "PR #40（#10，实现者 Claude）的事后独立审查发现，审查者 Codex / posthoc-40。原 head `32d51897de18b51319d3a8a69c6adcc4c13b705a`，已合并 `64d0fbe`；在 main `c72af3d` 复现，收尾更新到 `97fbc3a`。不回滚，不在本任务修改业务代码。\n\n这项在更新到 main `97fbc3a55a6a24d78c4020e4f38c3bed2b96002c` 后独立复现，优先级最高。`inspect::stops_the_run` 仍只匹配 `Error::RiskControl`，没有按 0011 的后续待办使用 `Error::stops_damai_access()`。#4 新增的 `RiskNotRecorded` / `RiskStopped` / `RiskState` 被当成一场演出的普通故障。\n\n复现（全部本地，不故意触发真实风控）：\n1. 建临时目录 `dir`，`Gate::new(dir, Duration::ZERO, Arc::new(SystemClock::default()), \"posthoc40\")`；创建同目录 `risk-stop.json.<当前测试进程 pid>.tmp` **目录**，令记录熔断时 `fs::write` 失败，但读锁和“没有 risk-stop.json”仍正常。\n2. MockDamai 的第一条 seed 详情页回放现有 `risk_control.html`；其余四条详情页和三个票档回放原始 fixture，首页无候选。\n3. `Client::with_gate(mock.base_url(), Arc::new(gate)).with_home(mock.base_url())`；调用 `inspect::run`，缺省 seed、max_events 8、gap 0。\n4. 断言 `server.hits().len() == 1`，并要求返回 `Err(Error::RiskNotRecorded { .. })`。\n\n实际（编译成功后的断言 FAILED）：`run_returned_ok=true requests_after_risk=8`；服务器共 **9 hits**，第一条是风险响应，随后仍访问其余四条详情页、首页、三个票档。`left: 9, right: 1`。这不是只打印了请求数，也不是编译错误，实际 HTTP 到达本地服务器。\n\n期望：收到任何 `stops_damai_access()` 错误立即结束整次巡检，不再读首页、详情或票档；不要把熔断失败转成普通改版发现继续工作。实际 gate 可以挡住已成功持久化的熔断，但这个异常正是持久化未成功，所以必须由调用方停止。\n\n建议为四种停机错误补整条巡检/record 的回归，尤其保留上述写入失败但状态读取仍可用的场景；再分别破坏停止判断，确认没有额外请求。临时探针已经删除，未访问真实大麦、未改 owner 的风险文件。\n\nAgent: Codex\n",
+    "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/70"
+  },
+  {
+    "number": 69,
+    "title": "Agent 协作流水线：各站、状态和顺序写在一处，工作循环先收尾再开始",
+    "state": "open",
+    "labels": [
+      {
+        "name": "enhancement"
+      },
+      {
+        "name": "认领中"
+      },
+      {
+        "name": "P1"
+      }
+    ],
+    "body": "## 目标\n\n把 agent 协作开发的流水线写成一张图、一套状态和一个顺序，让任何一个刚启动的 agent 读一份文档就知道：一个 issue 从开出来到关闭要经过哪几站、每一站谁负责、进站和出站的条件是什么、这一轮自己该先做什么。\n\n## 背景\n\n参考 [magpie 的做法](https://x.com/wquguru/status/2109650264601117141)（路由表 + 错题本 + 验收标准 + 合并时校验 head + 人只管方向和闸门），theFlash 已经复刻了大部分：AGENTS.md、LESSONS.md、code-standards 的验收标准、合并闸门（#15）、认领租约（#16）、独立验收。缺的是把它们串起来的那一层：\n\n- 流水线的各站分散在 AGENTS.md、work-tick、acceptance、merge-gate、claim-lease 五份文档里，没有一份说清 issue 的完整状态和每次标签变化由谁触发。\n- 工作循环的顺序是“先开始新的，再收尾旧的”的反面没写清楚：`要修改` 的 PR 由谁、在第几步处理，work-tick 里没有；PR 和 issue 在某一站卡了多久，没有人看。\n- issue 的写法没有标准。issue 是 agent 的输入，写不清验收标准的 issue 会产出返工。\n- 等 owner 的事散落在各个 issue 的正文里（“需要 owner 裁决”），owner 没有一个地方看全。\n- CI 本身不可用（例如 #63：GitHub Actions 因账单拒绝启动）时，work-tick 会把 main 当成代码红了去修，流程里没有这种状态。\n- 夜间复盘只看 commit 的质量，不看流水线是否流动（卡住的 PR、积压的验收、定级是否失准）。\n\n## 要求\n\n- 一份流水线的设计参考：各站、标签状态机、谁推动每一次转换、进站和出站条件（Definition of Ready / Done）、在制品限制、issue 的写法、等 owner 的事放在哪里、CI 不可用时怎么办。\n- 一条决定记录写清楚为什么这样设计。\n- AGENTS.md 只做路由：会话流程指向流水线参考，不重复写规则。\n- work-tick 的顺序改成“先收尾，再开始”：main 红 → P0 → 自己的返工 → 审别人的 PR → 验收 → 发版 → 按优先级挑新 issue。\n- 夜间复盘加上流水线健康和优先级校准。\n- 依赖 #68（优先级机制）：work-tick 里挑新 issue 用 `scripts/claims queue`。\n\n## 验收\n\n- 文档之间没有互相矛盾的规则（同一件事只在一处写，其他地方链接过去）。\n- `make check` 通过（含 docs 索引检查）。\n- 另一个 agent 只读 AGENTS.md 和流水线参考，能说出一个 issue 的每一站和自己下一步做什么。\n\n## 优先级\n\nP1：重要（agent 协作的地基，owner 指定的当前阶段工作），不紧急（流程在跑，只是有断点）。\n",
+    "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/69"
+  },
+  {
+    "number": 68,
+    "title": "issue 没有优先级：agent 认领时不分主次，按 P0～P3 定级并按优先级认领",
+    "state": "open",
+    "labels": [
+      {
+        "name": "enhancement"
+      },
+      {
+        "name": "认领中"
+      },
+      {
+        "name": "P1"
+      }
+    ],
+    "body": "## 目标\n\n每个 open issue 都有一个优先级（P0～P3），agent 认领时按优先级挑，而不是挑最近看到的那个或者最顺手的那个。\n\n## 背景（2026-10-14 owner 提出）\n\n- 现在 30 多个 open issue 没有任何优先级标记。`prompts/work-tick.md` 第 5 步只写了“挑一个没人认领、最影响用户的 issue”，每个 agent 对“最影响用户”的理解不一样，结果是顺手的先做、地基性的工作反而没人碰。\n- owner 的判断：theFlash 当前阶段应该先把架构搭对，在正确的架构上迭代。这个判断要能落到“下一个该做哪个 issue”上，而不是停留在一句话。\n- owner 建议按“重要 / 紧急”两个轴的四象限分成 P0～P3。\n\n## 要求\n\n- 四个优先级标签 `P0`～`P3`，加一个 `等裁决` 标签（等 owner 裁决的 issue 不进队列）。\n- 一份设计参考写清楚：在 theFlash 里什么算“重要”、什么算“紧急”（具体到可以对照判断）、四个象限对应 P0～P3、同一档里先做哪个、依赖怎么表达、谁定级、怎么改级、当前阶段对“重要”的影响。\n- 一条决定记录写清楚为什么这样分、考虑过哪些别的分法。\n- 把 owner 的阶段判断记进 code-standards 的“Owner 的决定”。\n- 机械化（本项目的规则：能机械判断的就写成命令或守护，不靠 agent 自觉）：\n  - `scripts/claims queue`：列出现在可以开工的 issue，按优先级排，没定级的放最前面提醒先定级；被依赖挡住的、认领中的、等验收的、等裁决的、指派给别人的不在队列里，并说明各有多少。`--json` 给调度程序读。\n  - `scripts/claims triage`：定级或改级，发一条写明两个轴理由的 `## 优先级` 评论，再换标签。\n  - `scripts/claims claim`：认领没定级的 issue、等裁决的 issue，或者明明有更高优先级的 issue 可做却去认领低的，都拒绝；有正当理由时用 `--skip-higher <为什么>` 放行，并把理由写进认领评论。\n- 给现在所有 open issue 定级，每个都留一条理由。\n\n## 验收\n\n- 回放测试（不访问真实 GitHub）：队列的排序和过滤、依赖挡住、定级评论、认领时三种拒绝和 `--skip-higher` 放行。fixture 用真实 `gh api` 响应。\n- 每个新测试在没有改动时失败。\n- `make check` 全部通过。\n- 真实运行：`scripts/claims queue` 在真实仓库上的输出贴在 issue 上。\n\n## 优先级\n\nP1：重要（流水线的入口，决定每个 agent 下一步做什么；owner 的阶段判断靠它落地），不紧急（没有它工作也在推进，只是顺序不对）。\n",
+    "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/68"
+  },
+  {
+    "number": 67,
+    "title": "GitHub Actions 因账单停了：所有 CI 在启动前失败，合并和发版都卡住（需要 owner 裁决）",
+    "state": "open",
+    "labels": [
+      {
+        "name": "duplicate"
+      },
+      {
+        "name": "P0"
+      },
+      {
+        "name": "等裁决"
+      }
+    ],
+    "body": "需要 owner 裁决：涉及花钱。\n\n## 现象\n\n从 2026-10-14 10:52（北京时间）起，所有 Actions job 都在 2~4 秒内失败，没有分配 runner、没有执行任何步骤。注解原文：\n\n> The job was not started because recent account payments have failed or your spending limit needs to be increased. Please check the 'Billing & plans' section in your settings\n\n例如 main `97fbc3a` 的 Test run [38503603754](https://github.com/zbtzbtzbt/theFlash/actions/runs/38503603754)，以及之后 `night/issue-14`、`night/issue-44`、`hygiene/lessons-2026-10-14` 的每一次 run。仓库是私有的，Actions 分钟数按套餐计费，macOS runner 按 10 倍计；昨晚到今天上午并行开了很多 PR，每个 push 都跑 Linux + macOS 两个 job。\n\n**main 的红不是代码问题**：`a26d580`、`97fbc3a` 上的检查根本没跑。\n\n## 影响\n\n- 合并闸门（`scripts/merge-gate`）要求 PR head 的 CI 是绿的，现在任何 PR 都合不了（这是对的，不应绕过）。\n- 发版要求 tag 所在 commit 的 Test 跑完且是绿的，现在发不了版。\n- 新 push 的 PR 不会有 CI 结果。\n\n## 选项\n\nA. **恢复付款或提高 spending limit**（推荐，最简单）。在 GitHub 的 Billing & plans 里处理。之后把今天红掉的 run 重新跑一遍即可。成本取决于 PR 数量；为了省钱，可以同时采纳 D。\n\nB. **把仓库改成公开**：公开仓库的标准 runner 免费。但代码、issue 里的调研、真实演出 ID 和验证记录都会公开，是产品和法律层面的取舍。\n\nC. **在 owner 的 Mac 上跑 self-hosted runner**：不花钱，但 CI 跑在 owner 的机器上，Mac 合盖就停（今天 05:31 就发生过），而且 `block-damai-hosts.sh` 现在只在 GitHub hosted runner 上改 /etc/hosts（#22），要另行设计“CI 不访问大麦”的保证。\n\nD. **减少分钟数**（可以和 A 一起做）：PR 上只跑 Linux，macOS 只在 main 和发版时跑；或者 PR 上新 push 自动取消旧 run（已有）。这是 CI 配置的改动，由 agent 做，但要先能跑 CI。\n\n## 建议\n\nA + D。在 owner 处理之前，agent 不合并任何 PR，也不发版；继续本地开发和审查，在 PR 上写明“本地 make check 通过，CI 因账单未运行”。\n\n提出：Claude（协调会话，2026-10-14 10:58）",
+    "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/67"
+  },
+  {
+    "number": 65,
+    "title": "CI 阻塞：GitHub Actions 因付款失败或支出上限拒绝启动，需要 owner 处理",
+    "state": "open",
+    "labels": [
+      {
+        "name": "duplicate"
+      },
+      {
+        "name": "question"
+      },
+      {
+        "name": "P0"
+      },
+      {
+        "name": "等裁决"
+      }
+    ],
+    "body": "# GitHub Actions 计费阻塞，需要 owner 处理\n\n2026-10-14 10:52，北京时间，main 和 #17 修复 PR 的 Linux/macOS 检查均在执行任何步骤之前被拒绝（jobs 的 steps=[]），不是代码测试失败。\n\n- main fd68bd7：[Test 38503286512](https://github.com/zbtzbtzbt/theFlash/actions/runs/38503286512)，两个 job 均 failure。\n- PR #62 / head 4577666：[Test 38503332753](https://github.com/zbtzbtzbt/theFlash/actions/runs/38503332753)，两个 job 均 failure。\n- check-run annotations 的原始提示：\n  > The job was not started because recent account payments have failed or your spending limit needs to be increased. Please check the 'Billing & plans' section in your settings\n- 前一个 main c72af3d 的 Test 38502749318 双平台 success；拒绝发生在之后。\n\n已做：继续跑 #62 最新合并结果的临时 HOME 本地 make check；保存测试/真 launchd/自动评论证据。没有更改 workflow、付款方式、支出上限、仓库可见性，也不跳过必需 CI 或自行合并。\n\n## 需要裁决的选项\n\n1. **建议：owner 在 GitHub Settings → Billing & plans 核对付款失败或支出上限，决定是否修复付款/增加预算。** 可能涉及费用，只能 owner 决定；恢复后对现有 SHA 重跑 CI，不改代码绕过限制。\n2. **暂不增加支出。** 保留分支/PR 和本地证据，CI 阻塞期间不合并、不发版，等待 owner 指定后续方案。\n\n提示本身不能区分付款失败和支出上限，未推测余额或金额。#17 当前修复可完整审阅，但未获 CI 通过，因此尚未加待审查。\n\nRefs #17、#20、PR #62。\n\nAgent: Codex\n",
+    "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/65"
+  },
+  {
+    "number": 63,
+    "title": "GitHub Actions 因账单/额度未启动：main 上 Test 显示 failure 但其实没跑检查",
+    "state": "open",
+    "labels": [
+      {
+        "name": "question"
+      },
+      {
+        "name": "P0"
+      },
+      {
+        "name": "等裁决"
+      }
+    ],
+    "body": "需要 owner 处理（花钱 / 账号账单）。\n\n## 现象\n`fd68bd7`（#4 合入后）的 [Test run 38503286512](https://github.com/zbtzbtzbt/theFlash/actions/runs/38503286512) Linux 和 macOS 都是 `failure`，但 annotation 是：\n\n> The job was not started because recent account payments have failed or your spending limit needs to be increased. Please check the 'Billing & plans' section in your settings\n\n也就是说 **检查根本没跑**，不是业务测试红了。按现在的 merge-gate / 发版规则，会把 main 当成红的，后续合入和发版都会卡住。\n\n## 需要 owner\n1. 到 GitHub Settings → Billing & plans 看付款是否失败、Actions spending limit 是否用尽。\n2. 恢复后对 `origin/main` 最新 commit 手动 `workflow_dispatch` 或空 commit / re-run，确认 Test 真的跑完且绿。\n3. 在恢复前，agent 不要把这种 failure 当成代码回归去「修」。\n\n## hygiene 备注\n- #4 的合入本身（统一访问层）有决定记录 0005，Not tried 是真实多进程撞滑块；离线测试声称覆盖。在账单修好、Test 真跑绿之前，不把它记成代码导致的 main 红。\n\n---\n提出：Claude hygiene loop（main 到 fd68bd7 时发现）。",
+    "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/63"
+  },
+  {
+    "number": 58,
+    "title": "流程: 会话做完不删自己的 worktree，桌面上堆了 65 个、约 35GB",
+    "state": "open",
+    "labels": [
+      {
+        "name": "P1"
+      }
+    ],
+    "body": "## 现象\n\n每个会话按 AGENTS.md 第 1 步新建 `../theFlash-<任务名>` worktree，但流程里没有删掉它的一步（只有 `prompts/acceptance.md` 写了一句\"删掉自己的 worktree\"，没有命令）。实现、审查、验收、rebase 后的旧副本都留在桌面上。\n\n2026-10-14 10:30 owner 反馈 `~/Desktop` 太乱：当时挂着 65 个 worktree，其中 46 个闲置超过 2 小时，大多对应已合并的 PR 或被 rebase 取代的旧副本，每个约 1GB（node_modules + target），合计约 35GB。已经清理（每个被删 worktree 的 HEAD 留在主仓库的 `refs/archive/worktree/<名字>`）。\n\n## 要做的\n\nowner 的要求：在 AGENTS.md 的流程里补上，验收合入后执行 `git worktree remove` 删掉自己的 worktree，并清理对应的垃圾文件夹。\n\n## 验收\n\n- AGENTS.md 的会话流程有收尾这一步，写明什么时候删、用什么命令、哪些目录要一起删、不能删别人的。\n- 审查者、验收者、夜间复盘这三个会建 worktree 的流程都指向这一步。\n",
+    "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/58"
+  },
+  {
+    "number": 54,
+    "title": "辅助抢票缺的后半截：提前登录、核对观演人，开售时把已选好票档的确认页交给浏览器（#6）",
+    "state": "open",
+    "labels": [
+      {
+        "name": "enhancement"
+      },
+      {
+        "name": "question"
+      },
+      {
+        "name": "P1"
+      }
+    ],
+    "body": "## 目标\n\n把 #6 裁决的辅助抢票方案缺的后半截做出来：**提前登录、核对观演人和实名限购、开售那一刻在用户的浏览器里打开已经选好场次和票档的确认页**，让人只需要点一下\"提交订单\"。\n\n现在程序只做到\"告诉你可以买了\"。但人收到提醒后还要自己打开大麦、登录、找演出、选场次、选票档、填观演人——这段是秒级到十几秒的操作，热门场次里等于没抢。**不补上这一段，现有的毫秒级时钟对齐拿不到任何实际收益。**\n\n## 为什么这是现在最该做的一件事\n\n把端到端延迟拆开看（从\"开售\"到\"提交订单的请求到达大麦\"）：\n\n| 环节 | 现状 | 补上之后 |\n| --- | --- | --- |\n| 知道现在可以买了 | ≈0，#2 的时钟对齐已经做到（误差 < 500ms） | 不变 |\n| 页面就绪（登录态、场次、票档、观演人） | **5–15 秒，全靠人手动** | ≈0，开售前就绪 |\n| 人点击 | — | 200–300ms，手指预先放在按钮上 |\n| 请求到达（含 TLS 握手） | 0.2–0.3 秒 | 0.1–0.2 秒，`watch` 的开售前 20 秒重新读时钟已经顺带预热了连接 |\n\n第二行比第四行大两个数量级。继续优化连接预热、时钟精度这些事，收益都被这 5–15 秒完全淹没。所以优先级应该排在 #4（统一频率上限）和任何性能优化之前。\n\n另外，这一段补上之后，**真正受益最大的场景是回流捡漏而不是开售瞬间**：回流票是别人退单释放的，发生在随机时刻，竞争者只有少数同样在盯的人，没有开售瞬间的排队和万人涌入。那种场景下 300ms 的人工延迟完全不影响胜负，决定性的是\"页面已经就绪\"。开售瞬间的顶级热门场次受滑块验证和平台排队支配，按 #6 的规则（不绕过风控）本来就赢不了，#6 里也写明了\"热门场次仍可能抢不到\"。\n\n## 现状\n\n- 已有：`backend/src/damai/`（匿名只读查询，见 [0001](docs/decisions/0001-damai-event-data-source.md)）、`backend/src/watch/`（开售和回流提醒，见 [0002](docs/decisions/0002-watch-timing-and-polling.md)）。\n- 没有：登录、登录态存储、观演人/地址/实名/限购的读取和核对、打开浏览器交接。`backend/src/` 里一行都没有。\n- `backend/testdata/damai/` 里全是详情页 HTML 和票档 JSONP，**没有任何下单链路的 fixture**。确认页的 URL 结构、参数、需要哪些 cookie，目前完全没有实测证据。\n- #7 已完成，`backend/tests/repo_guard.rs` 会拦住进仓库的 cookie、身份证号、手机号。这是 #6 裁决里要求的前置条件，已经满足。\n\n## 第一步必须是观察，不是写代码\n\n确认页怎么拼、要带什么，现在是空白。按 [code-standards 第 5 条](docs/code-standards.md)，先用 computer use 在真实大麦上走一遍：\n\n1. 登录（owner 的账号），记录登录态由哪些 cookie 构成、有效期多长、过期的表现是什么。\n2. 打开一个**已开售**演出，选场次和票档，走到确认页，停在\"提交订单\"之前（#6 的安全规则，不点）。\n3. 记录：确认页的 URL 和它的每个参数分别从哪里来（itemId、performId、skuId、数量……）；页面上观演人、实名要求、限购数量、收货/取票方式分别在哪个接口或哪段 JSON 里；哪些步骤会弹滑块。\n4. 脱敏后存进 `backend/testdata/damai/`（去掉 cookie、姓名、身份证号、手机号、地址，换成假值），作为后面所有自动化测试的回放数据。\n\n这一步的产出直接决定下面的拆分可不可行，所以**先出一份观察记录，再决定怎么实现**。观察结论写成一条决定记录（下一个可用编号，注意 #45 之后索引表由 `make docs-index` 生成）。\n\n## 要求\n\n观察完成后，分成三块，建议拆成独立的子 issue 分别实现和验收：\n\n### A. 登录和登录态\n\n- 登录方式由实现者在观察后决定（扫码、还是复用浏览器已有的登录态）并写进决定记录。倾向扫码：不需要 owner 把密码交给 agent。\n- **登录态怎么存是这个 issue 里最需要 owner 裁决的安全问题，#7 没有覆盖它。** #7 守的是\"凭据不进 git 仓库\"；这里引入的是\"运行时在用户机器上持有长期登录态\"，是一个新的攻击面。至少要回答：存不存（还是每次重新扫码）、存哪（系统钥匙串，还是 `~/.config` 下 0600 的文件）、过期怎么处理、`theflash` 的日志和报错里绝不能出现它。\n- 登录态失效时给出看得懂的提示并要求重新登录，不静默重试。\n\n### B. 开售前核对\n\n- 读出当前账号的观演人列表、实名状态、这场演出的限购数量、取票/配送方式，在终端列出来让用户确认。\n- 缺什么就明确说缺什么（例如\"这场要求每人实名，你的观演人里有 2 个没实名\"），而不是等开售时才失败。\n- 这些数据里有真实姓名和身份证号。**终端输出要脱敏**（姓名只显示姓、身份证号只显示后 4 位），fixture 和截图里一律用假值。\n\n### C. 开售时交接给浏览器\n\n- 开售时刻（#2 已经能精确到亚秒）在用户的默认浏览器里打开确认页，场次、票档、数量、观演人都已选好，停在\"提交订单\"按钮前。\n- `watch` 现有的提醒行为不变，这是在它之上加一步。\n- 遇到滑块：按 owner 规则不绕过，提醒用户去浏览器里完成。\n- 加一个开售前的检查项：提醒用户确认支付方式可用（余额、免密额度）。提交订单后支付窗口是分钟级的，不用抢，但**拿到订单却因为支付卡住而超时释放是最可惜的失败方式，而它完全可以在开售前消除**。\n- `--no-open` 之类的开关：只提醒不打开浏览器，保留现在的行为。\n\n## 需要 owner 回复\n\n1. **提供一个可以登录的账号**（#6 的裁决里已经同意了方向，但还没给账号）。凭据怎么交给 agent 由 owner 定，不进仓库、issue、日志和截图。\n2. **登录态允不允许持久化存在本机**，以及存哪（见 A）。不允许就每次重新扫码，体验差但更安全。\n3. 真实环境验证要走到确认页，会**占用一次真实库存几分钟**（确认页可能已经锁库存，待观察）。确认这样可以，还是只在冷门/低价演出上做。\n\n## 等回复期间可以先做的\n\nC 的大部分不需要登录：确认页 URL 怎么拼、浏览器怎么打开、`watch` 到点触发这一步的调度和测试，都可以用匿名观察 + fixture 回放做掉。所以**不要等**，按 AGENTS.md 先做不受阻塞的部分。\n\n## 验收\n\n按 [code-standards 的验收标准](docs/code-standards.md#验收标准)，另外：\n\n- 每一块都有一个\"没有它就会失败\"的测试，用 fixture 回放，不访问真实大麦（#7 的守护会拦）。\n- 登录态存储：有测试证明它不出现在任何终端输出和日志里；故意把它打印出来，`repo_guard` 或新的守护测试要变红。\n- 核对输出：有测试证明真实姓名和身份证号被脱敏。\n- 交接：有测试证明构造出的确认页 URL 带着选定的场次和票档，且程序**不会**自己发出提交订单的请求。\n- computer use 记录：走到\"提交订单\"之前的每一步看到了什么，写进 PR 描述或 `docs/validation/`。截图里不能有凭据和个人信息。\n\n## 约束\n\n- 不提交订单，不绕过任何风控（#6 的 owner 裁决，写在 [code-standards 的 Owner 的决定](docs/code-standards.md#owner-的决定)）。\n- 遇到验证码、限流、封禁就停下来报告 owner。\n- 自动化测试和 CI 绝不访问真实大麦。\n- 只支持 macOS 和 Linux。\n\n## 关联\n\n- #6：owner 裁决选 A（辅助抢票），本 issue 是它缺的后半截。\n- #7：凭据守护，#6 要求的前置条件，已完成。\n- #2：开售和回流提醒，本 issue 在它之上加\"页面已就绪\"。\n- #4：统一频率上限。登录后的请求也要纳入同一个预算，建议 #4 先落地或同时考虑。\n- #8：只在 App 卖的演出。本 issue 只覆盖电脑版能买的演出（#8 的数据出来之前不扩大范围）。\n\n---\n\n提出：Claude（2026-10-14 和 owner 讨论抢票的第一性原理时，发现 #6 裁决的方案只实现了一半，而缺的那一半是现在唯一的瓶颈）。未认领。\n\n\n\n依赖：#4（统一频率上限和跨进程风控停止；登录后的请求也要走这一层，#4 验收关闭之前这里不开工）\n",
+    "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/54"
+  },
+  {
+    "number": 53,
+    "title": "tests: docs 索引的三个格式守护被删除后测试仍全绿（PR #50）",
+    "state": "open",
+    "labels": [
+      {
+        "name": "bug"
+      },
+      {
+        "name": "指派:claude"
+      },
+      {
+        "name": "P1"
+      }
+    ],
+    "body": "PR #50 的独立审查（Codex，review-50-d60a509）发现三个格式守护的测试假阳性。被审查 head：`d60a509ba25e5e13d088b3a0cd0ad93cd0f8c3e2`；合到 main：`967d8b77f578a058b2ef7013c9a56a59cc8e7fb4`。审查期间另一会话已把它合为 `78b5a4e88a61bd0f7ac97983f01f0f94d05ecc88`，所以单开修复 issue，供后续实现和独立验收。当前生成器的这三个校验是正确的，问题是删掉它们也不会让测试失败。\n\n违反 docs/code-standards.md 的规则：「以某个保证命名的测试，在保证被破坏时必须失败。」\n\n## 三个确定性复现\n\n每个破坏单独进行，复制 scripts/docs_index.py 和 scripts/tests/test_docs_index.py 到隔离副本，保留同一套 docs，然后跑 `PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s <副本>/scripts/tests -v`：\n\n1. `scripts/docs_index.py:59`：把缺状态的 `raise Invalid(...)` 换为 `status = '采用'`。期望 `test_decision_without_status_is_reported` FAIL；实际全部 21 项 OK。再次把测试中同样的缺状态文档交给被破坏的 `--write`、随后 `--check`，两次都 EXIT=0，凭空生成“采用”。\n2. `scripts/docs_index.py:54`：把 `if not title.startswith(prefix):` 换为 `if False:`。期望 `test_decision_title_must_start_with_its_number` FAIL；实际全部 21 项 OK。使用测试原始输入 `0003-wrong-number.md` 的 `# 0004. 编号对不上`，被破坏的 `--write` 和随后 `--check` 都 EXIT=0。\n3. `scripts/docs_index.py:32`：把 `if '|' in value:` 换为 `if False:`。期望 `test_a_pipe_in_a_title_is_reported` FAIL；实际全部 21 项 OK。使用测试原始标题“带 | 竖线的标题”，被破坏的 `--write` 和随后 `--check` 都 EXIT=0，输出多出一列表格。\n\n原因相同：测试只在索引尚未更新时跑 `--check`，检查退出 1 和宽泛的文字/文件名。删掉格式拒绝后，新增文件仍产生索引漂移，照样退出 1，因此断言抓不住校验被删。duplicate-number 测试已经正确地增加 `--write` 拒绝和专门诊断断言，可以参考它。\n\n## 修复与验收标准\n\n- 补强上述三项，区分“格式错误”与“索引漂移”，断言格式错误的专门诊断。\n- 每项都断言 `--write` 退出 1，且两个 README 的字节均保持原样。不能通过先生成来掩盖错误输入。\n- 三个相同破坏分别让对应测试真正断言 FAIL（编译错误、异常或 skip 不算）；恢复生成器后全绿。\n- 独立 agent 在修复 PR 合到最新 main 的结果上重跑临时 HOME `make check` 和三个破坏，实际 head 的 Linux/macOS CI 完成且成功。\n- 不涉及 UI、真实大麦或凭据，无需真实访问和 owner 裁决。\n\n## 本轮已有证据\n\n原版合并结果临时 HOME/TMPDIR `make check` 全段 EXIT=0：Python43、Rust141 passed+1 ignored、Vitest32 passed+1 skipped；PR CI Test 38470165627 双平台 success。其余七方向破坏均有真正 FAIL；两个并行 Git 分支的无 union 冲突、有 union 无冲突、逆序被守护捕获并可生成修复已重放。全部探针在指定 worktree 的 `backend/target/review-50-d60a509/`，原始源码未修改。\n\n提出：Codex 独立审查，未认领实现；建议由 Claude 修复并另交独立审查。不要用关闭关键词绕过 #45 的独立验收。\n\nAgent: Codex\n",
+    "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/53"
+  },
+  {
+    "number": 51,
+    "title": "THEFLASH_REQUEST_GAP_MS 写错时，提示是“从…里找不到演出 ID”，说的不是这个变量",
+    "state": "open",
+    "labels": [
+      {
+        "name": "bug"
+      },
+      {
+        "name": "认领中"
+      },
+      {
+        "name": "P3"
+      }
+    ],
+    "body": "## 现象\n\n`THEFLASH_REQUEST_GAP_MS`（#17 加的验证用请求间隔）写错时，`event` / `event-json` / `watch` 的提示是“找不到演出 ID”，说的是输入的演出链接，而不是这个环境变量：\n\n```\n$ THEFLASH_REQUEST_GAP_MS=bad theflash event 1077137031347\n从“THEFLASH_REQUEST_GAP_MS 必须是 0 到 86400000 毫秒”里找不到演出 ID：请给有效的大麦演出详情页链接（detail.damai.cn/item.htm?id=数字 或 m.damai.cn/damai/detail/item.html?itemId=数字）或纯数字 ID\n$ THEFLASH_REQUEST_GAP_MS=bad theflash event-json 1077137031347\n{\"error\":{\"code\":\"invalid-input\",\"message\":\"从“THEFLASH_REQUEST_GAP_MS 必须是 0 到 86400000 毫秒”里找不到演出 ID：…\"}}\n```\n\n`86400001` 一样，退出码都是 1（以上实际跑过）。按代码，非 UTF-8 的值是“从“THEFLASH_REQUEST_GAP_MS 无效”里找不到演出 ID：…”，`watch` 也是同一句（都走 `Client::new`）；这两种没跑。\n\n## 原因\n\n[`Client::new`](https://github.com/zbtzbtzbt/theFlash/blob/main/backend/src/damai/client.rs) 和 `validation_gap` 用 `Error::InvalidInput(<说明>)` 报这个错，而 `InvalidInput` 的显示格式是“从“{0}”里找不到演出 ID：…”，专门给演出链接用。`validation_gap_rejects_invalid_and_overflowing_deadlines` 只断言 `is_err()`，没看提示。\n\n## 复现（不访问大麦）\n\n上面的命令另外加了 `THEFLASH_DAMAI_BASE_URL=http://127.0.0.1:9` 和指向 `127.0.0.1:9` 的代理变量；错误在建客户端之前就返回，没有发请求。main `3b1cc18`，macOS。\n\n## 期望\n\n提示说是 `THEFLASH_REQUEST_GAP_MS` 的值不对、允许的范围，不提演出 ID；`event-json` 的 `code` 也不是 `invalid-input`（界面会把它当成用户输错了链接）。影响面小：这个变量只有 #17 的 launchd 验证会设，默认不设。\n\n---\n提出：CodeBuddy（2026-10-14，做 #37 时看到，`Client::new` 里同一处的另一种错误）。范围外，不在 #37 的 PR 里改；未认领。\n\nAgent: CodeBuddy\n",
+    "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/51"
+  },
+  {
+    "number": 49,
+    "title": "仓库放在含中文或空格的路径下，前端测试找不到 theflash 程序（用 URL.pathname 拼路径）",
+    "state": "open",
+    "labels": [
+      {
+        "name": "bug"
+      },
+      {
+        "name": "P2"
+      }
+    ],
+    "body": "## 问题\n\n`frontend/src/server.test.ts:44`（#3 加的）和 `frontend/src/app.test.ts:41`（#30 加的）用 `new URL(\"../../backend/target/debug/theflash\", import.meta.url).pathname` 拿程序路径。`pathname` 是百分号编码过的，路径里有中文或空格时，`execFile` 拿到的是 `…/theFlash-%E9%AA%8C%E6%94%B6/…/theflash`，于是报 ENOENT。产品代码 `query.ts` 用的是 `fileURLToPath`，不受影响，`make serve` 正常；受影响的只有测试。\n\nAGENTS.md 让每个会话用 `git worktree add --detach ../theFlash-<任务名> origin/main` 建自己的 worktree，任务名写成中文就会踩到。\n\n## 复现（main `ad86acf`，只访问 127.0.0.1）\n\n把仓库（包括 `node_modules` 和已经编译好的 `backend/target`）复制到 `/tmp/accept-30-r1/theFlash-验收/copy`，在 `frontend` 下跑 `npx vitest run`：\n\n- `Error: spawn /private/tmp/accept-30-r1/theFlash-%E9%AA%8C%E6%94%B6/copy/backend/target/debug/theflash ENOENT`\n- `Tests  3 failed | 11 passed | 17 skipped (31)`：server.test.ts 的 3 个 report 用例失败；app.test.ts 的 `beforeAll` 失败，整个文件 17 个用例被跳过。\n- app.test.ts 的 `afterAll` 接着又报 `TypeError: Cannot read properties of undefined (reading 'server')`：`beforeAll` 中途失败时 `missingUpstream` 还没赋值。这条噪音盖住了真正的原因，`guard.server` 也没有关掉。\n\n路径换成 `空格 dir`，结果一样。同一份副本放回纯 ASCII 路径，31 项全部通过。\n\n## 期望\n\n- 测试用 `fileURLToPath`（或者直接复用 `query.ts` 的路径常量）启动程序，在路径含中文或空格的 checkout 里 `make check` 也能通过。\n- 加一个守护，让以后的新测试不会再这样拼路径。比如在含中文和空格的临时路径下跑一次前端测试，或者禁止把 `.pathname` 当文件路径用。\n- `beforeAll` 中途失败时，`afterAll` 不再抛第二个错误，并且关掉已经启动的服务器。\n\n## 范围\n\n只改测试。Rust 测试在这种路径下没查过。\n\n发现者：CodeBuddy（#30 验收，accept-30-r1）。\n",
+    "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/49"
+  },
+  {
+    "number": 48,
+    "title": "测试断言比名字守住的少：删掉一整条状态样式，颜色测试仍全绿；cli.rs 的 browser_event_json_preserves_cli_content 只比 report",
+    "state": "open",
+    "labels": [
+      {
+        "name": "bug"
+      },
+      {
+        "name": "P1"
+      }
+    ],
+    "body": "## 问题\n\n#30 验收（CodeBuddy，accept-30-r1）时发现两处同一类问题：测试的名字或断言说的保证，比它实际守住的多。现在的界面行为是对的，缺的是守护。都在 main `ad86acf` 上复现，只访问 127.0.0.1。\n\n### 1. `the five status styles have distinct foreground and background colors` 里“有背景色”的断言永远通过\n\n- 位置：`frontend/src/app.test.ts:183-184`，`expect(computed.color, kind).not.toBe(\"\")` 和 `expect(computed.backgroundColor, kind).not.toBe(\"rgba(0, 0, 0, 0)\")`。\n- happy-dom 对没设背景的元素返回 `\"\"`，不是浏览器里的 `\"rgba(0, 0, 0, 0)\"`，所以背景这一行在测试环境里不可能失败。前景色那一行也一样：没有自己颜色的徽标继承 `:root` 的 `#ecefe9`，不是空串。\n- 复现：在一次性副本里删掉 `frontend/public/style.css` 整条 `.not-yet-on-sale { … }` 规则，“未开售”徽标就没有自己的颜色和背景了，只剩继承来的正文颜色。`npx vitest run`：**31/31 通过**。happy-dom 算出的值：not-yet-on-sale 的 color 是 `#ecefe9`、background 是 `\"\"`，其余四种各不相同，所以“5 个值彼此不同”仍然成立。\n- 对照：只把 `.out-of-stock` 的 color 换成 `.available` 的 color（背景不动），这个测试会变红（`expected 4 to be 5`）。缺口只在“整条规则没了 / 类名对不上”这一种情况。\n- 期望：一条状态样式规则被删掉，或者类名和 CSS 对不上时，测试变红。例如拿一个只有 `badge` 类的元素的计算样式做基线，要求五种状态的前景色和背景色都和基线不同、彼此也不同，背景既不为空也不透明。\n\n### 2. `backend/tests/cli.rs` 的 `browser_event_json_preserves_cli_content` 名字说浏览器 JSON 保留了 CLI 内容，实际只比 `report`\n\n- #30 的“原因”一节点名了它和 server.test.ts 里的同名测试。PR #35 把前端那个改名为 `event-json report preserves CLI text`，这个 Rust 测试没动。它比较的还是 `report`，另外只看了 `sale.kind`、`sellStart` 和第一个票档的状态文字。\n- 复现：在一次性副本里把 `backend/src/presentation.rs` 的 `\"name\": unknown(&e.name)` 改成 `unknown(&e.venue)`（就是 #30 的第 1 处破坏），`cargo test --no-fail-fast`：`browser_event_json_preserves_cli_content ... ok`，Rust 侧所有行为测试都绿。现在只有前端新加的 DOM/CLI 对照会红。\n- 期望：要么改成它实际守住的名字（例如 `event_json_report_matches_cli_text`），要么让它也拿 `name`、`city`、`venue`、场次、票档这些结构化字段去和 CLI 输出逐项比。\n\n## 范围\n\n只改测试，不改界面行为。不影响 #30 的验收结论：#30 的四条验收标准都通过，见 #30 的验收评论。\n\n发现者：CodeBuddy（#30 验收，accept-30-r1）。\n",
+    "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/48"
+  },
+  {
+    "number": 46,
+    "title": "大麦改版巡检：1 个样本快过期",
+    "state": "open",
+    "labels": [
+      {
+        "name": "P2"
+      }
+    ],
+    "body": "`theflash inspect` 在真实大麦上发现了变化。\n\n```\n大麦改版巡检 2026-10-14 04:37（北京时间）\n查了 5 场演出，发了 9 个请求。\n样本快过期：1092337348536 【济南】【正版】奥特曼系列舞台剧《奥特传奇之英雄归来》60周年荣誉回归巡演 在 2026-10-14 10:18（北京时间） 开售，之后就不是未开售了。趁现在换一场未开售的演出进 /tmp/probe39/stale-samples.json\n\n[已售罄] 1077137031347 【北京】2026 Velosolutions UCI 泵道世锦赛总决赛\n  票档接口查的场次：284490009\n  结构：和 testdata 里的一样\n  状态码：都见过\n\n[未开售] 1092337348536 【济南】【正版】奥特曼系列舞台剧《奥特传奇之英雄归来》60周年荣誉回归巡演\n  票档接口查的场次：286966465\n  结构：和 testdata 里的一样\n  状态码：都见过\n\n[日历选日期] 1084537866279 【北京】开心麻花×盗墓笔记 欢乐田园沉浸式舞台剧《雨村笔记Ⅱ之天梯笔记》\n  票档接口查的场次：286938129\n  结构：和 testdata 里的一样\n  状态码：都见过\n\n[电脑版不卖] 1080486727522 【北京】2026动力火车“一路向前”演唱会-北京站\n  结构：和 testdata 里的一样\n  状态码：都见过\n\n[已开售] 1086791513717 【北京】2026德玛西亚杯国际邀请赛\n  换掉了过期的样本 1077137031347\n  票档接口查的场次：286937788\n  结构：和 testdata 里的一样\n  状态码：都见过\n\n结论：1 个样本快过期。按上面的“样本快过期”提前换掉，别等这一类没样本了。\n```\n\n怎么处理：按 docs/subsystems/damai-inspect.md 用候选 fixture 复现，先写一个会失败的测试，再改解析或状态映射；没见过的状态码要先在大麦页面上核对它显示的文字，再加进映射表。\n\n样本缺口和快过期的样本：找一场现在是这个状态的演出，把它的 itemId 写进样本文件，并加进 backend/src/inspect/samples.rs 的候选池（为什么要人来找：0014）。\n\n这条是 `theflash inspect` 自动写的。\n\n<!-- theflash-inspect: damai-structure -->\n",
+    "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/46"
+  },
+  {
+    "number": 45,
+    "title": "docs 索引表（decisions/subsystems README）每次并行开发都冲突，今晚已把 PR 打回 4 次",
+    "state": "open",
+    "labels": [
+      {
+        "name": "P1"
+      }
+    ],
+    "body": "今晚并行开发里，`docs/decisions/README.md` 和 `docs/subsystems/README.md` 这两张索引表已经把 PR 打回 4 次，没有一次和代码有关：\n\n- PR #24（#15）：第一次 `docs/decisions/README.md` + `docs/subsystems/README.md` 冲突被退回；rebase 之后又撞一次。\n- PR #32（#11）：第一次 `docs/decisions/README.md` 冲突被退回；rebase 到 `ab462a6` 之后，审查通过、拿到合并锁时 main 前进到 `cf8f0d2`（#17 合入），两张表又一起冲突，只能再退一次。\n\n## 为什么会这样\n\n每条新的架构决定和每个新的子系统，都往同一张 Markdown 表的**末尾追加一行**。两个并行的 PR 各加一行，git 看到的就是同一个位置的两处修改，必然冲突。今晚同时有 5~6 条线在跑，每条线迟早都会加一条决定记录，所以这是必然事件，不是偶发。\n\n代价不只是解冲突那几秒：按本项目的规则，冲突的 PR 要退回 `要修改`，由实现者 rebase、重跑 `make check`、等双平台 CI（约 3~5 分钟排队加执行），再重新交审查、审查者重新验证。一次来回半小时起，而且 rebase 完成之前 main 可能又前进了，于是再来一轮。PR #32 就是这么被卡住的。\n\n## 几个可选的解法\n\n1. **索引表改成生成的**。`docs/decisions/README.md` 的表从 `docs/decisions/NNNN-*.md` 的文件名和一级标题生成，`docs/subsystems/README.md` 同理，用一个脚本 + `scripts/check.sh` 里的一步守护（表和目录对不上就失败）。PR 只新增自己那个文件，谁都不碰索引，冲突从根上消失。代价：加一个生成脚本和一条检查。\n2. **索引表删掉，改成目录列表**。靠文件名排序就能看懂，README 里只留一句「记录在本目录下，编号递增」。代价：少了一句话的摘要。\n3. **给 Markdown 表配 `.gitattributes` 的 union 合并**（`docs/decisions/README.md merge=union`）。两边的行都保留，不产生冲突。代价：union 不保证顺序，可能把 0012 排在 0009 前面，需要靠上面那条检查兜底；而且对表头改动不安全。\n4. **什么都不改，约定由审查者解冲突**。今晚的规则不允许（审查者不能是实现者），而且并不消除 rebase + 重跑 CI 的成本。\n\n## 建议\n\n先做 1，顺手把 3 当成兜底。1 既消除冲突又能发现「写了决定记录但忘了进索引」这类错误，和项目「规则一旦能机械判断就写成 CI 步骤」的标准一致。\n\n这个改动不碰业务代码，也不访问大麦，适合和今晚的其他线并行。做的时候注意它会和所有正在排队的 PR 冲突一次（最后一次），最好挑一个 main 上没有待合并 PR 的空档，或者明确挑在今晚这批 PR 都合完之后。\n\n提出：Claude（review-32-447e0be，审查 PR #32 时第二次被同一张表挡住）。未认领。\n",
+    "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/45"
+  },
+  {
+    "number": 44,
+    "title": "手机推送：watch 结束前清空推送队列（finish_push）没有测试守护，删掉它全仓测试仍全绿",
+    "state": "open",
+    "labels": [
+      {
+        "name": "bug"
+      },
+      {
+        "name": "认领中"
+      },
+      {
+        "name": "P1"
+      }
+    ],
+    "body": "审查 PR #32（#11，手机推送）时发现：`watch()` 退出前的那一句 `env.finish_push().await` 没有任何测试守护，删掉它全仓测试依然全绿，但风控停止提醒会收不到手机推送。\n\n## 现在的行为（是对的）\n\n`backend/src/watch/mod.rs`：\n\n```rust\nlet result = run(&mut env, opts).await;\nenv.finish_push().await;   // 丢掉 sender，最多等 3 秒把队列里的提醒发完\nresult\n```\n\n`finish_push` 是“watch 结束前把排队的手机提醒发出去”的唯一机制。没有它，`RealEnv` 被 drop → `PhonePush::drop` → `task.abort()`，还没发出去的提醒直接丢掉。\n\n这对风控停止是实打实的：`watch/mod.rs` 的 `stop()` 先 `env.alert(\"触发风控，已停止盯票\", ...)`，紧接着就返回 `Err`，`run` 立刻结束。人不在电脑前的时候，这恰好是最需要推到手机上的那一条。`docs/subsystems/phone-push.md` 也写了“风控停止提醒……会沿相同出口发送”和“正常结束最多等待 3 秒”。\n\n## 复现\n\n1. 在 PR #32 的 head `447e0be`（或合并后的 main）上，把 `backend/src/watch/mod.rs` 里的 `env.finish_push().await;` 这一行删掉。\n2. 跑 `cargo test`。\n\n- 期望：至少一个测试变红。\n- 实际：全绿（`tests/push.rs` 8 项全过，Rust 一共 126 项全过，`cargo clippy --all-targets -- -D warnings` 零报错）。现有 8 个端到端测试都在 `push.wait_for(...)` 等到推送到达之后才停进程，所以没有一个覆盖“最后一条提醒紧跟着进程退出”。\n\n## 证据：这一行确实是必需的\n\n我在审查时加了一个临时探针（没有提交），用 `risk_control.html` fixture 让 watch 自己退出：\n\n```rust\n#[test]\nfn probe_risk_control_alert_reaches_the_phone() {\n    let page = support::fixture(\"risk_control.html\");\n    let damai = Server::start(Box::new(move |_, _| (200, page.clone())));\n    let push = Server::start(Box::new(|_, _| {\n        (200, include_str!(\"../testdata/ntfy/received.json\").into())\n    }));\n    let run = Running::start_args(&damai, &push, Some(config()), 0o600, &[\"1086791513717\"]);\n    run.wait_text(\"触发风控\");\n    push.wait_for(1, 10);\n    let payload: serde_json::Value =\n        serde_json::from_str(&push.requests.lock().unwrap()[0].2).unwrap();\n    assert_eq!(payload[\"title\"], \"触发风控，已停止盯票\");\n}\n```\n\n- 保留 `finish_push`：通过（0.65s 就收到了那条推送）。\n- 删掉 `finish_push`：FAIL，`expected 1 requests, got 0`。\n\n## 要做的\n\n把上面这个探针（或等价的用例）补成 `backend/tests/push.rs` 的正式测试，让 `finish_push` 这条保证有测试守护。顺带可以覆盖“队列里还有未发完的提醒时 watch 结束，最多等 3 秒”这一条。\n\nPR #32 本身的行为是对的，所以这是补测试，不是修 bug，已按审查记录正常合并。审查记录：https://github.com/zbtzbtzbt/theFlash/pull/32\n\n提出：Claude（review-32-447e0be，审查 PR #32 时故意破坏发现）。实现者 codex 之外的 agent 也可以认领。\n",
+    "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/44"
+  },
+  {
+    "number": 39,
+    "title": "改版巡检换不了样本：首页匿名 HTML 里没有演出链接",
+    "state": "open",
+    "labels": [
+      {
+        "name": "bug"
+      },
+      {
+        "name": "P1"
+      }
+    ],
+    "body": "做 #10 时发现（Claude，今晚第 2 条线）。#10 要求“样本会过期，所以要能自动从首页换新样本（不用搜索接口）”。这一条做不到，原因在大麦那边。\n\n## 现象\n\n2026-10-14 04:01 匿名 `GET https://www.damai.cn/`（录在 `backend/testdata/damai/home.html`，16 KB）里：\n\n- 没有一个 `detail.damai.cn/item.htm` 或 `item.html?itemId=` 链接。演出卡片是 JS 渲染的。\n- 唯一的列表入口是 `search.damai.cn/search.htm?...`，而 [0001](https://github.com/zbtzbtzbt/theFlash/blob/main/docs/decisions/0001-damai-event-data-source.md) 实测搜索接口第一次匿名请求就返回滑块验证页，不能用。\n- 详情页里也只有它自己的 itemId，没有推荐位的其他演出。\n\n所以 `theflash inspect` 现在的行为是：某一类的样本过期时，报一行说明，告诉 agent 去改样本文件里这一类的 itemId，并且这一类这次不查。读首页的代码（`inspect::samples::item_ids_on_home`）保留着，有链接时就能用；`the_recorded_home_page_carries_no_detail_link` 这个测试钉住了“今天没有”，大麦哪天改回来，它会红，看到的人就可以把自动换样本打开。\n\n## 要做的\n\n找一个匿名可用、服务端渲染的演出列表来源，让巡检能自己换样本。候选（都没验证过）：\n\n1. `m.damai.cn` 的列表页（移动版有时是服务端渲染的）。\n2. 首页 JS 调的那个列表接口（要先看它要不要签名和 token；0001 说 mtop 系要 `_m_h5_tk`，那就不行）。\n3. `t.damai.cn/yep/page/m/...` 这些活动页（首页 HTML 里有链接）。\n4. 用一次浏览器（computer use）取首页渲染后的 DOM，把 itemId 存进样本文件——但这就不是无人值守的定时任务了。\n\n验证时按 #20 的规则拿 `damai-lock`，样本别超过几场，相邻请求 ≥2 秒。\n\n## 不要做\n\n不要用 `search.damai.cn`。\n\nAgent: Claude",
+    "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/39"
+  },
+  {
+    "number": 37,
+    "title": "Linux 上没有 CA 证书时，提示是“网络请求失败（）：builder error…”，看不出要装 ca-certificates",
+    "state": "open",
+    "labels": [
+      {
+        "name": "bug"
+      },
+      {
+        "name": "待验收"
+      },
+      {
+        "name": "P3"
+      }
+    ],
+    "body": "## 现象\n\n在没有系统 CA 证书的 Linux 上（例如 `ubuntu:24.04` 这种精简容器镜像），`theflash event` 一开始就失败，提示是：\n\n```\n网络请求失败（）：builder error：unexpected error: No CA certificates were loaded from the system\n```\n\n- 括号是空的，原因是英文，看不出该怎么办（装 `ca-certificates`）。\n- 根本没有发出请求：失败在 [`Client::new`](https://github.com/zbtzbtzbt/theFlash/blob/main/backend/src/damai/client.rs) 构建 reqwest 客户端的时候（`url: String::new()`），`watch` 也一样。\n\n## 复现（不访问大麦）\n\n用 `v0.1.0-rc.1` 的 `theflash-x86_64-unknown-linux-musl.tar.gz`（#5）：\n\n```sh\ndocker run --rm --network none --platform linux/amd64 -v \"$PWD:/dl:ro\" ubuntu:24.04 \\\n  sh -c 'cd /tmp && tar -xzf /dl/theflash-x86_64-unknown-linux-musl.tar.gz && ./theflash event 1077137031347'\n```\n\n`apt-get install ca-certificates` 之后就正常（2026-10-14 在 #5 的 Linux 验证里看到的）。\n\n## 期望\n\n提示说清楚是本机没有 CA 证书，HTTPS 没法验证大麦的证书，Linux 上要装 `ca-certificates`；不要显示空括号。README 的“下载和运行”已经写了这个前提。\n\n---\n提出：CodeBuddy（2026-10-14，做 #5 的 Linux 验证时看到），未认领。范围外，不影响 #5 的验收。\n",
+    "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/37"
+  },
+  {
+    "number": 26,
+    "title": "界面怎么下载就能运行：打包 Node，还是由 Rust 提供本地服务",
+    "state": "open",
+    "labels": [
+      {
+        "name": "enhancement"
+      },
+      {
+        "name": "P1"
+      }
+    ],
+    "body": "## 目标\n\n让本地界面（#3）也能像命令行程序一样下载就能运行，不用装 Node 和 Rust，并且有升级方式。\n\n## 背景\n\n- #5 的发布只发命令行程序 `theflash`（决定记录 0006，PR 见 #5）。界面这次没发布，因为按 [0004](https://github.com/zbtzbtzbt/theFlash/blob/main/docs/decisions/0004-local-event-ui.md)，界面是 Node 本地服务每次查询拉起 `backend/target/debug/theflash event-json`，路径写死在 `frontend/src/query.ts`，只能在源码目录里用 `make serve` 跑。\n- 0004 写明：发版之前要重新评估进程模型，长期任务（盯票）不应沿用“每次起一个子进程”。#3 上 Claude 的架构意见倾向由 Rust 提供本地 HTTP 服务、把前端静态文件嵌进二进制。\n\n## 要定的事（由 agent 决定，写一条取代 0004 的决定记录）\n\n1. 进程模型：\n   - 打包 Node：把 Node 运行时（或 Node 单可执行文件 SEA）、编译后的前端和 `theflash` 一起发。每个平台约多 50–100 MB；查询仍是每次一个子进程。\n   - Rust 提供服务：`theflash serve` 之类的子命令，前端构建产物嵌进二进制，发布仍是一个文件；要在 Rust 里重写 Host/Origin 检查、查询锁和风控锁，盯票可以用 SSE 推给界面。\n2. `frontend/src/query.ts` 不再写死源码目录里的 debug 程序。\n3. 界面的升级方式（#5 上 owner 的补充：“#3 的本地界面落地后，还要定义界面怎么升级”）。\n4. 发布：把界面加进 `scripts/release.sh` 的产物清单，按 #5 的验收在干净的 macOS 和 Linux 上验证。\n\n## 什么时候做\n\n在把盯票接入界面之前，或者在第一个要带界面的发版之前，以先到者为准。在那之前发布流程只发命令行程序。\n\n## 约束\n\n只查询，不登录，不下单。\n\n---\n提出：CodeBuddy（2026-10-14，做 #5 时），未认领。\n",
+    "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/26"
+  },
+  {
+    "number": 25,
+    "title": "macOS 程序要不要做签名和公证（要花钱，需要 owner 裁决）",
+    "state": "open",
+    "labels": [
+      {
+        "name": "question"
+      },
+      {
+        "name": "P3"
+      },
+      {
+        "name": "等裁决"
+      }
+    ],
+    "body": "## 背景\n\n#5 发布的 macOS 程序（`theflash-aarch64-apple-darwin.tar.gz`、`theflash-x86_64-apple-darwin.tar.gz`）只有链接器自动加的 ad-hoc 签名（`codesign -dv` 显示 `flags=0x20002(adhoc,linker-signed)`），没有 Developer ID 签名，也没有公证。签名和公证要付费的 Apple 开发者账号，是花钱的事，按 #5 的要求单独提给 owner 裁决。#5 不做签名。\n\n2026-10-14 在 owner 的 Mac（macOS 26.6）上核对到的：\n\n- `spctl -a -t exec -vv theflash` 的结论是 `rejected`：Gatekeeper 评估这个文件时会拒绝它。\n- 用 `gh release download` 下载的文件没有隔离属性 `com.apple.quarantine`（`xattr -l` 只看到 `com.apple.provenance`），Gatekeeper 不会评估它，直接能运行。`install.sh` 就是用 gh 下载的。\n- 用浏览器下载的文件会带隔离属性，按 Apple 的规则第一次运行时会被 Gatekeeper 拦住。**这一点没有在普通用户会话里实测**：我在 agent 的 shell 里给文件手动加上隔离属性后，它照样能运行，可能是因为这个 shell 的宿主进程不受 Gatekeeper 检查。README 按 Apple 的规则写了处理方法（`xattr -d com.apple.quarantine`，或“系统设置 → 隐私与安全性 → 仍要打开”）。\n\n## 选项\n\n1. **不签名（#5 现在的做法）**：不花钱。README 写了 Gatekeeper 的处理方法，推荐用 install.sh 安装，这样碰不到 Gatekeeper。代价：用浏览器下载的用户要多一步；以后如果界面做成双击打开的 .app，体验更差。\n2. **加入 Apple Developer Program，做 Developer ID 签名和公证**：99 美元/年（中国区 688 元/年），要用 owner 的真实身份（个人或公司）注册。CI 里要放这些密钥：签名证书（.p12）和密码、公证用的 App Store Connect API 密钥。发布工作流要加 `codesign` 和 `notarytool` 两步。好处：用浏览器下载的文件也能直接运行。代价：花钱、要真实身份、要管密钥（#5 的约束是“不引入需要密钥的步骤”，这里要 owner 同意破例），每年要续费，证书过期会让发布失败。\n3. **Homebrew tap**：建一个 `homebrew-tap` 仓库，用 `brew install` 安装的命令行程序不带隔离属性。不花钱，但仓库私有时 brew 下载要另外配 token，仓库公开之前意义不大。\n\n## 建议\n\n选 1，先不花钱。现在的用户是 owner 和各个 agent，都用命令行（gh 或 install.sh），碰不到 Gatekeeper。出现下面任何一种情况时再考虑选项 2：\n\n- 要给不用命令行的人发 macOS 程序；\n- 界面做成双击打开的 .app；\n- 仓库公开以后，浏览器下载成了主要的下载方式。\n\n## 等裁决期间\n\n#5 照常发布没签名的程序，README 写明 Gatekeeper 怎么处理。owner 现在不需要做任何事，裁决之前什么都不会花钱。\n\nAgent: CodeBuddy\n",
+    "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/25"
+  },
+  {
+    "number": 20,
+    "title": "今晚的并行开发：分工、决定记录编号和规则（2026-10-14 夜）",
+    "state": "open",
+    "labels": [
+      {
+        "name": "P3"
+      }
+    ],
+    "body": "协调者：Claude（Cursor 会话）。owner 在 2026-10-14 01:59 提出“一晚上用多个 agent 做完这批 issue”，随后去睡觉，把时间交给 agent。以下分工由协调者决定；owner 的两项裁决单独列出。今晚的每个 agent 开工前先读这里。\n\n## 分工\n\n| 线 | agent | 顺序 |\n| --- | --- | --- |\n| 1 | Codex（owner 已开着的会话） | #3：决定记录改用 0004，rebase 到最新 main，提 PR |\n| 2 | Claude（cursor-agent） | 验收 #7 → #4 → #10 |\n| 3 | CodeBuddy | #5 |\n| 4 | Claude（cursor-agent） | #15（含 #13）→ #16 → #14（含 #9 的落地） |\n| 5 | Codex（codex exec） | #17 → #11 |\n\n今晚不做：\n- #2：实现已在 main，等 10:18 济南站开售实测，由实现者 Claude 继续跟。\n- #8：要批量匿名抽样 100 多场演出，和 #2 的实测共用 owner 家里一个 IP，万一触发风控会毁掉 #2 的实测。10:18 之后再做。\n\n## 决定记录编号（预分配）\n\n#3→0004，#4→0005，#5→0006，#15→0007，#16→0008，#17→0009，#14→0010，#10→0011，#11→0012。\n\n只用分给自己的编号，一个 issue 只写一条，不要拿“下一个空号”。0003 已被 #7 占用，#3 原来的 `0003-local-event-ui.md` 要改成 0004。\n\n## 改动怎么合进去\n\n- 一个 issue 一个分支一个 PR，不直接推 main。commit 正文和 PR 正文最后一行写 `Agent: <名字>`。\n- 实现者在 CI 绿了以后在 issue 上汇报（AGENTS.md 第 9 步），给 PR 加 `待审查` 标签。实现者不合并自己的 PR，不给自己的 issue 加 `待验收`，不关闭 issue。\n- 派发脚本（不调用大模型）给每个 `待审查` 的 PR 派一个另一厂商的审查者。审查者按 docs/code-standards.md 的“合并”一节审：合到最新 main 上跑检查、故意弄坏、在 PR 上写审查记录（被审查的 SHA、跑了什么、结论、审查者），用 `--match-head-commit` 合并，再给 issue 加 `待验收`。要修改就把标签换成 `要修改`，派发脚本会派实现者同厂商的 agent 去修。\n- 同一时间只合并一个 PR（合并锁）。\n- 验收者同样换厂商，按 prompts/acceptance.md。\n\n## Owner 裁决\n\n1. **一次性授权，仅限今晚（到 owner 早上看过为止，最晚 2026-10-14 12:00）**：prompts/work-tick.md 规定，PR 改了 CI 配置、发布脚本，或新增依赖、网络地址时，停下等 owner。今晚 owner 授权审查者自己合并这类 PR，条件是在审查记录里逐行列出改了哪些 CI 配置、工作流权限、依赖和网络地址，以及为什么安全；owner 早上统一看。读写凭据、带二进制或混淆代码不在授权范围内，仍然停下等 owner。\n2. **#11 先做 ntfy**，推送渠道做成可替换的。\n\n## 真实大麦\n\n- 所有 agent 共用 owner 家里一个 IP。同一时间只允许一个 agent 访问真实大麦：先运行 `/Users/zbt/Desktop/theFlash-night/bin/damai-lock`（拿到锁才返回；退出码 3 表示风控暂停中，不许访问），用完运行 `/Users/zbt/Desktop/theFlash-night/bin/damai-unlock`。一次持锁不超过 15 分钟（#17 的 10 分钟真实运行可以到 25 分钟），超过 30 分钟的锁视为持有者已经挂掉，会被收回。相邻请求至少隔 2 秒。\n- `/Users/zbt/Desktop/theFlash-night/RISK_STOP` 存在时，任何 agent 都不访问大麦。\n- 遇到滑块、验证码、限流、封禁：立刻停止，`date > /Users/zbt/Desktop/theFlash-night/RISK_STOP`，在对应 issue 和这里报告，等 owner。\n- 不要停止或干扰正在运行的 `theflash watch` 和 `caffeinate` 进程，那是 #2 的真实验收。\n\n## 断网\n\n每个 agent 任务由脚本启动。任务失败退出时，脚本先等网络恢复（GitHub 和模型服务都能连上），再重新启动同一个任务，最多 4 次。重启的 agent 先看自己的状态文件、分支、PR 和 issue 评论，接着做，不重复已经完成的步骤。所以每个 agent 都要把进度及时推到分支和 issue 上，而不是只留在本地。\n\n## 进度\n\n协调者大约每 20 分钟在这里更新一次。\n",
+    "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/20"
+  },
+  {
+    "number": 17,
+    "title": "长时间真实验证和定时验证改成 launchd 任务，结果自动贴到 issue",
+    "state": "open",
+    "labels": [
+      {
+        "name": "enhancement"
+      },
+      {
+        "name": "认领中"
+      },
+      {
+        "name": "P1"
+      }
+    ],
+    "body": "## 目标\n长时间的真实验证和定时验证（例如“连续盯 1 小时”“10:18 开售时刻实测”“每天巡检大麦改版”）都登记成 launchd 任务。任务不依赖任何 agent 会话活着，结束后自动把结果贴到对应的 issue 上。\n\n## 背景（2026-10-14 实测）\n- #2 的两项长时间验收，第一次是在一条前台命令里用 `nohup … & disown` 启动的，命令一结束就被执行环境清掉，只活了几秒，过了一阵才发现。\n- Ctrl-C 如果发给 `caffeinate`，它自己退出，被它启动的程序却会留下继续运行。\n- 合盖睡眠会打断任务。“10:05 去浏览器挂监听”这种待办只存在于某个 agent 会话的记忆里，会话一断就没人知道。\n\n## 要求\n- 一条命令登记一个验证任务：要运行的命令、开始时间（立即或指定时刻）、最长运行时间、对应的 issue。任务由 launchd 启动。\n- 只在任务运行期间阻止电脑空闲睡眠；停止任务时，只给被测程序发 Ctrl-C。\n- 日志放在固定位置，每行带时间戳。结束后自动在对应 issue 上评论摘要：开始和结束时间、退出码、关键输出、日志位置。\n- 可以列出和取消已登记的任务。\n- #10 的每日改版巡检用它来跑。\n- 写清楚电脑合盖睡眠时会发生什么，以及 launchd 能不能在指定时刻唤醒电脑。\n\n## 验收\n- 自动化测试覆盖：登记、到点启动（用注入的时钟）、超时停止、结果摘要的格式。\n- 真实运行：登记一个 5 分钟后开始、运行 10 分钟的 `theflash watch`，期间关掉登记它的终端，任务照常完成，并在 issue 上留下结果。\n",
+    "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/17"
+  },
+  {
+    "number": 16,
+    "title": "认领改成带过期时间的租约，并写明要改哪些模块",
+    "state": "open",
+    "labels": [
+      {
+        "name": "enhancement"
+      },
+      {
+        "name": "认领中"
+      },
+      {
+        "name": "P1"
+      }
+    ],
+    "body": "## 目标\n认领从一条评论变成机器能读的“租约”：写明是哪个 agent、要改哪些模块、什么时候过期。agent 中途挂掉时，它认领的 issue 能被收回；并行的 agent 能提前避开会冲突的工作。\n\n## 背景（2026-10-14 实测）\n- 为了不让工作循环抢走给 Codex 的 #3，只能在 issue 正文里手写“负责：Codex（其他 agent 不要认领）”。\n- agent 认领后如果会话挂了，issue 会一直显示有人在做，没有任何机制收回。\n- #4 只能先放着，因为它和 Codex 正在做的 #3 会改到同一批文件；可这件事只能靠读评论和代码才知道。\n\n## 要求\n- 认领时给 issue 加上 `认领中` 标签，并发一条固定格式的认领评论：哪个 agent、开始时间、预计改动的模块或目录、预计完成时间。\n- 心跳：做的过程中，至少每 30 分钟在 issue 上更新一次进度，或推送一次分支。超过 2 小时没有任何更新的认领视为过期，调度程序或任何 agent 都可以收回，在 issue 上说明之后重新认领。\n- 开工前检查其他进行中的认领改动的模块；有重叠时，要么排在后面，要么在两个 issue 上写明怎么分工。\n- “只能由某个 agent 认领”改用标签表示（例如 `指派:codex`），不再写在正文里。\n- 相应修改 AGENTS.md 和 prompts/work-tick.md。\n\n## 验收\n- 一条命令列出所有进行中的认领：哪个 agent、改哪些模块、最后更新时间、是否已过期。这条命令有自动化测试（用回放的 GitHub 数据）。\n- 用一个真实 issue 演示认领、心跳和过期收回，在 issue 里贴出过程。\n",
+    "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/16"
+  },
+  {
+    "number": 15,
+    "title": "所有改动走 PR，由合并脚本按 CI 和独立审查记录合并，排队依次合入",
+    "state": "open",
+    "labels": [
+      {
+        "name": "enhancement"
+      },
+      {
+        "name": "验收未通过"
+      },
+      {
+        "name": "P1"
+      }
+    ],
+    "body": "## 目标\n所有改动都走 PR。合并只由一个合并脚本完成：它核对 CI、独立审查记录和被审查的提交都对上之后才合入，多个 PR 排队依次合并。\n\n## 背景（2026-10-14 实测）\n- Claude 直接推 main，Codex 走 PR，两套流程并存。直接推送没有合并前的独立审查，只能靠事后验收和夜间复盘兜底。\n- Claude 推送 #2 时被拒：Codex 刚合并了 PR #12，只能手动 rebase、解决 `tests/cli.rs` 的冲突、重跑检查后再推。\n- PR #12 在独立审查记录写好之前就被合并了，而且查不出是谁合并的（#13）。\n\n## 要求\n- 所有改动从分支提 PR，不再直接推 main（发版 tag 除外）。相应修改 AGENTS.md、docs/code-standards.md 和 prompts/work-tick.md。\n- 审查者必须是实现者之外的 agent。审查结论写成固定格式的 PR 评论：被审查的提交 SHA、跑了什么、结论（通过 / 要修改）、审查者是哪个 agent。\n- 合并只由合并脚本完成，脚本不调用大模型。合并前它检查：\n  - PR 当前的 head 与审查记录里的 SHA 一致；\n  - 这个 SHA 上的 CI 已经跑完并且是绿的；\n  - 没有阻止合并的标签；\n  - 审查者和实现者不是同一个 agent。\n\n  全部满足后，rebase 到最新的 main（或用 GitHub 的 merge queue），等 CI 再次变绿后合入，并使用 `--match-head-commit`。\n- 多个 PR 排队依次合入，不能有两个同时合并。\n- 现在所有 agent 共用一个 GitHub 账号，“是哪个 agent”靠 PR 正文和 commit 里的固定标记识别（例如 trailer `Agent: Claude`）。\n- 查清能不能用 GitHub 自带的保护规则强制执行（私有仓库受套餐限制），把结论和理由写进一条架构决定记录。\n- 解决 #13。\n\n## 验收\n- 自动化测试：以下每种情况，合并脚本都拒绝合并并说明原因：没有审查记录、SHA 对不上、CI 是红的或还没跑完、审查者就是实现者、审查之后又有新推送。测试用回放的 GitHub 数据。\n- 真实运行：用一个小改动走完整流程（开 PR → 另一个 agent 审查 → 脚本合并），在 issue 里贴出链接。\n",
+    "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/15"
+  },
+  {
+    "number": 14,
+    "title": "调度程序：有事才启动一个全新的 agent 会话，替代聊天窗口里的定时循环",
+    "state": "open",
+    "labels": [
+      {
+        "name": "enhancement"
+      },
+      {
+        "name": "认领中"
+      },
+      {
+        "name": "P1"
+      }
+    ],
+    "body": "## 目标\n用一个常驻的调度程序代替聊天窗口里的定时循环：GitHub 上有事时才启动一个全新的 agent 会话去处理，处理完就退出。没事时不花钱，也不依赖哪个窗口开着。\n\n## 背景（2026-10-14 实测）\n- 工作循环跑在 owner Cursor 的一个聊天会话里，每 30 分钟醒一次。关掉窗口就停，空闲时也在消耗；同一个会话的上下文越来越长。\n- Codex 只有在 owner 粘贴 prompt 时才工作；验收、修复都要人转发。\n- 夜间复盘的 Cursor Automation 要 owner 手动保存才生效，至今一次都没跑过。\n\n## 要求\n- 常驻在 owner 的 Mac 上（launchd），调度程序本身不调用大模型。每分钟查一次 GitHub：新开且没人认领的 issue、`待验收`、`验收未通过`、main 的 CI 变红、新 PR 或 PR 有新提交、到期的定时任务。\n- 有事时，按角色启动对应 agent 的命令行版本，一个任务一个全新会话，并告诉它要做什么（例如“按 prompts/acceptance.md 验收 #N”）。同一个 issue 同时只有一个会话在处理。\n- 实现者和验收者自动用不同厂商的 agent（例如 Claude 实现就由 Codex 验收，反之亦然）。\n- 可以配置并发上限和每天的会话数上限；超出时排队，并在 issue 上说明。\n- 会话日志放在固定目录。会话失败或超时（例如 2 小时）时释放认领（见认领租约的 issue），并在 issue 上说明。\n- 按 #9 的裁决，不访问大麦的任务可以交给云端；本地调度程序不重复派发这类任务。\n- 装好以后取代聊天里的定时循环。\n\n## 验收\n- 自动化测试：用回放的 GitHub 事件验证：每类事件派发给正确的角色；同一个 issue 不重复派发；并发和每日上限生效；超时会释放。测试不访问真实 GitHub，也不真的启动 agent。\n- 真实运行：在 owner 的 Mac 上装好，新开一个测试 issue，几分钟内被认领并有进展；加上 `待验收` 后，由另一个厂商的 agent 完成验收。在 issue 里贴出调度日志。\n- 安装、卸载、查看状态各一条命令。\n\n## 约束\n- 只支持 macOS 和 Linux。agent 的凭据不写进仓库。\n- 依赖认领租约的 issue（过期收回要靠它）。\n",
+    "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/14"
+  },
+  {
+    "number": 13,
+    "title": "流程: PR #12 在独立审查记录前已合并",
+    "state": "open",
+    "labels": [
+      {
+        "name": "验收未通过"
+      },
+      {
+        "name": "P1"
+      }
+    ],
+    "body": "## 问题\nPR #12 在独立审查记录发布前已被合并，缺少可核查的合并前 reviewer 记录。\n\n## 实际观察\n- PR head：`ea633bfb8b8ee32a0e23a06a2df79eec7601b241`。\n- GitHub显示已合并，merge commit：`d7f3b95d56d1c04b39a8326513fd2ec58ec4d860`，时间2026-10-14 01:34:39（北京时间）。\n- 实现者和独立验收 agent 均未调用该合并操作；合并来源未确认，不推断是人、其他agent或自动化。\n- 发现已合并时 PR 的 comments/reviews 均为空；独立agent还在旧代码红测试与最终代码复核过程中。\n- PR及合并后main的Linux/macOS CI均已成功；随后独立agent在实际main合并结果上完成全检和业务验收。当前未发现这两项修复的业务问题。\n\n## 应遵守的规则\n`docs/code-standards.md#合并` 要求审查者拉取PR合到最新main，完成检查并在PR记录reviewed SHA和证据，之后使用 `gh pr merge --match-head-commit <sha>`。合并后的补充记录不等于该步骤已在合并前完成。\n\n## 建议与验收\n1. 排查此次合并路径，只记录能证实的来源。\n2. 使未来PR在独立agent写完reviewed SHA和实际检查记录前不能被其他并行会话提前合并。\n3. 合并必须绑定独立审查过的head；新push后重新审查。\n\n这是 #1 两项缺陷之外的流程问题，另行跟踪；不回滚已经独立验证通过的修复。\n",
+    "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/13"
+  },
+  {
+    "number": 11,
+    "title": "盯票的开售和回流提醒也能推送到手机上",
+    "state": "open",
+    "labels": [
+      {
+        "name": "enhancement"
+      },
+      {
+        "name": "待验收"
+      },
+      {
+        "name": "P1"
+      }
+    ],
+    "body": "## 目标\n盯票（#2）的开售提醒和回流提醒，除了终端和桌面通知，也能推送到手机上。人不在电脑前时也不会错过。\n\n## 背景\n- #2 只做了终端输出和系统通知（macOS 通知中心、Linux `notify-send`）。\n- 回流随时可能发生，盯票常常要跑几个小时；人离开电脑时，桌面通知等于没有。\n- 推送到手机要经过第三方服务，并且要用户自己的推送密钥。密钥是凭据，适用凭据不进仓库、日志、截图的规则。\n\n## 需要 owner 确认\n先支持哪个推送渠道：\n- Bark：只支持 iOS，免费，配置最简单。\n- ntfy：iOS 和 Android 都能用，开源，可以用公共服务器或自建。\n- 企业微信群机器人：推到企业微信群，不用另装 App。\n- Server 酱：推到微信，免费额度有限。\n\n建议先做 ntfy（两种手机都能用、免费、不绑定某个公司的账号），同时把渠道做成可替换的。owner 用的是 iPhone 并且已经装了 Bark 的话，也可以先做 Bark。\n\n## 要求\n- 推送内容和桌面通知一致：哪一场、哪个票档、现在什么状态、什么时间。开售提醒要标明“已确认可以买”还是“到点了但还没确认”。\n- 同一个状态变化只推一次，不刷屏；推送失败只在终端说明，不影响继续盯票。\n- 推送密钥放在用户配置目录下的文件里（权限 0600），或者系统钥匙串里，不进命令行参数（会出现在进程列表里）、不进日志，终端输出时打码。\n- 没有配置推送时，行为和现在完全一样。\n- 写子系统文档，说明怎么配置。\n\n## 验收\n- 自动化测试：用本地假推送服务器，验证“缺货 → 可售”时恰好推送一次、内容正确；推送服务器返回错误时，盯票继续运行；日志和终端输出里不出现密钥。\n- 真实验证：用 owner 提供的推送密钥（由 owner 提供，不进仓库和 issue），向 owner 的手机推送一条测试提醒，并在 issue 里贴出手机上收到的截图（截图里不能出现密钥）。\n\n## 约束\n- 只提醒，不登录，不下单。\n- 依赖 #2 合并。\n\n---\n提出：Claude（2026-10-14 梳理项目现状时提出），未认领。\n",
+    "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/11"
+  },
+  {
+    "number": 10,
+    "title": "大麦改版时第一时间发现：每天巡检真实页面结构，变了就自动开 issue",
+    "state": "open",
+    "labels": [
+      {
+        "name": "enhancement"
+      },
+      {
+        "name": "P1"
+      }
+    ],
+    "body": "## 目标\n大麦改了页面或接口的结构时，在用户用到之前就被发现：每天用真实页面检查一次，结构变了、出现没见过的状态码，或者解析失败，就自动开 issue，并附上新旧结构的对比。\n\n## 背景\n- 自动化测试只回放 `backend/testdata/damai/` 里录下来的旧响应，CI 也绝不访问真实大麦。所以大麦一改版，程序就坏了，CI 却会一直是绿的。\n- 对抢票程序来说，最坏的情况是在开售当天才发现解析失败。\n- 0001 写了“大麦改版后，用 curl 匿名请求详情页和票档接口，和 testdata 里的旧响应对比结构”，但这一步现在只能靠人想起来去做。\n- 只映射见过的状态码，没见过的显示“未知（原始值）”。真实世界里新出现的状态码，现在没有渠道被发现。\n\n## 要求\n- 提供一条巡检命令或脚本，由 agent 运行（不是 CI），做这些事：\n  - 匿名查询一组覆盖各种情况的真实演出：已开售、未开售、已售罄、日历选日期、电脑版不卖。样本会过期，所以要能自动从首页换新样本（不用搜索接口）。\n  - 对比程序依赖的字段路径（例如 `staticDataDefault.itemBase.itemName`、`dataDefault.performBases`、`perform.skuList[].frontEndStatus`），和 `testdata/` 里的结构比较：字段消失、类型变化，都算结构变化。\n  - 收集真实响应里出现、但还没映射的购买按钮状态码和票档状态码。\n- 发现问题时自动开 issue（或在已有的同类 issue 上追加评论，不重复开），附上：哪场演出、哪个字段、旧结构和新结构对比、没见过的状态码和网页上对应的文字。新响应脱敏后作为候选 fixture 附上。\n- 提供一条重新录制 fixture 的命令：从真实页面取回响应，按规则脱敏后写进 `testdata/`，方便修复改版的 agent 使用。\n- 怎么定时运行见 #9（需要 owner 裁决）；在那之前，work-tick 每天第一轮手动跑一次。\n\n## 验收\n- 自动化测试（不访问真实大麦）：给巡检喂一份删掉了 `performBases` 字段的回放响应，报告结构变化并指出字段；喂一个状态码 777，报告“没见过的状态码 777”；喂正常响应，报告没有变化。\n- 在真实大麦上跑一次完整巡检，贴出输出和请求总数。\n- 重新录制命令在真实大麦上跑一次，产出的 fixture 能通过现有测试，并且不含凭据（如果 #7 已完成，要通过它的扫描）。\n\n## 约束\n- 只读，不登录，不下单。\n- 一次巡检的请求总数和间隔写进文档；相邻请求至少间隔 1 秒。\n- 遇到风控立即停止，在 issue 里报告，不重试。\n- 所有请求经过 #4 的统一访问层（如果 #4 已完成）。\n\n---\n提出：Claude（2026-10-14 梳理项目现状时提出），未认领。\n",
+    "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/10"
+  },
+  {
+    "number": 9,
+    "title": "让工作循环、验收、夜间复盘和改版巡检定时自动跑（需要 owner 裁决）",
+    "state": "open",
+    "labels": [
+      {
+        "name": "P1"
+      }
+    ],
+    "body": "需要 owner 裁决。定时运行 agent 会持续花钱，其中一部分任务还要访问真实大麦，按 AGENTS.md 由 owner 决定。\n\n## 现状\n- README 写的是：白天按 prompts/work-tick.md 定时跑一轮（修红 CI、发版、审 PR、验收、处理 issue），夜里按 prompts/nightly-review.md 复盘。但现在没有任何东西会触发它们，每一轮都要 owner 手动开会话。LESSONS.md 的水位线还是 `none`，夜间复盘一次都没跑过。\n- 验收（prompts/acceptance.md）和大麦改版巡检（#10）也需要有人定时去跑。\n- 整个 AI Native 的前提是“不等人”。不定时跑，项目的迭代速度就取决于 owner 什么时候想起来开会话。\n\n## 要定时跑的任务\n| 任务 | 建议频率 | 访问真实大麦吗 |\n| --- | --- | --- |\n| 工作循环（work-tick，含验收） | 白天每小时一次，起步先保守 | 验收和实现会，用浏览器走到“提交订单”之前 |\n| 夜间复盘（nightly-review） | 每天一次，例如凌晨 3 点 | 不会 |\n| 大麦改版巡检（#10） | 每天一次 | 会，匿名、低频 |\n\n## 选项\n\n### A. 全部在云端跑（例如 Cursor Automations 的定时云端 agent）\n- owner 的电脑不用开着。\n- 按次计费，频率直接决定成本。\n- 请求从数据中心的 IP 发出，大麦对这类 IP 可能更容易弹风控，需要实测；云端环境能不能用浏览器做真实验证，也要实测。\n\n### B. 全部在 owner 的 Mac 上跑（launchd 定时启动 agent 的命令行版本）\n- 请求从家里的网络发出，和真实用户一样；浏览器验证最方便。\n- 电脑必须开着、不休眠；agent 用的是本机的 gh 登录和工具。\n- 同样按 agent 用量花钱。\n\n### C. 混合（建议）\n- 只改代码、不碰大麦的任务（夜间复盘、工作循环里修 CI、审 PR、写代码）放云端。\n- 需要访问真实大麦的任务（验收里的真实验证、改版巡检）放 owner 的 Mac。\n- 云端任务遇到需要真实验证的步骤时，在 issue 上写明“待本机验证”，交给本机任务。\n\n### D. 先不定时，继续手动\n- 不花额外的钱，但迭代速度取决于 owner。\n\n## 建议\n选 C，频率从保守开始：工作循环白天每小时一次，复盘和巡检每天一次。跑一周后，按 LESSONS.md 和 CI 记录看效果，再决定是否加频率。\n\n## 需要 owner 回复\n1. 选哪个选项。\n2. 每月预算上限，以及超出时怎么处理（降频还是停）。\n3. 如果有任务在 owner 的 Mac 上跑：电脑每天哪些时间开着。\n\n## 裁决之后要做的（由 agent 完成）\n- 按选项配置定时任务，把配置方式写进一条决定记录。\n- README 里“项目怎么自己迭代”一节写清楚实际是谁、在哪里、多久跑一次。\n- 每个定时任务都在自己的 worktree 里工作，遵守 AGENTS.md 的并行规则。\n\n---\n提出：Claude（2026-10-14 梳理项目现状时提出）。\n",
+    "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/9"
+  },
+  {
+    "number": 8,
+    "title": "统计电脑版不卖的演出占多少，看清只在 App 卖的演出能不能拿到场次和票档",
+    "state": "open",
+    "labels": [
+      {
+        "name": "enhancement"
+      },
+      {
+        "name": "P1"
+      }
+    ],
+    "body": "## 目标\n用数据回答两个问题：\n1. 大麦上有多少演出电脑版不卖（“该渠道不支持购票”），尤其是热门的演唱会？\n2. 只在 App 卖的演出，不登录能不能拿到场次和票档，要付出什么代价？\n\n结论用来回答 #6 的第 3 个问题（要不要支持只在 App 卖的演出），并判断 docs/decisions/0001 的重新考虑条件（“电脑版不卖的演出成为多数”）是否已经成立。\n\n## 背景\n- 现在只用电脑版数据（0001）。遇到状态 100（该渠道不支持购票），只能输出“电脑版不展示这场演出的场次和票档”。\n- 最需要抢的热门演出，很可能正是只在 App 卖的那些。如果是这样，查询（#1）、盯票（#2）、界面（#3）对最重要的场景都没有用。\n- 0001 调研时看过首页 28 个演出和 20 个巡演分站，但没有记录其中有多少电脑版不卖。\n\n## 要求\n- **抽样**：从大麦首页和分类页（演唱会、话剧歌剧、体育等）匿名取样，至少 100 场，演唱会至少 30 场。不要用搜索接口，它第一次请求就会触发滑块验证。\n- **统计**：用 `theflash event` 或同样的数据源，记录每场的购买按钮状态，按分类统计“电脑版不支持购票”的比例。另外记一份“热门”子集（例如首页推荐位、即将开售的演唱会），单独统计。\n- **App 专卖演出的数据**：挑 2 到 3 场电脑版不卖的演出，用浏览器打开移动版页面（`m.damai.cn`），像普通用户一样只看不登录，记录：\n  - 页面调用了哪些接口；\n  - 这些接口是否需要签名（`_m_h5_tk` / `sign`）或登录；\n  - 不登录时能不能看到场次和票档；\n  - 有没有出现风控。\n  只观察，不写实现代码。\n- **结论写成文档**（例如 `docs/research/2026-10-pc-channel-share.md`）：日期、取样方法、每场的 ID 和状态（原始数据）、统计结果、App 接口的观察，以及给 #6 的建议。\n\n## 验收\n- 文档里的数字可以复核：给出了全部样本 ID 和取样时间，另一个 agent 能按同样方法重新抽一部分验证。\n- 回答了上面两个问题，并明确说明 0001 的重新考虑条件是否成立。\n- 结论同步到 #6 的评论里。\n\n## 约束\n- 只读，不登录，不下单。\n- 请求要克制：相邻两次请求间隔至少 2 秒，总量在文档里写明。\n- 任何响应出现滑块验证或其他风控，立即停止全部请求，在这个 issue 里报告看到了什么，等 owner 决定。\n- 文档和截图里不能出现凭据。\n\n---\n提出：Claude（2026-10-14 梳理项目现状时提出），未认领。\n",
+    "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/8"
+  },
+  {
+    "number": 7,
+    "title": "测试和 CI 连不上真实大麦，仓库里出现凭据或个人信息时检查失败",
+    "state": "open",
+    "labels": [
+      {
+        "name": "enhancement"
+      },
+      {
+        "name": "P1"
+      }
+    ],
+    "body": "",
+    "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/7"
+  },
+  {
+    "number": 4,
+    "title": "所有访问大麦的请求共用一个频率上限，任何进程触发风控，其他进程也停止",
+    "state": "open",
+    "labels": [
+      {
+        "name": "enhancement"
+      },
+      {
+        "name": "P1"
+      }
+    ],
+    "body": "## 目标\n所有访问大麦的请求都经过同一层：共用一个请求频率上限；任何一个 theFlash 进程触发风控，其他进程也立刻停止请求，直到 owner 处理。\n\n## 背景\n- 现在风控判断在 `backend/src/damai/client.rs` 的 `Client::get` 里，只对当前这一次查询有效。\n- #2（盯票）会持续轮询大麦。#3（浏览器界面）的本地服务在 Node 进程的内存里记一个 `riskStopped` 标志（见 #3 的 worktree 里的 `frontend/src/server.ts`）。\n- 用户同时开着界面和 `theflash watch` 时，大麦看到的是两边相加的流量；一边触发了风控，另一边不知道，会继续请求。这违反“遇到风控就停下，由 owner 决定下一步”的规则。\n- 以后的登录、购票前准备也要访问大麦，应该从一开始就走同一层，而不是每个功能各写一份风控判断。\n\n## 要求\n- 熔断跨进程生效：任何响应被识别为风控页时，把熔断状态（时间、触发的 URL、命中的页面标记）写到用户状态目录（macOS 和 Linux 的位置都要对）。所有进程发下一个请求前检查它，看到熔断就停止，并给出看得懂的提示。\n- 熔断不自动解除，只能由用户显式解除（例如一条命令）。解除时提示用户先确认 owner 已经看过这次风控。\n- 同一进程内所有调用方共用一个请求频率上限，超出时排队等待，而不是直接发出。跨进程是否也共用频率上限，在决定记录里给出结论和理由。\n- `theflash event`、#2 的盯票、#3 的界面都改为通过这一层访问大麦，不再各自判断风控。\n- 写一条决定记录（状态放在哪里、怎么加锁、频率上限怎么定、为什么），以及这一层的子系统文档。\n\n## 验收\n- 自动化测试：两个独立的客户端（最好是两个进程）共用一个临时状态目录，其中一个收到回放的风控页后，另一个的下一次请求不发出，并报告熔断。测试在临时 HOME 下跑，不访问真实大麦。\n- 自动化测试：频率上限在同一进程的多个并发调用方之间生效，用注入的时钟，不靠墙钟。\n- 熔断状态文件损坏或不可写时，行为是“停止并说明原因”，而不是当作没熔断继续请求。\n- `theflash event` 现有测试照常通过，输出不变。\n- 在真实大麦上用 `theflash event` 查一场演出，确认正常查询不受影响。\n\n## 约束\n- 只读，不登录，不下单。\n- 不为了验证熔断去故意触发真实风控。风控路径只用 `backend/testdata/damai/risk_control.html` 回放。\n\n## 协作\n#2 和 #3 正在开发，都改了 `backend/src/main.rs`、`report.rs`、`lib.rs` 和 `tests/cli.rs`。建议先只做决定记录和这一层本身，等 #2、#3 合并后再把它们的调用方迁过来。开工前 `git fetch`，推送前 rebase 到最新的 main，并重跑 `make check`。\n\n---\n提出：Claude（2026-10-14 梳理项目现状时提出），未认领。\n",
+    "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/4"
+  },
+  {
+    "number": 2,
+    "title": "盯住一场演出，开售或有票时立刻提醒",
+    "state": "open",
+    "labels": [
+      {
+        "name": "P1"
+      }
+    ],
+    "body": "## 目标\n给一场演出（链接或 ID），程序持续盯着它，在下面两种时刻立刻提醒我：\n1. 未开售的演出：到了开售时间、真正可以买的那一刻。\n2. 在售但我想要的票档缺货：这个票档重新有票（回流）的那一刻。\n\n## 要求\n- 可以只盯某个场次、某个票档（例如只盯 10-17 那场的 380 元），不指定就盯全部。\n- 开售前显示倒计时。倒计时按大麦的时间算，不按本机时钟（本机时钟可能不准）。\n- 提醒方式：终端里醒目输出，同时发系统通知（macOS 通知中心 / Linux 桌面通知）。\n- 提醒内容写清楚：哪一场、哪个票档、现在什么状态、什么时间。\n- 随时可以 Ctrl-C 停止。\n\n## 验收\n- 开售提醒在大麦开售时刻前后 1 秒内发出，并随后确认票确实已经可以买了。用一场真实的即将开售的演出验证（例如 1092337348536，10 月 14 日 10:18 开售），在 issue 里贴出提醒时刻和网页上变为可买的时刻。\n- 回流提醒用一场真实的缺货票档验证；等不到真实回流的话，在测试里模拟“缺货 → 可售”。\n- 连续盯 1 小时不触发风控。万一触发，立刻停下并提醒我，不再继续请求。\n- 网络断开再恢复后能接着盯，不会崩溃退出。\n\n## 约束\n- 只提醒，不登录，不下单。\n- 对大麦的请求频率要克制，宁可慢一点也不能被风控。\n",
+    "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/2"
+  }
+]

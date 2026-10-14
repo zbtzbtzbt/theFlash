@@ -13,6 +13,7 @@
 //! dispatcher and an agent reading the same issue reach the same verdict.
 
 pub mod lease;
+pub mod priority;
 pub mod snapshot;
 
 #[cfg(test)]
@@ -24,7 +25,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use chrono::{DateTime, FixedOffset, Utc};
 
 pub use lease::{Claim, Heartbeat};
-pub use snapshot::{Issue, Push, Snapshot};
+pub use snapshot::{Issue, OpenIssue, Push, Snapshot};
 
 /// What kept a lease alive most recently.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -591,6 +592,9 @@ pub fn confirm_claim(issue: &Issue, posted: &str, pushes: &BTreeMap<String, Push
 // ---- the comments the commands post ----
 
 /// The claim comment, in the format [`lease::parse_claim`] reads back.
+/// `out_of_order` is what the claim skipped in the priority queue and
+/// why ([`priority::decide`]), for the next reader of the issue.
+#[allow(clippy::too_many_arguments)]
 pub fn claim_comment(
     agent: &str,
     modules: &[String],
@@ -598,6 +602,7 @@ pub fn claim_comment(
     due: Option<DateTime<Utc>>,
     overlaps: &[Overlap],
     overlap_reason: Option<&str>,
+    out_of_order: Option<&str>,
     now: DateTime<Utc>,
 ) -> String {
     let mut body = format!(
@@ -622,6 +627,9 @@ pub fn claim_comment(
                 .join("；"),
             reason.trim()
         ));
+    }
+    if let Some(note) = out_of_order {
+        body.push_str(&format!("- 不按顺序: {note}\n"));
     }
     body.push_str(&format!(
         "\n心跳至少每 {} 分钟一次（`scripts/claims heartbeat` 或推一次分支）；\

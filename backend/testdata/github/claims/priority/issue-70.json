@@ -1,0 +1,14 @@
+{
+  "number": 70,
+  "title": "inspect: 熔断记录失败后仍继续请求大麦（PR #40 与 #4 合入后的交互）",
+  "state": "open",
+  "labels": [
+    {
+      "name": "bug"
+    },
+    {
+      "name": "指派:claude"
+    }
+  ],
+  "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/70"
+}

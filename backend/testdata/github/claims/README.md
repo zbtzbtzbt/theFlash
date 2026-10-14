@@ -32,6 +32,27 @@
 
 过期不用单独的数据：同一份快照配不同的 `--now`，就是它在那个时刻的样子。
 
+`open-issues.json` 是派生的，不是取来的：03:10 那一刻没有取全部打开的 issue（当时还没有优先级）。它由 `issues.json` 的 #31、#16 和 `issue-25.json` 拼成，三条都加了 `P1` 标签、`body` 留空，这样认领的测试只测租约，不会被优先级的检查拦下（#68）。优先级本身用下面 `priority/` 里真实取的数据测。
+
+## priority/
+
+2026-10-14 11:11:34（北京时间）给所有 open issue 定完级之后的真实仓库，`claims queue`、`claims triage` 和认领时的优先级检查用它（#68）。这一刻的样子：
+
+- 12 个 issue（#70～#81）几分钟前刚开、还没定级；#54 的正文写着 `依赖：#4`；#63、#65、#67 是同一件事，都带 `等裁决`；#13、#15 验收没通过；#11、#37 待验收。
+- 7 个认领中：#14、#16、#17、#44、#51、#68、#69。
+
+| 文件 | 取自 | 取的时候怎么裁 |
+| --- | --- | --- |
+| `open-issues.json` | `issues?state=open&per_page=100` | 保留 number、title、state、labels 的 name、body、html_url；PR 只留一个空的 `pull_request` 标记（列表里混着 PR，命令要把它们去掉） |
+| `issues.json` | `issues?state=open&labels=认领中&per_page=100` | 同 `two-claims/` |
+| `comments-<号>.json` | `issues/<号>/comments` | 每个认领中的 issue，加上测试要认领或定级的 #25、#26、#49、#54；#70 是 11:13 补取的（还没有评论） |
+| `issue-<号>.json` | `issues/<号>` | #25、#26、#49、#54、#70 |
+| `branch-<分支>.json` | `activity?ref=refs/heads/<分支>&per_page=10` | 每条认领评论里的分支；`claude-issue-68`、`claude-issue-69` 当时还没推，是真实的空响应 |
+
+#70 的两个文件比其他文件晚两分钟取，那两分钟里它没有新评论，也没有改标签。
+
+`open-issues.json` 里只有一处改过：#7 的 `body` 换成了空串。#7 的正文在描述 `repo_guard` 要找的 Cookie 请求头，原文会让 `repo_guard` 报凭据（误报）；命令只从正文里读依赖行，#7 没有依赖行，所以空串和原文对测试是一样的。没有用白名单放过整个文件，是因为再取一份时，别的 issue 正文里真贴进来的请求头还要能被拦住。
+
 同时认领那条路径（`two_agents_claiming_at_the_same_moment_do_not_both_start`）把 `two-claims/` 复制到临时目录，由测试里的假 `gh` 边回答边追加评论，所以它不需要自己的一套数据。
 
 ## push-vs-commit/
@@ -56,6 +77,9 @@ gh api "repos/$R/activity?ref=refs/heads/night%2Fissue-16&per_page=10" \
   | jq '[.[] | {id, activity_type, ref, before, after, timestamp}]'
 gh api "repos/$R/commits?sha=night%2Fissue-16&per_page=1" \
   | jq '[.[] | {sha, commit: {message: .commit.message, committer: {name: .commit.committer.name, date: .commit.committer.date}}}]'
+# priority/ 的打开的 issue 列表
+gh api "repos/$R/issues?state=open&per_page=100" \
+  | jq '[.[] | {number, title, state, labels: [.labels[] | {name}], body, html_url} + (if .pull_request then {pull_request: {}} else {} end)]'
 ```
 
 换了数据之后，`backend/tests/claims.rs` 里写死的时间（`--now` 和断言里的“几小时几分钟前”）要跟着改。

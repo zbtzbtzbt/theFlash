@@ -25,6 +25,18 @@ pub struct Issue {
     pub comments: Vec<Comment>,
 }
 
+/// An open issue as the priority queue needs it: its labels say its
+/// priority and state, and its body may say which issues must close
+/// first (#68). Comments are not read, so listing every open issue
+/// costs one request per hundred issues.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenIssue {
+    pub number: u64,
+    pub title: String,
+    pub labels: Vec<String>,
+    pub body: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Comment {
     /// GitHub's id, which rises with every comment. Two comments posted
@@ -95,6 +107,9 @@ struct ApiIssue {
     title: String,
     #[serde(default)]
     labels: Vec<ApiLabel>,
+    /// GitHub sends `null` for an issue opened with no description.
+    #[serde(default)]
+    body: Option<String>,
     /// Present on pull requests only; a pull request is not an issue the
     /// board claims.
     #[serde(default)]
@@ -156,6 +171,22 @@ fn issues_from_json(text: &str) -> Result<Vec<Issue>, Error> {
         .filter(|i| i.pull_request.is_none())
         .map(issue_from_api)
         .collect())
+}
+
+fn open_issues_from_json(text: &str) -> Result<Vec<OpenIssue>, Error> {
+    let list: Vec<ApiIssue> = from_json("打开的 issue 列表", text)?;
+    let mut out: Vec<OpenIssue> = list
+        .into_iter()
+        .filter(|i| i.pull_request.is_none())
+        .map(|i| OpenIssue {
+            number: i.number,
+            title: i.title,
+            labels: i.labels.into_iter().map(|l| l.name).collect(),
+            body: i.body.unwrap_or_default(),
+        })
+        .collect();
+    out.sort_by_key(|i| i.number);
+    Ok(out)
 }
 
 fn issue_from_json(text: &str) -> Result<Issue, Error> {
@@ -257,6 +288,13 @@ impl Snapshot {
         issue.comments =
             comments_from_json("评论", &read(dir, &format!("comments-{number}.json"))?)?;
         Ok(issue)
+    }
+
+    /// Every open issue from `open-issues.json`, the saved answer to
+    /// `issues?state=open`. It must be there: a queue read from a missing
+    /// file would say there is nothing to do.
+    pub fn replay_open_issues(dir: &Path) -> Result<Vec<OpenIssue>, Error> {
+        open_issues_from_json(&read(dir, "open-issues.json")?)
     }
 
     /// Branch evidence named by a separately loaded target issue.
@@ -391,6 +429,13 @@ impl Snapshot {
         Ok(issue)
     }
 
+    /// Every open issue in `repo`, with every page, pull requests left out.
+    pub fn fetch_open_issues(repo: &str) -> Result<Vec<OpenIssue>, Error> {
+        open_issues_from_json(&gh_api_list(&format!(
+            "repos/{repo}/issues?state=open&per_page=100"
+        ))?)
+    }
+
     /// Branch evidence named by a separately loaded target issue.
     pub fn fetch_pushes_for_issue(
         repo: &str,
@@ -475,6 +520,25 @@ pub fn add_label(repo: &str, number: u64, label: &str) -> Result<String, Error> 
         "--add-label",
         label,
     ])
+}
+
+/// Adds and removes labels in one edit, so an issue is never left with
+/// two priorities or none between two calls.
+pub fn edit_labels(
+    repo: &str,
+    number: u64,
+    add: &[&str],
+    remove: &[&str],
+) -> Result<String, Error> {
+    let number = number.to_string();
+    let mut args = vec!["issue", "edit", number.as_str(), "--repo", repo];
+    for label in add {
+        args.extend(["--add-label", label]);
+    }
+    for label in remove {
+        args.extend(["--remove-label", label]);
+    }
+    gh(&args)
 }
 
 pub fn remove_label(repo: &str, number: u64, label: &str) -> Result<String, Error> {

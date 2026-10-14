@@ -1,0 +1,121 @@
+[
+  {
+    "number": 69,
+    "title": "Agent 协作流水线：各站、状态和顺序写在一处，工作循环先收尾再开始",
+    "state": "open",
+    "labels": [
+      {
+        "name": "enhancement"
+      },
+      {
+        "name": "认领中"
+      },
+      {
+        "name": "P1"
+      }
+    ],
+    "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/69"
+  },
+  {
+    "number": 68,
+    "title": "issue 没有优先级：agent 认领时不分主次，按 P0～P3 定级并按优先级认领",
+    "state": "open",
+    "labels": [
+      {
+        "name": "enhancement"
+      },
+      {
+        "name": "认领中"
+      },
+      {
+        "name": "P1"
+      }
+    ],
+    "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/68"
+  },
+  {
+    "number": 51,
+    "title": "THEFLASH_REQUEST_GAP_MS 写错时，提示是“从…里找不到演出 ID”，说的不是这个变量",
+    "state": "open",
+    "labels": [
+      {
+        "name": "bug"
+      },
+      {
+        "name": "认领中"
+      },
+      {
+        "name": "P3"
+      }
+    ],
+    "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/51"
+  },
+  {
+    "number": 44,
+    "title": "手机推送：watch 结束前清空推送队列（finish_push）没有测试守护，删掉它全仓测试仍全绿",
+    "state": "open",
+    "labels": [
+      {
+        "name": "bug"
+      },
+      {
+        "name": "认领中"
+      },
+      {
+        "name": "P1"
+      }
+    ],
+    "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/44"
+  },
+  {
+    "number": 17,
+    "title": "长时间真实验证和定时验证改成 launchd 任务，结果自动贴到 issue",
+    "state": "open",
+    "labels": [
+      {
+        "name": "enhancement"
+      },
+      {
+        "name": "认领中"
+      },
+      {
+        "name": "P1"
+      }
+    ],
+    "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/17"
+  },
+  {
+    "number": 16,
+    "title": "认领改成带过期时间的租约，并写明要改哪些模块",
+    "state": "open",
+    "labels": [
+      {
+        "name": "enhancement"
+      },
+      {
+        "name": "认领中"
+      },
+      {
+        "name": "P1"
+      }
+    ],
+    "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/16"
+  },
+  {
+    "number": 14,
+    "title": "调度程序：有事才启动一个全新的 agent 会话，替代聊天窗口里的定时循环",
+    "state": "open",
+    "labels": [
+      {
+        "name": "enhancement"
+      },
+      {
+        "name": "认领中"
+      },
+      {
+        "name": "P1"
+      }
+    ],
+    "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/14"
+  }
+]

@@ -1,0 +1,9 @@
+[
+  {
+    "id": 6159934874,
+    "created_at": "2026-10-14T03:03:28Z",
+    "updated_at": "2026-10-14T03:03:28Z",
+    "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/25#issuecomment-6159934874",
+    "body": "## 优先级\n\n- agent: Claude\n- 时间: 2026-10-14T11:02:29+08:00\n- 优先级: P3（不重要，不紧急）\n- 原来: 没定\n- 重要: 否。用 gh 或 install.sh 下载的程序没有隔离属性，现在能直接运行；签名只影响用浏览器下载的人\n- 紧急: 否。要花钱，等 owner 裁决，没有时间点\n\n加了 `等裁决`：要 owner 决定，agent 不认领；先做不受它影响的部分。\n\n定级规则（两个轴各算什么、P0～P3 怎么排、怎么改级）见 #68。不同意就留一条新的 `## 优先级` 评论写明理由再改标签。\n\nAgent: Claude\n"
+  }
+]

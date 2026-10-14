@@ -1,0 +1,14 @@
+{
+  "number": 49,
+  "title": "仓库放在含中文或空格的路径下，前端测试找不到 theflash 程序（用 URL.pathname 拼路径）",
+  "state": "open",
+  "labels": [
+    {
+      "name": "bug"
+    },
+    {
+      "name": "P2"
+    }
+  ],
+  "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/49"
+}

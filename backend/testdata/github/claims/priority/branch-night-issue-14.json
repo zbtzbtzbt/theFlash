@@ -1,0 +1,82 @@
+[
+  {
+    "id": 46420782888,
+    "activity_type": "force_push",
+    "ref": "refs/heads/night/issue-14",
+    "before": "8c1fdc357742f1de4bf92473d7b9c015413daed2",
+    "after": "0755edab86498b652488806dff8a17b72421d17f",
+    "timestamp": "2026-10-14T03:04:49Z"
+  },
+  {
+    "id": 46420384540,
+    "activity_type": "push",
+    "ref": "refs/heads/night/issue-14",
+    "before": "8006c162004e0e274ab4ee50e199f6457991db86",
+    "after": "8c1fdc357742f1de4bf92473d7b9c015413daed2",
+    "timestamp": "2026-10-14T02:59:20Z"
+  },
+  {
+    "id": 46420236760,
+    "activity_type": "force_push",
+    "ref": "refs/heads/night/issue-14",
+    "before": "be955c10d1580bae90c9f629800cc6b49dd4eb53",
+    "after": "8006c162004e0e274ab4ee50e199f6457991db86",
+    "timestamp": "2026-10-14T02:57:02Z"
+  },
+  {
+    "id": 46420039544,
+    "activity_type": "push",
+    "ref": "refs/heads/night/issue-14",
+    "before": "fd68bd7b6192cb824171aa9d697b74d17380111b",
+    "after": "be955c10d1580bae90c9f629800cc6b49dd4eb53",
+    "timestamp": "2026-10-14T02:54:00Z"
+  },
+  {
+    "id": 46419953540,
+    "activity_type": "force_push",
+    "ref": "refs/heads/night/issue-14",
+    "before": "66052f8eba045b79277f0ce744f4dbd3bb3ee857",
+    "after": "fd68bd7b6192cb824171aa9d697b74d17380111b",
+    "timestamp": "2026-10-14T02:52:40Z"
+  },
+  {
+    "id": 46419727167,
+    "activity_type": "push",
+    "ref": "refs/heads/night/issue-14",
+    "before": "48c203998c196a4e25d766f77929bcb68abf22ec",
+    "after": "66052f8eba045b79277f0ce744f4dbd3bb3ee857",
+    "timestamp": "2026-10-14T02:49:12Z"
+  },
+  {
+    "id": 46419553695,
+    "activity_type": "force_push",
+    "ref": "refs/heads/night/issue-14",
+    "before": "f74f66a7b6c18ed31fbe04ec665baaabe1956d60",
+    "after": "48c203998c196a4e25d766f77929bcb68abf22ec",
+    "timestamp": "2026-10-14T02:46:32Z"
+  },
+  {
+    "id": 46419177596,
+    "activity_type": "push",
+    "ref": "refs/heads/night/issue-14",
+    "before": "3556851c12d6756f924d8ef8ba592364b0bc08a3",
+    "after": "f74f66a7b6c18ed31fbe04ec665baaabe1956d60",
+    "timestamp": "2026-10-14T02:40:47Z"
+  },
+  {
+    "id": 46419131603,
+    "activity_type": "force_push",
+    "ref": "refs/heads/night/issue-14",
+    "before": "6556446dc8d38e2c7f81fe107e876579a36273d6",
+    "after": "3556851c12d6756f924d8ef8ba592364b0bc08a3",
+    "timestamp": "2026-10-14T02:40:07Z"
+  },
+  {
+    "id": 46419123110,
+    "activity_type": "push",
+    "ref": "refs/heads/night/issue-14",
+    "before": "1ceeb4efbd9f6062c20adc7b1ded1ed8153276f7",
+    "after": "6556446dc8d38e2c7f81fe107e876579a36273d6",
+    "timestamp": "2026-10-14T02:40:00Z"
+  }
+]

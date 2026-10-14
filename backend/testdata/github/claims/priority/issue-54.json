@@ -1,0 +1,17 @@
+{
+  "number": 54,
+  "title": "辅助抢票缺的后半截：提前登录、核对观演人，开售时把已选好票档的确认页交给浏览器（#6）",
+  "state": "open",
+  "labels": [
+    {
+      "name": "enhancement"
+    },
+    {
+      "name": "question"
+    },
+    {
+      "name": "P1"
+    }
+  ],
+  "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/54"
+}

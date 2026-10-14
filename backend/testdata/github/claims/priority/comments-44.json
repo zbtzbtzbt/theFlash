@@ -1,0 +1,51 @@
+[
+  {
+    "id": 6155269747,
+    "created_at": "2026-10-13T21:10:49Z",
+    "updated_at": "2026-10-13T21:10:49Z",
+    "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/44#issuecomment-6155269747",
+    "body": "审查 PR #32 最终 head a725413 时又发现同一类的第二处覆盖缺口，记在这里，不另开 issue。\n\n**去掉 `Config` 上的 `deny_unknown_fields`，全仓测试依然全绿。**\n\n`backend/src/watch/push.rs`：\n\n```rust\n#[derive(Deserialize)]\n#[serde(tag = \"channel\", rename_all = \"lowercase\", deny_unknown_fields)]\nenum Config { Ntfy { .. } }\n```\n\n复现：把 `deny_unknown_fields` 删掉，`cargo test --lib watch::push`（3 passed）和 `cargo test --test push`（8 passed）都通过。\n\n`docs/subsystems/phone-push.md` 写的是「未知字段和渠道会拒绝，以免配置拼错而静默启用」。这半句只有「渠道」那一半有测试（`unsafe_permissions_and_invalid_config_do_not_leak_or_stop_the_watch` 把 `channel` 设成未知变体），「未知字段」那一半没有：用户把 `token` 拼成 `tokne` 时，现在会报配置无效，但没有测试守着这个行为。\n\n后果比 finish_push 轻，而且失败方向是安全的：拼错时推送以无认证发出，服务端拒绝，用户看到「服务器拒绝推送」，不泄漏任何东西。所以和 finish_push 一样是测试覆盖缺口，不是行为缺陷，没有挡住 #32 的合并（已合并，dab6050）。\n\n修的时候可以和 finish_push 的测试一起做：在 `push.rs` 的模块测试里给 `load_file` 喂一份带未知字段的 0600 配置，断言返回 `Err(\"配置 JSON 无效或渠道不支持\")`。\n\nAgent: Claude（PR #32 审查者）"
+  },
+  {
+    "id": 6159754606,
+    "created_at": "2026-10-14T02:47:29Z",
+    "updated_at": "2026-10-14T02:47:29Z",
+    "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/44#issuecomment-6159754606",
+    "body": "Codex（今晚第 5 线，issue-44）认领。已读 #20/#44 和手机推送设计，使用独立 worktree theFlash-lane5、分支 night/issue-44（origin/main c72af3d）。计划仅补 backend/tests/push.rs 的风控自行退出投递回归，以及 backend/src/watch/push.rs 的未知字段配置模块测试；逐次删除 finish_push / deny_unknown_fields 验证真正 FAIL，恢复后临时 HOME make check、PR 双平台 CI，再交独立审查。无行为改动、新依赖或新 ADR，不访问真实大麦/ntfy，不碰其他进程。预计 1 小时以内。Agent: Codex"
+  },
+  {
+    "id": 6159765361,
+    "created_at": "2026-10-14T02:48:27Z",
+    "updated_at": "2026-10-14T02:48:27Z",
+    "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/44#issuecomment-6159765361",
+    "body": "## 认领\n\n- agent: Codex\n- 开始时间: 2026-10-14T10:48:18+08:00\n- 改动模块: backend/tests/push.rs, backend/src/watch/push.rs\n- 分支: night/issue-44\n\n心跳至少每 30 分钟一次（`scripts/claims heartbeat` 或推一次分支）；超过 120 分钟没有更新，这条认领就过期，别的 agent 可以收回（#16）。\n\nAgent: Codex\n"
+  },
+  {
+    "id": 6159785056,
+    "created_at": "2026-10-14T02:50:11Z",
+    "updated_at": "2026-10-14T02:50:11Z",
+    "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/44#issuecomment-6159785056",
+    "body": "两处新增测试的负向验证已完成：删 env.finish_push().await 后 risk_control_push_finishes_before_the_watch_exits 真 FAIL（risk-control alert was not pushed once，left 0/right 1）；删 Config 的 deny_unknown_fields 后 config_rejects_unknown_fields_in_an_otherwise_valid_file 真 FAIL（unknown configuration field tokne was silently accepted）。两次 cargo test 均编译成功、退出101，非跳过/编译错误，生产代码已逐字恢复。风控测试用原始 risk_control.html，让 watch 自行退出后核对推送与终端正文，200/延迟503两种响应；未知字段用0600配置并确认正常配置仍可读取。正在临时 HOME 全量检查，无真实大麦/ntfy访问。Agent: Codex"
+  },
+  {
+    "id": 6159859163,
+    "created_at": "2026-10-14T02:56:48Z",
+    "updated_at": "2026-10-14T02:56:48Z",
+    "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/44#issuecomment-6159859163",
+    "body": "Codex 第 5 线 #44 的实现与离线验证已完成，保存为 **draft PR #66**：https://github.com/zbtzbtzbt/theFlash/pull/66\n\nhead `fb80b6be1e03c0a7a9c95292801d58d9fef931bb`，rebase main `fd68bd7b6192cb824171aa9d697b74d17380111b`。只补两份文件中的测试/helper，不改生产行为、新依赖、地址、CI或发布；无新ADR。\n\n验收证据：\n1. 删除 `env.finish_push().await`：`cargo test --offline --test push risk_control_push_finishes_before_the_watch_exits -- --exact --nocapture`，编译成功后真正FAIL、退出101，`risk-control alert was not pushed once; left: 0 / right: 1`。\n2. 删除 `Config` 的 `deny_unknown_fields`：`cargo test --offline --lib watch::push::tests::config_rejects_unknown_fields_in_an_otherwise_valid_file -- --exact --nocapture`，编译成功后真正FAIL、退出101，`unknown configuration field tokne was silently accepted`。\n3. 两处在rebase前/后都逐个破坏与恢复，恢复后同一命令各1 passed；push模块4 passed，全量端到端push9 passed。风控测试回放原始risk_control.html，让进程自行退出后检查最后一条推送、标题/正文、退出码和无追加大麦请求；注入200ms响应延迟、覆盖200/503，503失败结果须在退出前打码报告。\n4. 沙箱：两个make check及破坏验证均临时HOME/XDG_CONFIG_HOME；每个CLI另有独立临时HOME，support helper接离线陷阱和本机fixture，服务器/子进程/reader随测试回收，不读真实配置。\n5. 两轮 `make check` 退出0；最新main fd68bd7上的一轮Python43/Rust336/Vitest34 passed+1设计内skipped，fmt/clippy -D warnings/test/build/Biome/tsc/前端build/docs-index全部通过。`git diff --check`通过，`git show --stat HEAD`仅backend/src/watch/push.rs和backend/tests/push.rs。\n6. UI/computer use/宽窄截图：没跑，无UI改动。真实大麦/ntfy/手机送达：没跑，任务明确要求仅补离线测试、不访问真实大麦；未登录/下单/拿锁/改hosts，不干扰已有watch/caffeinate。不发版。\n\n**卡在CI账单/额度，不能交待审查**：[Test 38503614031](https://github.com/zbtzbtzbt/theFlash/actions/runs/38503614031)两平台completed/failure、steps=[]，两个failure annotation均为 recent account payments have failed or your spending limit needs to be increased；不是代码失败，也不满足仅macOS排队的放行条件。最新main同样受阻，统一由[#63](https://github.com/zbtzbtzbt/theFlash/issues/63)跟踪。未修改付款/额度/必需CI。\n\n接续：owner恢复GitHub账单/额度后重跑本PR Test；双平台完整绿后核对main冲突、必要时rebase/重跑make check/push，更新head的CI证据，再 `gh pr ready 66` 和加`待审查`。结束前PR MERGEABLE、合并探针退出0、工作区干净。没有合并PR、给#44加待验收或关闭#44。\n\n完整两次破坏输出和命令在PR正文；本机日志在指定worktree `backend/target/issue44/`。最终状态写 `/Users/zbt/Desktop/theFlash-night/status/issue-44.md`。\n\nAgent: Codex\n"
+  },
+  {
+    "id": 6159871029,
+    "created_at": "2026-10-14T02:57:53Z",
+    "updated_at": "2026-10-14T02:57:53Z",
+    "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/44#issuecomment-6159871029",
+    "body": "收尾补充：main已前进到97fbc3a（#58收尾规则、#53 docs-index测试），合并探针仍退出0，PR #66仍MERGEABLE。全量检查绑定fd68bd7+本PR，CI恢复后须在当时最新main重新复检。status/issue-44.md已写入最终状态、CI账单失败证据与接续步骤；自建临时HOME已清理，指定lane5为派发提供的既有worktree，保留。PR维持draft且无待审查标签，#44保持打开。Agent: Codex"
+  },
+  {
+    "id": 6159938421,
+    "created_at": "2026-10-14T03:03:47Z",
+    "updated_at": "2026-10-14T03:03:47Z",
+    "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/44#issuecomment-6159938421",
+    "body": "## 优先级\n\n- agent: Claude\n- 时间: 2026-10-14T11:02:29+08:00\n- 优先级: P1（重要，不紧急）\n- 原来: 没定\n- 重要: 是。finish_push 没有守护，一删掉，风控停止的提醒就到不了手机；测试守不住它要守的保证，是地基上的洞\n- 紧急: 否。现在的行为是对的，缺的只是测试\n\n定级规则（两个轴各算什么、P0～P3 怎么排、怎么改级）见 #68。不同意就留一条新的 `## 优先级` 评论写明理由再改标签。\n\nAgent: Claude\n"
+  }
+]

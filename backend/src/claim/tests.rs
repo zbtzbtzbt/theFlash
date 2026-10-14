@@ -535,8 +535,10 @@ fn the_comments_the_commands_post_read_back_as_what_they_are() {
         Some(at("2026-10-14T05:00:00+08:00")),
         &[],
         None,
+        Some("队列里还有比 P2 高、现在就能做的 #3（P1）；#3 要访问真实大麦"),
         now,
     );
+    assert!(body.contains("- 不按顺序: 队列里还有"), "{body}");
     let read = lease::parse_claim(&body, "u", now).expect("a posted claim reads back as a claim");
     assert_eq!(read.agent, "DemoAgent");
     assert_eq!(read.modules, ["docs/demo/claim-lease-demo.md"]);

@@ -10,17 +10,28 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use chrono::{DateTime, Utc};
+use theflash::claim::priority::{self, Held, Level, Priority, Queue};
 use theflash::claim::{
-    self, Board, Issue, Lease, Snapshot, Status, Trouble, lease, minutes, short, snapshot, stamp,
+    self, Board, Issue, Lease, OpenIssue, Snapshot, Status, Trouble, lease, minutes, short,
+    snapshot, stamp,
 };
 
 const USAGE: &str = "用法：
+  claims queue [--agent <名字>] [--json]
+                              现在可以开工的 issue，按优先级排（P0 到 P3，
+                              没定级的在最前面），以及其他 issue 为什么不在里面
   claims list [--repo <owner/name>] [--json] [--now <时间>]
                               列出所有进行中的认领：哪个 agent、改哪些模块、
                               最后更新时间、是否已过期
+  claims triage --issue <号> --agent <名字> --priority <P0～P3>
+                --important <为什么重要或不重要> --urgent <为什么紧急或不紧急> [--dry-run]
+                              定级或改级：发一条 ## 优先级 评论，再换标签
   claims claim --issue <号> --agent <名字> --modules <路径,路径>
-               [--branch <分支>] [--due <时间>] [--overlap <怎么分工>] [--dry-run]
-                              认领一个 issue：加 认领中 标签，发一条认领评论
+               [--branch <分支>] [--due <时间>] [--overlap <怎么分工>]
+               [--out-of-order <为什么不按队列>] [--dry-run]
+                              认领一个 issue：加 认领中 标签，发一条认领评论。
+                              没定级、等裁决、依赖没关、或者队列里有更高优先级
+                              的 issue 时拒绝，除非用 --out-of-order 写明理由
   claims heartbeat --issue <号> --agent <名字> --note <进度> [--dry-run]
                               在 issue 上报一次进度，刷新租约
   claims reclaim --issue <号> --agent <名字> [--dry-run]
@@ -29,7 +40,8 @@ const USAGE: &str = "用法：
   和 --now <时间>（RFC3339，默认现在）。
 
 退出码：0 做了 / 可以做，1 拒绝，2 用法或取数据出错。
-租约格式、心跳和过期规则见 docs/subsystems/claim-lease.md。";
+租约格式、心跳和过期规则见 docs/subsystems/claim-lease.md，
+优先级怎么定、队列怎么排见 docs/subsystems/issue-priority.md。";
 
 const DEFAULT_REPO: &str = "zbtzbtzbt/theFlash";
 
@@ -44,7 +56,9 @@ fn main() -> ExitCode {
         return usage();
     }
     match *command {
+        "queue" => queue(&options),
         "list" => list(&options),
+        "triage" => triage(&options),
         "claim" => claim_one(&options),
         "heartbeat" => heartbeat(&options),
         "reclaim" => reclaim(&options),
@@ -66,7 +80,11 @@ struct Options {
     branch: Option<String>,
     due: Option<String>,
     overlap: Option<String>,
+    out_of_order: Option<String>,
     note: Option<String>,
+    priority: Option<Priority>,
+    important: Option<String>,
+    urgent: Option<String>,
     replay: Option<PathBuf>,
     now: Option<String>,
     json: bool,
@@ -86,7 +104,11 @@ impl Options {
                 "--branch" => self.branch = Some(value()?),
                 "--due" => self.due = Some(value()?),
                 "--overlap" => self.overlap = Some(value()?),
+                "--out-of-order" => self.out_of_order = Some(value()?),
                 "--note" => self.note = Some(value()?),
+                "--priority" => self.priority = Some(Priority::parse(&value()?).ok_or(())?),
+                "--important" => self.important = Some(value()?),
+                "--urgent" => self.urgent = Some(value()?),
                 "--replay" => self.replay = Some(PathBuf::from(value()?)),
                 "--now" => self.now = Some(value()?),
                 "--json" => self.json = true,
@@ -154,6 +176,21 @@ impl Options {
         }
         .map_err(fetch_failed)
     }
+
+    /// Every open issue with its labels and body, which is what the
+    /// priority queue is computed from.
+    fn open_issues(&self) -> Result<Vec<OpenIssue>, ExitCode> {
+        match &self.replay {
+            Some(dir) => Snapshot::replay_open_issues(dir),
+            None => Snapshot::fetch_open_issues(self.repo()),
+        }
+        .map_err(fetch_failed)
+    }
+
+    /// `--agent`, when one was given: `queue` works without it.
+    fn some_agent(&self) -> Option<&str> {
+        self.agent.as_deref().filter(|a| !a.trim().is_empty())
+    }
 }
 
 fn fetch_failed(e: snapshot::Error) -> ExitCode {
@@ -169,6 +206,244 @@ fn split_modules(value: &str) -> Vec<String> {
         .filter(|m| !m.is_empty())
         .map(str::to_string)
         .collect()
+}
+
+/// What can be started now, by priority. Exit code 0 even when nothing
+/// can: an empty queue is an answer, not a failure.
+fn queue(options: &Options) -> ExitCode {
+    let now = match options.now() {
+        Ok(n) => n,
+        Err(code) => return code,
+    };
+    let board = match options.board() {
+        Ok(b) => b,
+        Err(code) => return code,
+    };
+    let open = match options.open_issues() {
+        Ok(o) => o,
+        Err(code) => return code,
+    };
+    let agent = options.some_agent();
+    let q = priority::queue(&open, &board, agent, now);
+    if options.json {
+        println!("{}", queue_json(&q, now));
+    } else {
+        print_queue(&q, agent, now);
+    }
+    ExitCode::SUCCESS
+}
+
+fn print_queue(q: &Queue, agent: Option<&str>, now: DateTime<Utc>) {
+    println!(
+        "可以开工的 issue（{} 北京时间{}）：P0 到 P3，同一档里号小的在前",
+        short(now),
+        agent
+            .map(|a| format!("，按 {a} 能认领的算"))
+            .unwrap_or_default()
+    );
+    let mut heading: Option<String> = None;
+    for r in &q.ready {
+        let this = match &r.level {
+            Level::Set(p) => format!("{} {}", p.label(), p.meaning()),
+            _ => "没定优先级：先定级再排队（`scripts/claims triage --issue <号> --agent <你> \
+                  --priority <P0～P3> --important <…> --urgent <…>`）"
+                .to_string(),
+        };
+        if heading.as_ref() != Some(&this) {
+            println!("\n{this}");
+            heading = Some(this);
+        }
+        let mut line = format!("  #{} {}", r.issue, r.title);
+        if let Level::Several(_) = r.level {
+            line.push_str(&format!("（同时标着 {}）", r.level.describe()));
+        }
+        if let Some(a) = &r.assigned_to {
+            line.push_str(&format!("（{}{a}）", lease::ASSIGNED_PREFIX));
+        }
+        println!("{line}");
+        for note in &r.notes {
+            println!("      {note}");
+        }
+    }
+    if q.ready.is_empty() {
+        println!("\n没有可以开工的 issue。");
+    }
+    if !q.waiting.is_empty() {
+        println!("\n不在队列里的 {} 个：", q.waiting.len());
+        for kind in [
+            "认领中",
+            "认领读不出来",
+            "待验收",
+            "等裁决",
+            "被依赖挡着",
+            "指派给别人",
+        ] {
+            let these: Vec<String> = q
+                .waiting
+                .iter()
+                .filter(|w| w.held.name() == kind)
+                .map(|w| {
+                    let detail = match &w.held {
+                        Held::Claimed { agent } => agent.clone(),
+                        Held::Blocked(by) => format!(
+                            "等 {}",
+                            by.iter()
+                                .map(|n| format!("#{n}"))
+                                .collect::<Vec<_>>()
+                                .join("、")
+                        ),
+                        Held::AssignedTo(a) => a.clone(),
+                        _ => String::new(),
+                    };
+                    let mut parts = vec![w.level.describe()];
+                    if !detail.is_empty() {
+                        parts.push(detail);
+                    }
+                    format!("#{}（{}）", w.issue, parts.join("，"))
+                })
+                .collect();
+            if !these.is_empty() {
+                println!("  {kind}：{}", these.join("、"));
+            }
+        }
+    }
+    match q.next() {
+        Some(r) => println!(
+            "\n下一个：#{}（{}）{}\n  scripts/claims claim --issue {} --agent {} --modules <要改的路径> --branch <分支>",
+            r.issue,
+            r.level.describe(),
+            r.title,
+            r.issue,
+            agent.unwrap_or("<你>")
+        ),
+        None if q.ready.is_empty() => {}
+        None => println!("\n队列里只有没定级的：先定级，才知道下一个是谁。"),
+    }
+}
+
+/// The queue as one JSON object, for the dispatcher.
+fn queue_json(q: &Queue, now: DateTime<Utc>) -> String {
+    let ready: Vec<serde_json::Value> = q
+        .ready
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "issue": r.issue,
+                "title": r.title,
+                "priority": r.level.priority().map(Priority::label),
+                "level": r.level.describe(),
+                "assigned_to": r.assigned_to,
+                "notes": r.notes,
+            })
+        })
+        .collect();
+    let waiting: Vec<serde_json::Value> = q
+        .waiting
+        .iter()
+        .map(|w| {
+            let mut entry = serde_json::json!({
+                "issue": w.issue,
+                "title": w.title,
+                "priority": w.level.priority().map(Priority::label),
+                "level": w.level.describe(),
+                "why": w.held.name(),
+            });
+            match &w.held {
+                Held::Claimed { agent } => entry["agent"] = agent.clone().into(),
+                Held::Blocked(by) => entry["blocked_by"] = by.clone().into(),
+                Held::AssignedTo(a) => entry["assigned_to"] = a.clone().into(),
+                _ => {}
+            }
+            entry
+        })
+        .collect();
+    serde_json::json!({
+        "now": stamp(now),
+        "next": q.next().map(|r| r.issue),
+        "ready": ready,
+        "waiting": waiting,
+    })
+    .to_string()
+}
+
+/// Sets an issue's priority: posts the `## 优先级` comment, then swaps
+/// the label, so a label change always has its reason on the issue.
+fn triage(options: &Options) -> ExitCode {
+    let (Some(number), Some(new)) = (options.issue, options.priority) else {
+        return usage();
+    };
+    let reasons = (
+        options.important.as_deref().map(str::trim),
+        options.urgent.as_deref().map(str::trim),
+    );
+    let (Some(important), Some(urgent)) = reasons else {
+        return usage();
+    };
+    if options.agent().is_empty() || important.is_empty() || urgent.is_empty() {
+        return usage();
+    }
+    let now = match options.now() {
+        Ok(n) => n,
+        Err(code) => return code,
+    };
+    let open = match options.open_issues() {
+        Ok(o) => o,
+        Err(code) => return code,
+    };
+    let Some(issue) = open.iter().find(|i| i.number == number) else {
+        println!("拒绝 — #{number} 不在打开的 issue 里（已经关了，或者是 PR），不用定级");
+        return ExitCode::FAILURE;
+    };
+    let old = priority::level(&issue.labels);
+    if old == Level::Set(new) {
+        println!(
+            "#{number} 已经是 {}（{}），没有改",
+            new.label(),
+            new.meaning()
+        );
+        return ExitCode::SUCCESS;
+    }
+    let body = priority::triage_comment(options.agent(), new, &old, important, urgent, now);
+    let remove: Vec<&str> = Priority::ALL
+        .into_iter()
+        .filter(|p| *p != new && issue.labels.iter().any(|l| l == p.label()))
+        .map(Priority::label)
+        .collect();
+    println!("要发的定级评论：\n{body}");
+    println!(
+        "要改的标签：加上 {}{}",
+        new.label(),
+        if remove.is_empty() {
+            String::new()
+        } else {
+            format!("，去掉 {}", remove.join("、"))
+        }
+    );
+    if !options.writes() {
+        println!("没有真的发评论、没有改标签（--dry-run 或 --replay）");
+        return ExitCode::SUCCESS;
+    }
+    if let Err(code) = comment(options, number, &body) {
+        return code;
+    }
+    match snapshot::edit_labels(options.repo(), number, &[new.label()], &remove) {
+        Ok(_) => {
+            println!("#{number} 现在是 {}", new.label());
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!(
+                "{e}\n定级评论已经发出去了，标签没改成：\
+                 `gh issue edit {number} --add-label {}{}` 补上",
+                new.label(),
+                remove
+                    .iter()
+                    .map(|l| format!(" --remove-label {l}"))
+                    .collect::<String>()
+            );
+            ExitCode::from(2)
+        }
+    }
 }
 
 /// Every claim in progress. Exit code 0 even when there are none: asking
@@ -380,6 +655,21 @@ fn claim_one(options: &Options) -> ExitCode {
     let claim::Verdict::Ok { overlaps } = &verdict else {
         return refused(&verdict);
     };
+    // The lease checks come first: "somebody else holds it" is the more
+    // specific thing to be told than "it is not the next in the queue".
+    let open = match options.open_issues() {
+        Ok(o) => o,
+        Err(code) => return code,
+    };
+    let queue = priority::queue(&open, &board, Some(options.agent()), now);
+    let out_of_order =
+        match priority::decide(&open, &queue, number, options.out_of_order.as_deref()) {
+            priority::Verdict::Ok { out_of_order } => out_of_order,
+            priority::Verdict::Refuse(why) => {
+                println!("拒绝 — {why}");
+                return ExitCode::FAILURE;
+            }
+        };
     let body = claim::claim_comment(
         options.agent(),
         &options.modules,
@@ -387,8 +677,12 @@ fn claim_one(options: &Options) -> ExitCode {
         due,
         overlaps,
         options.overlap.as_deref(),
+        out_of_order.as_deref(),
         now,
     );
+    if let Some(note) = &out_of_order {
+        println!("注意：没按优先级队列认领，已按 --out-of-order 写进认领评论（{note}）");
+    }
     if !overlaps.is_empty() {
         println!(
             "注意：和进行中的认领重叠，已按 --overlap 写进认领评论（{}）",
