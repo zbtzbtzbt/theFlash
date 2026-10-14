@@ -1,4 +1,4 @@
-<!-- reviewed-through: dfc75d0 (2026-10-14 15:23 +0800) -->
+<!-- reviewed-through: 02b5e52 (2026-10-14 15:28 +0800) -->
 # 已合并工作的教训
 
 本项目的代码由 agent 编写、审查、合并和发布。每天夜里有一个复盘 agent 检查当天的 commit：哪些改动后来又被返工、哪些不该合并、哪些验证得太薄。学到的东西记在这里。改代码之前先读这份文件。
@@ -68,9 +68,12 @@
 - Done right on 10-14: `de69a92`（#102/#134）——merge-gate 合入后自动加标签并留评论，避免实现完成却停在“没人验收”。
 - Seen 1× (2026-10-14)。
 
-**调度 implement 必须走 claims queue，不能自己挑顺手的 issue。**
+**调度 implement 必须走 claims queue；租约存活判定必须与 `claims queue` 共用同一套 `read_lease`（含推送续租与评论 URL）。**
 - Done right on 10-14: `8543ea9`（#103/#135）——dispatch 跳过等裁决、未定级和被依赖挡住的；与 #68 队列一致。
-- Seen 1× (2026-10-14)。
+- `8543ea9` 之后仍有三处分歧：不读 branch push 把活租约当过期、`Unreadable` 当成已交回、心跳/收回认领不绑定评论 URL。Done right on 10-14: `02b5e52`（#103/#157）——复用 `claim::read_lease` + `replay_pushes_for_issue`；对照测试钉住与 queue 序列一致。
+- 怎么避免：dispatch 与 claims 对「谁在干」只能有一份实现；改任一侧前跑「两侧 next 必须相同」的对照测试。
+- Seen 2× (2026-10-14)。
+- **注意**：`02b5e52` 的合入本身绕过了合并闸门（见「合并与关闭」），代码补强有效，流程不算过关。
 
 **用户可见的失败说明要分清“样本集丢了”和“候选丢了”，别用同一句话吓定时任务。**
 - Done right on 10-14: `44bbbfd`（#125/#137）——只有样本集真没写下来才说下一次不接着走。
@@ -192,10 +195,12 @@
 - 怎么避免：合并脚本 / merge-gate（`f56b3c0`，#15）要求独立审查记录且审查者 ≠ 实现者；人不要对「子 agent」网开一面。发现验收者动了代码 → `验收未通过` + 换实现者。
 - Seen 1× (2026-10-14)。
 
-**没有写明「在哪个 head 上跑了什么」的独立审查记录，就不能合。**
+**没有写明「在哪个 head 上跑了什么」的独立审查记录，就不能合；squash 正文里必须有「合并闸门：审查者…」一段。**
 - #13：PR #12 在审查记录写完前已被合并（mergedBy 为 owner 账号，具体操作者未区分）。
-- Done right on 10-14: `f56b3c0` merge-gate ——CI 绿、独立审查、head 匹配才合。注意：合入 merge-gate 本身的那次 push 仍需确认是否走过闸门；闸门要守住以后的 PR。
-- Seen 1× (2026-10-14)。
+- Done right on 10-14: `f56b3c0` merge-gate ——CI 绿、独立审查、head 匹配才合。
+- **又见**：`02b5e52`（PR #157 / #103）——squash 合入 main，正文无「合并闸门」段；PR 上 comments/reviews 皆空，仅有 `待审查` 标签。业务补强有测试，但是一次闸门外合并。见跟踪 issue。
+- 怎么避免：合入只用 `scripts/merge-gate merge`；hygiene 对每个无闸门段的 first-parent 提交开 issue。禁止 `gh pr merge` / 网页 Merge。
+- Seen 2× (2026-10-14)。
 
 **写「通过」之前必须消化同 PR 上仍有效的「要修改」场景；闸门只认最后一条记录，消化不了的缺陷会进 main。**
 - PR #127（合入 `3914732`）：Codex 在 `aa6a8cf` 上写了「要修改」（预算未读旧样本却报换掉），随后另一条「通过」经闸门合入；缺陷进 main，只能另开 PR #150 / `a3e3f8d` 返工。
@@ -205,9 +210,10 @@
 ## 架构摇摆
 
 **定义模块边界或进程模型时，同一改动里写决定记录；写了“何时重评”就要在条件成立时重评，不要装没看见。**
-- #3 / `0dbf6fc`（决定原本地编号与 #2 撞车后应视为 UI 那条）：选 Node 起服务 + `execFile` 调 debug 路径的 Rust；记录里写“长期运行任务成为需求时重评”。同日 #2 的 `theflash watch` 已上 main，条件已成立，却仍合并了 Node 方案；`frontend/src/query.ts` 仍写死 `backend/target/debug/theflash`。后续 #26 跟踪发布形态。
+- #3 / `0dbf6fc`（决定原本地编号与 #2 撞车后应视为 UI 那条）：选 Node 起服务 + `execFile` 调 debug 路径的 Rust；记录里写“长期运行任务成为需求时重评”。同日 #2 的 `theflash watch` 已上 main，条件已成立，却仍合并了 Node 方案；`frontend/src/query.ts` 仍写死 `backend/target/debug/theflash`。
+- Done right on 10-14: `6c22bc4`（#26/#152）——决定 `0013-standalone-event-ui` 取代 0004：`theflash serve` 单二进制内嵌界面，只绑 `127.0.0.1`，校 Host/Origin/CSP；`resolveBinary()` 不再写死 debug。有 `cargo test --test serve` 与 Vitest 改动前失败记录。恶意扫描：`open`/`xdg-open` 只开本机 URL，无陌生出站。
 - 怎么避免：审查时对照决定记录的“后果 / 重评条件”；条件已成立而正文不提 → 打回或开取代决定的新记录。
-- Seen 1× (2026-10-14)。
+- Seen 2× (2026-10-14)。
 
 ## 已升级进 code standards
 
