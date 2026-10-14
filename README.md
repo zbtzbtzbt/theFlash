@@ -36,8 +36,8 @@ sh install.sh
 安装指定的版本，包括预发布：
 
 ```sh
-gh release download v0.1.0-rc.1 --repo zbtzbtzbt/theFlash --pattern install.sh --clobber
-sh install.sh v0.1.0-rc.1
+gh release download v0.1.0-rc.2 --repo zbtzbtzbt/theFlash --pattern install.sh --clobber
+sh install.sh v0.1.0-rc.2
 ```
 
 `install.sh` 按本机平台选文件，先校验 SHA256，对不上就什么都不装。要装到别的目录，设置 `THEFLASH_INSTALL_DIR`。
