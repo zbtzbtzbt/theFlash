@@ -66,6 +66,9 @@ pub struct Snapshot {
     pub issues: Vec<Issue>,
     pub pulls: Vec<Pull>,
     pub main_checks: MainChecks,
+    /// The Test run `main_checks` comes from, so a second failing run is a
+    /// second piece of work rather than the one already dispatched.
+    pub main_run: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -142,20 +145,55 @@ struct ApiRuns {
 #[derive(Deserialize)]
 struct ApiRun {
     #[serde(default)]
+    id: u64,
+    #[serde(default)]
     status: String,
     #[serde(default)]
     conclusion: Option<String>,
 }
 
-fn from_json<T: serde::de::DeserializeOwned>(what: &str, text: &str) -> Result<T, Error> {
-    serde_json::from_str(text).map_err(|e| Error::Json {
-        what: what.to_string(),
-        why: e.to_string(),
-    })
+/// Every element of a `gh api --paginate` answer. `--paginate` prints one
+/// independent JSON document per page rather than one merged array, so
+/// reading the text as a single value works only while the answer fits in
+/// one page: the first issue with more than 100 comments would otherwise
+/// make the whole tick fail and nothing be dispatched at all.
+fn pages<T: serde::de::DeserializeOwned>(what: &str, text: &str) -> Result<Vec<T>, Error> {
+    if text.trim().is_empty() {
+        return Err(Error::Json {
+            what: what.to_string(),
+            why: "什么都没返回".to_string(),
+        });
+    }
+    let mut out = Vec::new();
+    for page in serde_json::Deserializer::from_str(text).into_iter::<Vec<T>>() {
+        out.extend(page.map_err(|e| Error::Json {
+            what: what.to_string(),
+            why: e.to_string(),
+        })?);
+    }
+    Ok(out)
+}
+
+/// The same, for endpoints whose page is an object wrapping the list.
+fn object_pages<T: serde::de::DeserializeOwned>(what: &str, text: &str) -> Result<Vec<T>, Error> {
+    if text.trim().is_empty() {
+        return Err(Error::Json {
+            what: what.to_string(),
+            why: "什么都没返回".to_string(),
+        });
+    }
+    let mut out = Vec::new();
+    for page in serde_json::Deserializer::from_str(text).into_iter::<T>() {
+        out.push(page.map_err(|e| Error::Json {
+            what: what.to_string(),
+            why: e.to_string(),
+        })?);
+    }
+    Ok(out)
 }
 
 fn issues_from_json(text: &str) -> Result<Vec<Issue>, Error> {
-    let list: Vec<ApiIssue> = from_json("issue 列表", text)?;
+    let list: Vec<ApiIssue> = pages("issue 列表", text)?;
     let mut out: Vec<Issue> = list
         .into_iter()
         .filter(|i| i.pull_request.is_none())
@@ -172,7 +210,7 @@ fn issues_from_json(text: &str) -> Result<Vec<Issue>, Error> {
 }
 
 fn pulls_from_json(text: &str) -> Result<Vec<Pull>, Error> {
-    let list: Vec<ApiPull> = from_json("pull request 列表", text)?;
+    let list: Vec<ApiPull> = pages("pull request 列表", text)?;
     let mut out: Vec<Pull> = list
         .into_iter()
         .map(|p| {
@@ -192,22 +230,26 @@ fn pulls_from_json(text: &str) -> Result<Vec<Pull>, Error> {
     Ok(out)
 }
 
-/// What the Test runs on main say, newest first. A run still going means
-/// "wait"; a cancelled run says nothing, so the next older one answers.
-fn checks_from_json(text: &str) -> Result<MainChecks, Error> {
-    let runs: ApiRuns = from_json("main 上 Test 的 run", text)?;
-    for run in &runs.workflow_runs {
+/// What the Test runs on main say, newest first, and the id of the run
+/// that said it. A run still going means "wait"; a cancelled run says
+/// nothing, so the next older one answers. The id is what makes one red
+/// main different from the next: a fix that was already dispatched for
+/// run 38456076570 says nothing about the run that failed after it.
+fn checks_from_json(text: &str) -> Result<(MainChecks, Option<u64>), Error> {
+    let runs: Vec<ApiRuns> = object_pages("main 上 Test 的 run", text)?;
+    for run in runs.iter().flat_map(|page| &page.workflow_runs) {
+        let id = Some(run.id).filter(|id| *id != 0);
         if run.status != "completed" {
-            return Ok(MainChecks::Running);
+            return Ok((MainChecks::Running, id));
         }
         match run.conclusion.as_deref() {
-            Some("failure" | "timed_out") => return Ok(MainChecks::Red),
-            Some("success" | "neutral") => return Ok(MainChecks::Green),
+            Some("failure" | "timed_out") => return Ok((MainChecks::Red, id)),
+            Some("success" | "neutral") => return Ok((MainChecks::Green, id)),
             // cancelled, skipped, stale: nothing happened, look further back.
             _ => {}
         }
     }
-    Ok(MainChecks::Unknown)
+    Ok((MainChecks::Unknown, None))
 }
 
 /// The agent named by an `Agent: <名字>` signature or a claim field
@@ -269,19 +311,21 @@ impl Snapshot {
             };
             apply_comments(issue, &text)?;
         }
+        let (main_checks, main_run) = match optional(dir, "main-test-runs.json") {
+            Some(text) => checks_from_json(&text)?,
+            None => (MainChecks::Unknown, None),
+        };
         Ok(Snapshot {
             issues,
             pulls: pulls_from_json(&read(dir, "pulls.json")?)?,
-            main_checks: match optional(dir, "main-test-runs.json") {
-                Some(text) => checks_from_json(&text)?,
-                None => MainChecks::Unknown,
-            },
+            main_checks,
+            main_run,
         })
     }
 }
 
 fn apply_comments(issue: &mut Issue, text: &str) -> Result<(), Error> {
-    let list: Vec<ApiComment> = from_json("评论", text)?;
+    let list: Vec<ApiComment> = pages("评论", text)?;
     let mut comments: Vec<(DateTime<Utc>, String)> = Vec::new();
     for c in list {
         let Some(created_at) = c.created_at.filter(|t| !t.is_empty()) else {
@@ -384,7 +428,7 @@ pub fn fetch(gh_command: &[String], repo: &str, workflow: &str) -> Result<Snapsh
             format!("repos/{repo}/pulls?state=open&per_page=100"),
         ],
     )?)?;
-    let main_checks = checks_from_json(&gh(
+    let (main_checks, main_run) = checks_from_json(&gh(
         gh_command,
         &[
             "api".to_string(),
@@ -395,6 +439,7 @@ pub fn fetch(gh_command: &[String], repo: &str, workflow: &str) -> Result<Snapsh
         issues,
         pulls,
         main_checks,
+        main_run,
     })
 }
 

@@ -121,6 +121,7 @@ fn each_event_goes_to_the_role_that_handles_it() {
             pull(62, &[], Some("claude"), None),
         ],
         main_checks: MainChecks::Green,
+        main_run: None,
     };
     let plan = decide(
         &snapshot,
@@ -164,6 +165,7 @@ fn reviewing_and_accepting_go_to_another_vendor_than_the_implementer() {
         issues: vec![issue(51, &["待验收"], Some("claude"))],
         pulls: vec![pull(60, &["待审查"], Some("claude"), None)],
         main_checks: MainChecks::Green,
+        main_run: None,
     };
     let plan = decide(
         &snapshot,
@@ -189,6 +191,7 @@ fn work_whose_implementer_is_unknown_is_left_alone() {
         issues: vec![issue(51, &["待验收"], None)],
         pulls: vec![pull(60, &["待审查"], None, None)],
         main_checks: MainChecks::Green,
+        main_run: None,
     };
     let plan = decide(
         &snapshot,
@@ -207,6 +210,7 @@ fn one_issue_never_has_two_sessions() {
         issues: vec![issue(51, &["待验收"], Some("claude"))],
         pulls: vec![pull(60, &["待审查"], Some("claude"), Some(51))],
         main_checks: MainChecks::Green,
+        main_run: None,
     };
     let state = State {
         sessions: vec![running(
@@ -242,6 +246,7 @@ fn a_task_already_dispatched_is_not_dispatched_again() {
         issues: vec![issue(51, &["待验收"], Some("claude"))],
         pulls: vec![],
         main_checks: MainChecks::Green,
+        main_run: None,
     };
     let mut done = running(
         "accept-51-a1",
@@ -271,6 +276,7 @@ fn a_session_that_timed_out_is_tried_once_more_and_then_left_alone() {
         issues: vec![issue(51, &["待验收"], Some("claude"))],
         pulls: vec![],
         main_checks: MainChecks::Green,
+        main_run: None,
     };
     let mut first = running(
         "accept-51-a1",
@@ -322,6 +328,7 @@ fn the_concurrency_ceiling_queues_the_rest() {
         issues: vec![issue(50, &[], None), issue(52, &[], None)],
         pulls: vec![],
         main_checks: MainChecks::Green,
+        main_run: None,
     };
     let config = Config {
         max_sessions: 1,
@@ -348,6 +355,7 @@ fn the_daily_ceiling_stops_new_sessions_and_is_worth_saying_on_the_issue() {
         issues: vec![issue(50, &[], None)],
         pulls: vec![],
         main_checks: MainChecks::Green,
+        main_run: None,
     };
     let config = Config {
         max_sessions_per_day: 1,
@@ -400,6 +408,7 @@ fn a_red_main_is_the_first_thing_dispatched_but_a_cancelled_run_is_not_red() {
         issues: vec![issue(50, &[], None)],
         pulls: vec![],
         main_checks: MainChecks::Red,
+        main_run: None,
     };
     let plan = decide(
         &snapshot,
@@ -432,6 +441,7 @@ fn roles_the_cloud_handles_are_not_dispatched_here() {
         issues: vec![issue(51, &["待验收"], Some("claude"))],
         pulls: vec![pull(60, &["待审查"], Some("claude"), None)],
         main_checks: MainChecks::Red,
+        main_run: None,
     };
     let config = Config {
         cloud_roles: ["review", "fix-ci"].iter().map(|s| s.to_string()).collect(),
@@ -459,6 +469,7 @@ fn only_work_carrying_the_required_label_is_touched() {
         issues: vec![issue(50, &[], None), issue(51, &["演示:调度"], None)],
         pulls: vec![pull(60, &["待审查"], Some("claude"), None)],
         main_checks: MainChecks::Green,
+        main_run: None,
     };
     let config = Config {
         require_label: "演示:调度".to_string(),
@@ -489,6 +500,7 @@ fn an_issue_assigned_to_one_agent_only_goes_to_that_agent() {
         issues: vec![issue(50, &["指派:codex"], None)],
         pulls: vec![],
         main_checks: MainChecks::Green,
+        main_run: None,
     };
     let plan = decide(
         &snapshot,
@@ -505,6 +517,7 @@ fn ignored_issues_are_never_dispatched() {
         issues: vec![issue(20, &[], None)],
         pulls: vec![],
         main_checks: MainChecks::Green,
+        main_run: None,
     };
     let config = Config {
         ignore_issues: vec![20],
@@ -657,6 +670,7 @@ fn a_session_the_dispatcher_lost_track_of_is_not_dispatched_again() {
         issues: vec![issue(51, &["待验收"], Some("claude"))],
         pulls: vec![],
         main_checks: MainChecks::Green,
+        main_run: None,
     };
     let mut gone = running(
         "accept-51-a1",
@@ -710,6 +724,7 @@ fn the_vendor_with_the_fewest_sessions_today_gets_the_next_one() {
         issues: vec![issue(50, &[], None)],
         pulls: vec![],
         main_checks: MainChecks::Green,
+        main_run: None,
     };
     let mut claude = running(
         "implement-40-a1",

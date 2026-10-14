@@ -228,6 +228,52 @@ fn a_cancelled_run_is_not_a_red_main_but_a_failed_one_is() {
     assert_eq!(code, 1, "没有要派的活时退出码是 1：{out}");
 }
 
+/// A `gh` that answers out of the saved responses in `dir`, one page per
+/// request unless the test asks for more. `gh api --paginate` prints one
+/// independent JSON document per page, so this is what the dispatcher has
+/// to read once any issue passes 100 comments.
+fn gh_serving(home: &Home, dir: &str, extra_page: &str) {
+    real_tool(home.path(), "cat");
+    stub(
+        home.path(),
+        "gh",
+        &format!(
+            "case \"$*\" in\n\
+             *comments*) cat {dir}/comments-22.json; {extra_page} ;;\n\
+             *issues*) cat {dir}/issues.json ;;\n\
+             *pulls*) cat {dir}/pulls.json ;;\n\
+             *runs*) cat {dir}/main-test-runs.json ;;\n\
+             *) echo '[]' ;;\n\
+             esac"
+        ),
+    );
+}
+
+#[test]
+fn comments_that_arrive_in_pages_are_all_read() {
+    let home = Home::new("pages");
+    gh_serving(&home, &fixtures("accept"), "echo '[]'");
+    let config = home.config(serde_json::json!({}));
+    let (code, out) = run(
+        &home,
+        &[
+            "plan",
+            "--json",
+            "--config",
+            &config.display().to_string(),
+            "--now",
+            "2026-10-14T04:00:00+08:00",
+        ],
+    );
+    assert_eq!(code, 0, "分页的评论要读完，不是整轮失败：{out}");
+    let plan: serde_json::Value = serde_json::from_str(out.trim()).expect("--json 要是 JSON");
+    assert_eq!(plan["start"][0]["role"], "accept", "{plan}");
+    assert_ne!(
+        plan["start"][0]["vendor"], "codebuddy",
+        "第一页里的认领评论仍然决定实现者：{plan}"
+    );
+}
+
 #[test]
 fn forgetting_the_replay_directory_fails_instead_of_asking_the_real_github() {
     let home = Home::new("nogh");
