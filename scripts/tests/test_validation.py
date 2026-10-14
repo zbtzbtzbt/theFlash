@@ -76,11 +76,11 @@ class Fake:
         assert self.sleeps < 20000, '监督循环没有停止（SIGINT/截止点保证被破坏）'
         self.clock += seconds
         self.on_sleep()
-        # Yield long enough for the pipe-reader thread under CI load.
-        # time.sleep(0) only reschedules; busy runners can spin past the
-        # 20000-iteration guard before the reader runs (#101).
-        import time
-        time.sleep(0.001)
+        # Yield real wall-clock time only while a started child's stdout pipe is
+        # still open for the reader thread to drain (#101, #131).
+        if self.starts and not self.child.stdout.closed:
+            import time
+            time.sleep(0.001)
 
     def start(self, task):
         self.starts.append(self.clock)
@@ -356,11 +356,26 @@ class WorkerAcceptance(unittest.TestCase):
         original = v.load(self.job)
         self.assertEqual(original['status'], status)
         self.assertEqual(original['reason'], reason)
-        self.assertEqual(original['exit_code'], exit_code)
+        self.assertEqual(original.get('exit_code'), exit_code)
         self.assertEqual(original['delivery'], 'pending')
         self.assertTrue(original['key_output'])
         summary = (self.job / 'summary.md').read_text()
         log = (self.job / 'output.log').read_bytes()
+
+        # Simulate a minute tick before backoff expires while GitHub is still
+        # unreachable: the terminal guard must still protect the result (#84).
+        early = Fake(now=original['next_delivery'] - 1)
+        early.fail_posts = True
+        v.run_task(self.job, early)
+        self.assertEqual(v.load(self.job), original,
+                         '未到补发时间的唤起不得改写已经结束的任务结果')
+        self.assertEqual((self.job / 'summary.md').read_text(), summary)
+        self.assertEqual((self.job / 'output.log').read_bytes(), log)
+        self.assertEqual(early.starts, [])
+        self.assertEqual(early.signals, [])
+        self.assertIsNone(early.inhibitor)
+        self.assertEqual(early.posts, [])
+        self.assertEqual(early.sleeps, 0)
 
         # Simulate the next launchd invocation after GitHub recovers, using
         # persisted backoff and a fresh runner rather than wall-clock waits.
@@ -369,7 +384,7 @@ class WorkerAcceptance(unittest.TestCase):
         delivered = v.load(self.job)
         for field in ['status', 'reason', 'started', 'ended', 'exit_code', 'key_output']:
             with self.subTest(field=field):
-                self.assertEqual(delivered[field], original[field],
+                self.assertEqual(delivered.get(field), original.get(field),
                                  '补发不得改写已经结束的任务结果')
         self.assertEqual(delivered['delivery'], 'posted')
         self.assertEqual(retry.posts, [(original['issue'], summary)])
@@ -392,6 +407,23 @@ class WorkerAcceptance(unittest.TestCase):
         fake = Fake(now=400)
         fake.on_sleep = lambda: (self.job / 'cancel').touch()
         self.assert_pending_result_survives_next_run(fake, 'cancelled', '取消', 0)
+
+    def test_failed_pending_result_is_preserved_when_launchd_runs_again(self):
+        fake = Fake(now=400)
+        def fail(task):
+            raise FileNotFoundError('gone')
+        fake.start = fail
+        self.assert_pending_result_survives_next_run(
+            fake, 'failed', '启动或监督失败：FileNotFoundError', None)
+
+    def test_interrupted_pending_result_is_preserved_when_launchd_runs_again(self):
+        task = v.load(self.job)
+        task.update(status='running', started=500, pid=123)
+        v.save(self.job / 'task.json', task)
+        (self.job / 'output.log').write_text('[time] first output\n[time] last output\n')
+        fake = Fake(now=900)
+        self.assert_pending_result_survives_next_run(
+            fake, 'interrupted', 'runner 中断；没有重新运行命令', None)
 
     def test_interrupted_runner_is_reported_without_replaying_real_command(self):
         task = v.load(self.job)
@@ -450,10 +482,29 @@ class WorkerAcceptance(unittest.TestCase):
         def fail(child):
             raise FileNotFoundError('caffeinate missing')
         fake.inhibit = fail
-        v.run_task(self.job, fake)
+        errors = []
+        def run():
+            try:
+                v.run_task(self.job, fake)
+            except BaseException as exc:
+                errors.append(exc)
+        worker = v.threading.Thread(target=run, daemon=True)
+        worker.start()
+        progress = (-1, -1)
+        stalled = 0
+        while worker.is_alive():
+            worker.join(timeout=0.05)
+            pos = None if fake.child.stdout.closed else fake.child.stdout.tell()
+            now_progress = (fake.sleeps, pos)
+            stalled = stalled + 1 if now_progress == progress else 0
+            progress = now_progress
+            if stalled >= 10:
+                self.fail('排空被破坏，run_task 卡在 reader.join')
+        if errors:
+            raise errors[0]
         self.assertEqual(v.load(self.job)['status'], 'failed')
         self.assertEqual([pid for pid, _ in fake.signals], [fake.child.pid])
-        self.assertTrue(fake.child.stdout.closed)
+        self.assertTrue(fake.child.stdout.closed, '排空结束后必须关闭被测程序输出管道')
 
     def test_active_task_cannot_be_uninstalled_or_booted_out(self):
         for flags in [[], ['--discard-report']]:
