@@ -5,7 +5,7 @@
 mod support;
 
 use std::net::TcpListener;
-use std::process::Output;
+use std::process::{Output, Stdio};
 
 use support::{MockDamai, fixture};
 
@@ -414,30 +414,183 @@ fn supported_links_and_numeric_ids_query_the_same_event() {
     assert_eq!(damai.hits().len(), 10);
 }
 
+/// What `theflash event` prints, put together from the fields of
+/// `event-json` the browser shows: name, city, venue, the sale status and
+/// time, the notices, and every session and tier in order. The page never
+/// shows `report`, so `report` matching the CLI says nothing about the page
+/// (#30, #48).
+fn cli_text_from_event_json(event: &serde_json::Value) -> String {
+    let text = |v: &serde_json::Value| -> String {
+        v.as_str()
+            .unwrap_or_else(|| panic!("expected text, got {v}"))
+            .to_owned()
+    };
+    let mut out = format!(
+        "演出：{}\n城市：{}\n场馆：{}\n售卖状态：{}\n",
+        text(&event["name"]),
+        text(&event["city"]),
+        text(&event["venue"]),
+        text(&event["sale"]["label"])
+    );
+    if !event["sellStart"].is_null() {
+        out += &format!("开售时间：{}\n", text(&event["sellStart"]));
+    }
+    if !event["notice"].is_null() {
+        let notice = text(&event["notice"]);
+        let heading = if notice.starts_with("大麦电脑版") {
+            "场次和票档"
+        } else {
+            "场次"
+        };
+        out += &format!("\n{heading}：{notice}\n");
+    }
+    for session in event["sessions"].as_array().unwrap() {
+        out += &format!("\n场次：{}\n", text(&session["name"]));
+        let tiers = session["tiers"].as_array().unwrap();
+        if !session["error"].is_null() {
+            out += &format!("  {}\n", text(&session["error"]));
+        } else if !session["notice"].is_null() {
+            out += &format!("  {}\n", text(&session["notice"]));
+        } else if tiers.is_empty() {
+            out += "  票档：没有票档\n";
+        }
+        for tier in tiers {
+            out += &format!(
+                "  {} · {} · {}\n",
+                text(&tier["name"]),
+                text(&tier["price"]),
+                text(&tier["status"]["label"])
+            );
+        }
+    }
+    out
+}
+
+/// The style a CLI status word asks for, decided from the word alone.
+fn status_kind(label: &str) -> &'static str {
+    match label {
+        "在售" | "可售" => "available",
+        "缺货" => "out-of-stock",
+        "未开售" => "not-yet-on-sale",
+        "已售罄" => "sold-out",
+        _ => "unknown",
+    }
+}
+
+// The real responses the browser tests replay, plus an explicitly empty tier
+// list. All the runs go at once: each process paces its own requests, and the
+// calendar's 19 alone take seconds. Each is waited for before any assertion,
+// so none outlives the test.
 #[test]
 fn browser_event_json_preserves_cli_content() {
-    let damai = MockDamai::start(&[
-        ("/item.htm?id=1092337348536", "item_not_yet_on_sale.html"),
+    let cases = [
         (
-            "dataType=2&dataId=286966465",
-            "sku_not_yet_on_sale_286966465.jsonp",
+            "on sale",
+            "1086791513717",
+            MockDamai::start(&[
+                ("/item.htm?id=1086791513717", "item_on_sale.html"),
+                ("dataType=2&dataId=286937789", "sku_on_sale_286937789.jsonp"),
+                ("dataType=2&dataId=286937790", "sku_on_sale_286937790.jsonp"),
+                ("dataType=2&dataId=286937788", "sku_on_sale_286937788.jsonp"),
+            ]),
         ),
-    ]);
-    let text = theflash(&damai.base_url(), &["event", "1092337348536"]);
-    let json = theflash(&damai.base_url(), &["event-json", "1092337348536"]);
-    assert!(
-        json.status.success(),
-        "浏览器查询没有返回演出：{}",
-        stderr(&json)
-    );
-    let event: serde_json::Value = serde_json::from_str(&stdout(&json)).unwrap();
-    assert_eq!(event["report"].as_str(), Some(stdout(&text).as_str()));
-    assert_eq!(event["sale"]["kind"], "not-yet-on-sale");
-    assert_eq!(event["sellStart"], "2026-10-14 10:18（北京时间）");
-    assert_eq!(
-        event["sessions"][0]["tiers"][0]["status"]["label"],
-        "未开售"
-    );
+        (
+            "not yet on sale",
+            "1092337348536",
+            MockDamai::start(&[
+                ("/item.htm?id=1092337348536", "item_not_yet_on_sale.html"),
+                (
+                    "dataType=2&dataId=286966465",
+                    "sku_not_yet_on_sale_286966465.jsonp",
+                ),
+            ]),
+        ),
+        (
+            "sold out",
+            "1077137031347",
+            MockDamai::start(&[
+                ("/item.htm?id=1077137031347", "item_sold_out.html"),
+                (
+                    "dataType=2&dataId=284490009",
+                    "sku_sold_out_284490009.jsonp",
+                ),
+            ]),
+        ),
+        (
+            "not sold on the PC site",
+            "1080486727522",
+            MockDamai::start(&[("/item.htm?id=1080486727522", "item_pc_unsupported.html")]),
+        ),
+        // Only one session's tiers are served: the other 17 fail, and say why.
+        (
+            "18 calendar sessions",
+            "1084537866279",
+            MockDamai::start(&[
+                ("/item.htm?id=1084537866279", "item_calendar.html"),
+                (
+                    "dataType=2&dataId=286938129",
+                    "sku_calendar_286938129.jsonp",
+                ),
+            ]),
+        ),
+        (
+            "missing skuList",
+            "1077137031347",
+            sold_out_with_sku_list(None),
+        ),
+        (
+            "empty skuList",
+            "1077137031347",
+            sold_out_with_sku_list(Some(serde_json::json!([]))),
+        ),
+    ];
+    let started: Vec<_> = cases
+        .iter()
+        .map(|(case, id, damai)| {
+            let start = |command: &str| {
+                support::theflash(&damai.base_url())
+                    .args([command, *id])
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .unwrap()
+            };
+            (case, start("event"), start("event-json"))
+        })
+        .collect();
+    let finished: Vec<_> = started
+        .into_iter()
+        .map(|(case, text, json)| {
+            let text = text.wait_with_output().unwrap();
+            (case, text, json.wait_with_output().unwrap())
+        })
+        .collect();
+    for (case, text, json) in finished {
+        assert!(text.status.success(), "{case}: {}", stderr(&text));
+        assert!(
+            json.status.success(),
+            "{case}: 浏览器查询没有返回演出：{}",
+            stderr(&json)
+        );
+        let cli = stdout(&text);
+        let event: serde_json::Value = serde_json::from_str(&stdout(&json)).unwrap();
+        assert_eq!(
+            cli_text_from_event_json(&event),
+            cli,
+            "{case}: 浏览器拿到的字段和 CLI 说的不一样"
+        );
+        let tiers = event["sessions"].as_array().unwrap().iter();
+        let tiers = tiers.flat_map(|s| s["tiers"].as_array().unwrap());
+        for status in std::iter::once(&event["sale"]).chain(tiers.map(|t| &t["status"])) {
+            let label = status["label"].as_str().unwrap();
+            assert_eq!(
+                status["kind"],
+                status_kind(label),
+                "{case}: “{label}”的样式语义和 CLI 的状态文字不符"
+            );
+        }
+        assert_eq!(event["report"].as_str(), Some(cli.as_str()), "{case}");
+    }
 }
 
 // Exercise the CLI environment wiring and every GET, including page -> first

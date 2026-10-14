@@ -101,7 +101,20 @@ mod tests {
         let got = event(&e);
         assert_eq!(got["itemId"], u64::MAX.to_string());
         assert_eq!(got["sessions"][0]["id"], u64::MAX.to_string());
-        assert_eq!(got["name"], "未知");
+        // Every value damai.cn didn't give, not just the first (#48).
+        for (field, value) in [
+            ("name", &got["name"]),
+            ("city", &got["city"]),
+            ("venue", &got["venue"]),
+            ("sessions[0].name", &got["sessions"][0]["name"]),
+            (
+                "sessions[0].tiers[0].name",
+                &got["sessions"][0]["tiers"][0]["name"],
+            ),
+            ("sessions[1].name", &got["sessions"][1]["name"]),
+        ] {
+            assert_eq!(value, "未知", "{field}");
+        }
         assert_eq!(got["sale"]["kind"], "unknown");
         assert_eq!(got["sale"]["label"], "未知（购买按钮状态 777）");
         assert_eq!(got["sessions"][0]["tiers"][0]["price"], "未知");
