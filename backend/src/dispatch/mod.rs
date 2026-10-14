@@ -413,7 +413,9 @@ fn candidates(
         if has(WAITING_LABEL) {
             continue;
         }
-        let known = assigned_vendor(&issue.labels, config)
+        let assigned = assigned_vendor(&issue.labels, config);
+        let known = assigned
+            .clone()
             .or_else(|| vendor_of(issue.agent.as_deref(), config));
         if has(FIX_ISSUE_LABEL) {
             wanted.push(Wanted {
@@ -451,7 +453,7 @@ fn candidates(
             offer_implement(
                 issue,
                 snapshot,
-                known,
+                assigned,
                 why,
                 &mut fresh,
                 &mut deferred_implement,
@@ -460,7 +462,7 @@ fn candidates(
             offer_implement(
                 issue,
                 snapshot,
-                known,
+                assigned,
                 format!("#{} 还没人认领：{}", issue.number, issue.title),
                 &mut fresh,
                 &mut deferred_implement,
@@ -750,7 +752,7 @@ fn claim_lease_is_live(issue: &snapshot::Issue, now: DateTime<Utc>) -> bool {
         return true;
     }
     match issue.lease_alive_at {
-        Some(at) => (now - at).num_minutes() < crate::claim::lease::EXPIRES_AFTER_MINUTES,
+        Some(at) => (now - at).num_minutes().max(0) < crate::claim::lease::EXPIRES_AFTER_MINUTES,
         None => false,
     }
 }
