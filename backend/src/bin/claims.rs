@@ -137,6 +137,12 @@ impl Options {
     fn board_with(&self, number: u64) -> Result<(Board, Issue), ExitCode> {
         let mut board = self.board()?;
         let issue = self.issue(number)?;
+        let pushes = match &self.replay {
+            Some(dir) => Snapshot::replay_pushes_for_issue(dir, &issue),
+            None => Snapshot::fetch_pushes_for_issue(self.repo(), &issue),
+        }
+        .map_err(fetch_failed)?;
+        board.pushes.extend(pushes);
         board.include(&issue);
         Ok((board, issue))
     }
@@ -198,24 +204,30 @@ fn print_board(board: &Board, now: DateTime<Utc>) {
         println!();
         print_trouble(t);
     }
-    let expired = board
+    let expired = board.leases.iter().filter(|l| l.reclaimable(now)).count();
+    let unknown = board
         .leases
         .iter()
-        .filter(|l| l.status(now) == Status::Expired)
+        .filter(|l| l.push_unreadable.is_some())
         .count();
     let overdue = board
         .leases
         .iter()
-        .filter(|l| l.status(now) == Status::HeartbeatOverdue)
+        .filter(|l| l.push_unreadable.is_none() && l.status(now) == Status::HeartbeatOverdue)
         .count();
     println!(
-        "\n{} 条认领：{} 活跃，{overdue} 该心跳了，{expired} 已过期{}。{}",
+        "\n{} 条认领：{} 活跃，{overdue} 该心跳了，{expired} 已过期{}{}。{}",
         board.leases.len(),
-        board.leases.len() - expired - overdue,
+        board.leases.len() - expired - overdue - unknown,
         if expired > 0 {
             "（`claims reclaim --issue <号> --agent <你>` 收回）"
         } else {
             ""
+        },
+        if unknown > 0 {
+            format!("，{unknown} 条推送时间读不到、无法判断")
+        } else {
+            String::new()
         },
         if board.trouble.is_empty() {
             String::new()
@@ -243,14 +255,18 @@ fn print_lease(l: &Lease, now: DateTime<Utc>) {
         minutes(l.idle_minutes(now)),
         l.last.sign.what()
     );
-    println!(
-        "  状态      {}{}",
-        status.name(),
-        match status {
-            Status::Expired => "，可以收回".to_string(),
-            _ => format!("，{}后过期", minutes(l.expires_in_minutes(now))),
-        }
-    );
+    if l.push_unreadable.is_some() {
+        println!("  状态      无法判断，不能收回");
+    } else {
+        println!(
+            "  状态      {}{}",
+            status.name(),
+            match status {
+                Status::Expired => "，可以收回".to_string(),
+                _ => format!("，{}后过期", minutes(l.expires_in_minutes(now))),
+            }
+        );
+    }
     if let Some(branch) = &l.claim.branch {
         println!("  分支      {branch}");
     }
@@ -304,7 +320,7 @@ fn json(board: &Board, now: DateTime<Utc>) -> String {
                 // A lease nobody can show to be silent is not expired as
                 // far as a dispatcher is concerned, however long ago its
                 // last readable sign of life was.
-                "expired": l.status(now) == Status::Expired && l.push_unreadable.is_none(),
+                "expired": l.reclaimable(now),
                 "expires_in_minutes": l.expires_in_minutes(now),
                 "push_unreadable": l.push_unreadable,
                 "labelled": l.labelled,
@@ -450,7 +466,7 @@ fn heartbeat(options: &Options) -> ExitCode {
     // A lease whose `认领中` label never made it on is still a lease, and
     // reporting progress is where it gets its label back: the holder does
     // not have to notice or fix the label by hand (#16).
-    let relabel = match board.lease(number) {
+    let (relabel, claim_url) = match board.lease(number) {
         Some(held) if !lease::same_agent(held.agent(), options.agent()) => {
             eprintln!(
                 "#{number} 是 {} 的认领，不是 {} 的：心跳只刷新自己的租约",
@@ -459,7 +475,7 @@ fn heartbeat(options: &Options) -> ExitCode {
             );
             return ExitCode::FAILURE;
         }
-        Some(held) => !held.labelled,
+        Some(held) => (!held.labelled, held.claim.url.clone()),
         None => {
             eprintln!(
                 "#{number} 上没有读得出来的认领，心跳不会刷新任何租约。\
@@ -469,7 +485,7 @@ fn heartbeat(options: &Options) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let body = claim::heartbeat_comment(options.agent(), note, now);
+    let body = claim::heartbeat_comment(options.agent(), &claim_url, note, now);
     println!("要发的心跳评论：\n{body}");
     if relabel {
         println!(
@@ -512,7 +528,7 @@ fn reclaim(options: &Options) -> ExitCode {
         return refused(&verdict);
     }
     let held = board.lease(number).expect("a reclaimable lease exists");
-    let (was, labelled) = (held.claim.posted_at, held.labelled);
+    let labelled = held.labelled;
     let body = claim::reclaim_comment(held, options.agent(), now);
     println!("要发的收回评论：\n{body}");
     if !options.writes() {
@@ -528,20 +544,27 @@ fn reclaim(options: &Options) -> ExitCode {
     // label comes off only if the claim being handed back is still the
     // one on the issue.
     match options.issue(number) {
-        Ok(fresh) => {
-            if let Ok(now_held) = claim::read_lease(&fresh, &board.pushes)
-                && now_held.claim.posted_at > was
-            {
+        Ok(fresh) => match claim::read_lease(&fresh, &board.pushes) {
+            Ok(now_held) => {
                 println!(
-                    "#{number} 上已经有一条更新的认领（{}，{}），{} 标签留着：\
-                     上面那条收回评论只说明旧租约为什么过期",
+                    "#{number} 上现在有一条认领（{}，{}），{} 标签留着：\
+                         上面那条收回评论只结束它点名的旧租约",
                     now_held.claim.url,
                     now_held.agent(),
                     lease::CLAIM_LABEL
                 );
                 return ExitCode::SUCCESS;
             }
-        }
+            Err((claim::Problem::Unreadable, why)) => {
+                eprintln!(
+                    "收回评论发出去了，但重新读取 #{number} 时认领读不出来：{why}。\
+                         为免藏起可能的新租约，{} 标签留着，请去 issue 上确认",
+                    lease::CLAIM_LABEL
+                );
+                return ExitCode::from(2);
+            }
+            Err((claim::Problem::HandedBack, _)) => {}
+        },
         Err(code) => return code,
     }
     if !labelled {

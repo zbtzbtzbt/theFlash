@@ -259,21 +259,42 @@ impl Snapshot {
         Ok(issue)
     }
 
-    /// Every branch a claim comment names, so their pushes can be read.
-    fn claimed_branches(&self) -> Vec<String> {
-        let mut out = Vec::new();
-        for issue in &self.issues {
-            for comment in &issue.comments {
-                if let Some(branch) =
-                    lease::parse_claim(&comment.body, "", comment.posted_at).and_then(|c| c.branch)
-                    && !out.contains(&branch)
-                {
-                    out.push(branch);
-                }
+    /// Branch evidence named by a separately loaded target issue.
+    pub fn replay_pushes_for_issue(
+        dir: &Path,
+        issue: &Issue,
+    ) -> Result<BTreeMap<String, Push>, Error> {
+        let mut pushes = BTreeMap::new();
+        for branch in claimed_branches(std::slice::from_ref(issue)) {
+            let Some(text) = optional(dir, &format!("branch-{}.json", slug(&branch))) else {
+                continue;
+            };
+            if let Some(push) = last_push_from_json("分支的推送活动", &text)? {
+                pushes.insert(branch, push);
             }
         }
-        out
+        Ok(pushes)
     }
+
+    /// Every branch a claim comment names, so their pushes can be read.
+    fn claimed_branches(&self) -> Vec<String> {
+        claimed_branches(&self.issues)
+    }
+}
+
+fn claimed_branches(issues: &[Issue]) -> Vec<String> {
+    let mut out = Vec::new();
+    for issue in issues {
+        for comment in &issue.comments {
+            if let Some(branch) =
+                lease::parse_claim(&comment.body, "", comment.posted_at).and_then(|c| c.branch)
+                && !out.contains(&branch)
+            {
+                out.push(branch);
+            }
+        }
+    }
+    out
 }
 
 fn read(dir: &Path, name: &str) -> Result<String, Error> {
@@ -369,6 +390,20 @@ impl Snapshot {
         issue.comments = fetch_comments(repo, number)?;
         Ok(issue)
     }
+
+    /// Branch evidence named by a separately loaded target issue.
+    pub fn fetch_pushes_for_issue(
+        repo: &str,
+        issue: &Issue,
+    ) -> Result<BTreeMap<String, Push>, Error> {
+        let mut pushes = BTreeMap::new();
+        for branch in claimed_branches(std::slice::from_ref(issue)) {
+            if let Some(push) = fetch_last_push(repo, &branch)? {
+                pushes.insert(branch, push);
+            }
+        }
+        Ok(pushes)
+    }
 }
 
 fn fetch_comments(repo: &str, number: u64) -> Result<Vec<Comment>, Error> {
@@ -392,10 +427,10 @@ fn fetch_comments(repo: &str, number: u64) -> Result<Vec<Comment>, Error> {
 /// unreadable rather than guessed from the commit.
 fn fetch_last_push(repo: &str, branch: &str) -> Result<Option<Push>, Error> {
     let path = format!(
-        "repos/{repo}/activity?ref=refs/heads/{}&per_page=20",
+        "repos/{repo}/activity?ref=refs/heads/{}&per_page=100",
         encode(branch.trim())
     );
-    match gh_api(&path) {
+    match gh_api_list(&path) {
         Ok(text) => last_push_from_json("分支的推送活动", &text),
         Err(Error::Gh { why, .. }) if why.contains("404") || why.contains("Not Found") => Ok(None),
         Err(Error::Gh { why, .. }) => Ok(Some(Push::Unreadable(why))),

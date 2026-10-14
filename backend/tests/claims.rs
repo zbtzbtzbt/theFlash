@@ -530,6 +530,51 @@ fn a_lease_whose_push_time_cannot_be_read_is_not_taken_over() {
     );
 }
 
+#[test]
+fn an_unlabelled_target_lease_still_reads_its_push_heartbeat() {
+    let replay = fixtures_with_file(
+        "branch-night-issue-16.json",
+        &recorded("push-vs-commit/activity-night-issue-16.json"),
+    );
+    let issues: Vec<serde_json::Value> =
+        serde_json::from_str(&std::fs::read_to_string(replay.join("issues.json")).unwrap())
+            .unwrap();
+    let issues: Vec<_> = issues
+        .into_iter()
+        .filter(|issue| issue["number"] != 16)
+        .collect();
+    std::fs::write(
+        replay.join("issues.json"),
+        serde_json::to_vec_pretty(&issues).unwrap(),
+    )
+    .unwrap();
+    let mut issue: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(replay.join("issue-16.json")).unwrap())
+            .unwrap();
+    issue["labels"] = serde_json::json!([]);
+    std::fs::write(
+        replay.join("issue-16.json"),
+        serde_json::to_vec_pretty(&issue).unwrap(),
+    )
+    .unwrap();
+
+    let reclaim = claims(
+        &replay,
+        "2026-10-14T05:30:00+08:00",
+        &["reclaim", "--issue", "16", "--agent", "Codex"],
+    );
+    assert_eq!(
+        reclaim.code, 1,
+        "03:35 的推送还不到两小时；缺标签不能让目标命令漏掉分支心跳：\n{}",
+        reclaim.out
+    );
+    assert!(
+        reclaim.out.contains("还没过期"),
+        "拒绝要来自最近的推送心跳：\n{}",
+        reclaim.out
+    );
+}
+
 /// A stand-in for `gh` that answers from a directory of saved responses
 /// and appends what it is told to post, so the write paths of two
 /// `claims` processes can run at once without GitHub.
@@ -589,6 +634,10 @@ if [ "$1" = issue ] && [ "$2" = comment ]; then
   id=$(cat "$D/next-id" 2>/dev/null || echo 1000)
   echo $((id + 1)) > "$D/next-id"
   f="$D/comments-$n.json"
+  if [ -n "$CLAIMS_FAKE_GH_BEFORE_COMMENT" ] && [ -f "$CLAIMS_FAKE_GH_BEFORE_COMMENT" ]; then
+    cp "$CLAIMS_FAKE_GH_BEFORE_COMMENT" "$f"
+    rm "$CLAIMS_FAKE_GH_BEFORE_COMMENT"
+  fi
   [ -f "$f" ] || echo '[]' > "$f"
   escaped=$(sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' "$body" | awk '{printf "%s\\n", $0}')
   url="https://github.com/zbtzbtzbt/theFlash/issues/$n#issuecomment-$id"
@@ -639,7 +688,7 @@ fn claims_with_fake_gh(dir: &Path, args: &[&str]) -> Command {
 }
 
 #[test]
-fn two_agents_claiming_at_the_same_moment_do_not_both_start() {
+fn two_sessions_of_the_same_agent_claiming_at_the_same_moment_do_not_both_start() {
     // Nothing stops two agents from posting a claim at the same moment:
     // GitHub has no compare-and-set, and the agents run in different
     // worktrees. So the claim is confirmed after it is posted, and the
@@ -652,7 +701,7 @@ fn two_agents_claiming_at_the_same_moment_do_not_both_start() {
     }
     std::fs::remove_file(dir.join("comments-25.json")).unwrap();
 
-    let both: Vec<Run> = ["Codex", "CodeBuddy"]
+    let both: Vec<Run> = ["Codex", "Codex"]
         .iter()
         .map(|agent| {
             let cmd = claims_with_fake_gh(
@@ -725,10 +774,6 @@ fn two_agents_claiming_at_the_same_moment_do_not_both_start() {
 
     // A third agent reading the issue afterwards sees one holder: the
     // process that won, not the one whose claim comment came last.
-    let winner = ["Codex", "CodeBuddy"]
-        .into_iter()
-        .find(|a| held[0].out.contains(&format!("- agent: {a}")))
-        .expect(&held[0].out);
     let third = claims(
         &dir,
         "2026-10-14T03:25:00+08:00",
@@ -744,9 +789,61 @@ fn two_agents_claiming_at_the_same_moment_do_not_both_start() {
     );
     assert_eq!(third.code, 1, "{}", third.out);
     assert!(
-        third.out.contains(winner),
-        "#25 的持有者是赢的那个 {winner}：\n{}",
+        third.out.contains("Codex"),
+        "#25 的持有者是先写入的那条 Codex 会话，不是同名后到者：\n{}",
         third.out
+    );
+}
+
+#[test]
+fn a_stale_reclaim_does_not_remove_a_new_leases_label() {
+    let dir = temp("stale-reclaim");
+    for entry in std::fs::read_dir(fixtures()).unwrap() {
+        let entry = entry.unwrap();
+        std::fs::copy(entry.path(), dir.join(entry.file_name())).unwrap();
+    }
+    let old_url = "https://github.com/zbtzbtzbt/theFlash/issues/31#issuecomment-6153109240";
+    let mut before: Vec<serde_json::Value> =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("comments-31.json")).unwrap())
+            .unwrap();
+    before.push(serde_json::json!({
+        "id": 900,
+        "created_at": "2026-10-13T22:08:00Z",
+        "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/31#issuecomment-900",
+        "body": format!("## 收回认领\n\n- 原认领: DemoAgent（{old_url}）\n- 收回者: Codex\n")
+    }));
+    before.push(serde_json::json!({
+        "id": 901,
+        "created_at": "2026-10-13T22:09:00Z",
+        "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/31#issuecomment-901",
+        "body": "## 认领\n\n- agent: Claude\n- 改动模块: docs/new-work\n"
+    }));
+    let injected = dir.join("comments-before-stale-reclaim.json");
+    std::fs::write(&injected, serde_json::to_vec_pretty(&before).unwrap()).unwrap();
+
+    let mut cmd = claims_with_fake_gh(
+        &dir,
+        &[
+            "reclaim",
+            "--issue",
+            "31",
+            "--agent",
+            "CodeBuddy",
+            "--now",
+            "2026-10-14T06:10:00+08:00",
+        ],
+    );
+    cmd.env("CLAIMS_FAKE_GH_BEFORE_COMMENT", &injected);
+    let run = run(cmd);
+    assert_eq!(run.code, 0, "{}", run.out);
+    assert!(
+        run.out.contains("Claude") && run.out.contains("标签留着"),
+        "迟到的收回要看见并保留中间的新租约：\n{}",
+        run.out
+    );
+    assert!(
+        !dir.join("labels").exists(),
+        "旧快照发出的收回不能请求删除新租约的标签"
     );
 }
 

@@ -117,6 +117,11 @@ impl Lease {
         }
     }
 
+    /// Whether silence is both long enough and fully observable.
+    pub fn reclaimable(&self, now: DateTime<Utc>) -> bool {
+        self.status(now) == Status::Expired && self.push_unreadable.is_none()
+    }
+
     /// Minutes until this lease expires, or 0 once it has.
     pub fn expires_in_minutes(&self, now: DateTime<Utc>) -> i64 {
         (lease::EXPIRES_AFTER_MINUTES - self.idle_minutes(now)).max(0)
@@ -204,9 +209,7 @@ impl Board {
 
     /// The leases that still hold, so work being planned avoids them.
     pub fn holding(&self, now: DateTime<Utc>) -> impl Iterator<Item = &Lease> {
-        self.leases
-            .iter()
-            .filter(move |l| l.status(now) != Status::Expired)
+        self.leases.iter().filter(move |l| !l.reclaimable(now))
     }
 }
 
@@ -237,64 +240,68 @@ pub fn board(snapshot: &Snapshot) -> Board {
 
 /// The lease an issue's comments describe, or why it cannot be read.
 ///
-/// A `收回认领` comment ends every claim before it, so the lease is read
-/// from the comments after the last hand-back: the label may still be on
-/// the issue for a moment, and the lease must not outlive the hand-back.
+/// A `收回认领` comment ends the claim URL it names. Older comments that
+/// did not name a URL end the lease current at that point. Binding the
+/// event matters when a delayed reclaimer posts after somebody already
+/// started a new lease: the stale event must not end the new holder.
 ///
 /// **In that window, the earliest claim comment holds the issue.** Two
 /// agents that read "nobody is working on this" at the same moment both
 /// post a claim, and both have to reach the same answer about which one
 /// counts; GitHub's own order of the comments is the only thing they both
-/// see. The holder's later claims are updates to its own lease (and
-/// count as a sign of life); another agent's later claim lost the race
-/// and does not count at all — the command that posted it says so with a
-/// `让出认领` comment and exits non-zero.
+/// see. Every later claim lost the race, even when it repeats the same
+/// vendor name: an agent name is not a session identity. The command that
+/// posted it says so with a `让出认领` comment and exits non-zero.
 pub fn read_lease(
     issue: &Issue,
     pushes: &BTreeMap<String, Push>,
 ) -> Result<Lease, (Problem, String)> {
-    let handed_back_at = issue
+    let mut comments: Vec<_> = issue.comments.iter().collect();
+    comments.sort_by_key(|comment| (comment.posted_at, comment.id));
+    let yielded: Vec<String> = issue
         .comments
         .iter()
-        .rposition(|c| lease::is_reclaim(&c.body));
-    let window = match handed_back_at {
-        Some(i) => &issue.comments[i + 1..],
-        None => &issue.comments[..],
-    };
-    let mut claims: Vec<(DateTime<Utc>, u64, Claim)> = window
-        .iter()
-        .filter_map(|c| {
-            lease::parse_claim(&c.body, &c.url, c.posted_at).map(|claim| (c.posted_at, c.id, claim))
-        })
-        .filter(|(_, _, c)| {
-            // A claim the agent itself gave up after losing a race is
-            // not a lease; the comment that gave it up names it.
-            !window
-                .iter()
-                .any(|later| lease::yielded_claim(&later.body).is_some_and(|url| url == c.url))
-        })
+        .filter_map(|comment| lease::yielded_claim(&comment.body))
         .collect();
-    // When two claims are posted in the same second, GitHub's comment id
-    // says which came first.
-    claims.sort_by_key(|(at, id, _)| (*at, *id));
-    let claims: Vec<Claim> = claims.into_iter().map(|(_, _, c)| c).collect();
-    let Some(holder) = claims.first() else {
-        if let Some(i) = handed_back_at {
-            let before = issue.comments[..i]
-                .iter()
-                .rev()
-                .find_map(|c| lease::parse_claim(&c.body, &c.url, c.posted_at));
-            if let Some(before) = before {
-                return Err((
-                    Problem::HandedBack,
-                    format!(
-                        "最后一条认领（{}）之后有人收回了它，但 {} 标签还在：没有人在做，\
-                         下一次认领会把标签理顺",
-                        before.url,
-                        lease::CLAIM_LABEL
-                    ),
-                ));
+    let mut holder: Option<Claim> = None;
+    let mut handed_back: Option<Claim> = None;
+    for comment in &comments {
+        if lease::is_reclaim(&comment.body) {
+            let target = lease::reclaimed_claim(&comment.body);
+            let ends_current = match (&holder, target.as_deref()) {
+                (Some(current), Some(url)) => current.url == url,
+                (Some(_), None) => true,
+                _ => false,
+            };
+            if ends_current {
+                handed_back = holder.take();
             }
+            continue;
+        }
+        let Some(claim) = lease::parse_claim(&comment.body, &comment.url, comment.posted_at) else {
+            continue;
+        };
+        if yielded.iter().any(|url| url == &claim.url) {
+            continue;
+        }
+        // The first exact comment URL is the lease identity. Agent names
+        // identify a vendor for assignment, not a session: two Codex
+        // processes can race just as Codex and Claude can.
+        if holder.is_none() {
+            holder = Some(claim);
+        }
+    }
+    let Some(claim) = holder else {
+        if let Some(before) = handed_back {
+            return Err((
+                Problem::HandedBack,
+                format!(
+                    "最后一条认领（{}）之后有人收回了它，但 {} 标签还在：没有人在做，\
+                     下一次认领会把标签理顺",
+                    before.url,
+                    lease::CLAIM_LABEL
+                ),
+            ));
         }
         return Err((
             Problem::Unreadable,
@@ -306,12 +313,12 @@ pub fn read_lease(
             ),
         ));
     };
-    if let Some(field) = holder.missing_field() {
+    if let Some(field) = claim.missing_field() {
         return Err((
             Problem::Unreadable,
             format!(
                 "认领评论缺字段 `{field}`（{}）：补上之后才知道{}",
-                holder.url,
+                claim.url,
                 if field == "agent" {
                     "是哪个 agent 在做"
                 } else {
@@ -320,18 +327,11 @@ pub fn read_lease(
             ),
         ));
     }
-    // The holder's newest claim says what it is changing now; an earlier
-    // one may name fewer modules.
-    let claim = claims
-        .iter()
-        .rfind(|c| lease::same_agent(&c.agent, &holder.agent))
-        .unwrap_or(holder)
-        .clone();
     let mut last = Activity {
         at: claim.posted_at,
         sign: Sign::Claim,
     };
-    for comment in window {
+    for comment in &issue.comments {
         if comment.posted_at <= claim.posted_at {
             continue;
         }
@@ -339,7 +339,12 @@ pub fn read_lease(
         else {
             continue;
         };
-        if lease::same_agent(&beat.agent, &claim.agent) && beat.posted_at > last.at {
+        let bound_to_holder = beat.claim_url.as_deref().is_none_or(|url| url == claim.url);
+        if beat.marked
+            && bound_to_holder
+            && lease::same_agent(&beat.agent, &claim.agent)
+            && beat.posted_at > last.at
+        {
             last = Activity {
                 at: beat.posted_at,
                 sign: Sign::Heartbeat {
@@ -629,9 +634,9 @@ pub fn claim_comment(
 
 /// The heartbeat comment, which [`lease::parse_heartbeat`] reads back as
 /// a sign of life for this agent.
-pub fn heartbeat_comment(agent: &str, note: &str, now: DateTime<Utc>) -> String {
+pub fn heartbeat_comment(agent: &str, claim_url: &str, note: &str, now: DateTime<Utc>) -> String {
     format!(
-        "## {}\n\n- agent: {agent}\n- 时间: {}\n- 进度: {}\n\nAgent: {agent}\n",
+        "## {}\n\n- agent: {agent}\n- 认领: {claim_url}\n- 时间: {}\n- 进度: {}\n\nAgent: {agent}\n",
         lease::HEARTBEAT_MARKER,
         stamp(now),
         note.trim(),

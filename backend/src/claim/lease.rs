@@ -80,15 +80,18 @@ impl Claim {
     }
 }
 
-/// A sign that the agent holding a claim is still working: a heartbeat
-/// comment, or any comment it signed with its `Agent:` trailer.
+/// A structured sign that the session holding a claim is still working.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Heartbeat {
     pub url: String,
     pub posted_at: DateTime<Utc>,
     pub agent: String,
     /// `## 心跳` with fields, as opposed to a signed progress comment.
+    /// Only marked, correctly bound heartbeats renew a lease.
     pub marked: bool,
+    /// The exact claim comment this heartbeat keeps alive. Historical
+    /// heartbeat comments did not carry it and remain readable.
+    pub claim_url: Option<String>,
 }
 
 /// Reads a claim out of a comment body, or `None` when the comment is not
@@ -117,11 +120,11 @@ pub fn parse_claim(body: &str, url: &str, posted_at: DateTime<Utc>) -> Option<Cl
     })
 }
 
-/// Reads a heartbeat out of a comment body. A `## 心跳` comment is one;
-/// so is any other comment whose `Agent:` trailer names an agent, because
-/// every agent already signs what it writes (AGENTS.md), and a progress
-/// comment is a progress report whether or not it carries the heading.
-/// A claim comment is not a heartbeat: the claim itself starts the clock.
+/// Reads heartbeat-shaped data out of a comment body. A structured
+/// `## 心跳` can renew a lease; a signed progress comment is still parsed
+/// for display/compatibility but cannot identify a session and therefore
+/// does not renew one. A claim comment is not a heartbeat: the claim
+/// itself starts the clock.
 pub fn parse_heartbeat(body: &str, url: &str, posted_at: DateTime<Utc>) -> Option<Heartbeat> {
     let lines = said(body);
     if lines.iter().any(|l| is_marker_line(l, CLAIM_MARKER)) {
@@ -137,6 +140,8 @@ pub fn parse_heartbeat(body: &str, url: &str, posted_at: DateTime<Utc>) -> Optio
         posted_at,
         agent,
         marked,
+        claim_url: Some(field(&lines, &["认领", "原认领", "认领评论"]))
+            .filter(|value| !value.is_empty()),
     })
 }
 
@@ -144,6 +149,26 @@ pub fn parse_heartbeat(body: &str, url: &str, posted_at: DateTime<Utc>) -> Optio
 /// longer counts.
 pub fn is_reclaim(body: &str) -> bool {
     said(body).iter().any(|l| is_marker_line(l, RECLAIM_MARKER))
+}
+
+/// The claim URL a hand-back explicitly ends.
+///
+/// Older hand-back comments did not name a URL; callers keep accepting
+/// those as an unbound hand-back for compatibility. New comments always
+/// bind to one claim so a delayed writer cannot end a newer lease.
+pub fn reclaimed_claim(body: &str) -> Option<String> {
+    let lines = said(body);
+    if !lines.iter().any(|l| is_marker_line(l, RECLAIM_MARKER)) {
+        return None;
+    }
+    let value = field(&lines, &["原认领", "认领"]);
+    let at = value.find("http")?;
+    let url = value[at..]
+        .trim_end_matches(|c: char| {
+            c.is_whitespace() || matches!(c, ')' | '）' | ']' | '】' | '>' | '。' | '，' | ',')
+        })
+        .to_string();
+    (!url.is_empty()).then_some(url)
 }
 
 /// The claim a `让出认领` comment gives up, by its link. Giving up ends

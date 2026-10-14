@@ -130,7 +130,7 @@ fn a_time_without_a_zone_is_missing_rather_than_eight_hours_off() {
 }
 
 #[test]
-fn a_signed_comment_counts_as_a_heartbeat_and_a_claim_does_not() {
+fn a_signed_progress_comment_is_not_a_session_heartbeat() {
     let beat = lease::parse_heartbeat(
         "CI 绿了，在补测试。\n\nAgent: DemoAgent\n",
         "u",
@@ -139,6 +139,21 @@ fn a_signed_comment_counts_as_a_heartbeat_and_a_claim_does_not() {
     .unwrap();
     assert_eq!(beat.agent, "DemoAgent");
     assert!(!beat.marked);
+    let board = board_of(issue(
+        &[lease::CLAIM_LABEL],
+        vec![
+            comment(DEMO_CLAIM, "2026-10-14T03:05:55+08:00"),
+            comment(
+                "CI 绿了，在补测试。\n\nAgent: DemoAgent\n",
+                "2026-10-14T03:30:00+08:00",
+            ),
+        ],
+    ));
+    assert_eq!(
+        board.lease(31).unwrap().last.at,
+        at("2026-10-14T03:05:55+08:00"),
+        "厂商签名分不出同名会话；只有绑定认领 URL 的结构化心跳能续租"
+    );
     assert_eq!(
         lease::parse_heartbeat(DEMO_CLAIM, "u", at("2026-10-14T03:05:55+08:00")),
         None
@@ -312,6 +327,72 @@ fn a_new_claim_after_a_hand_back_holds_again() {
 }
 
 #[test]
+fn a_stale_hand_back_does_not_end_the_new_lease() {
+    let old = comment_id(DEMO_CLAIM, "2026-10-14T03:05:55+08:00", 1);
+    let old_url = old.url.clone();
+    let first_back = comment_id(
+        &format!("## 收回认领\n\n- 原认领: DemoAgent（{old_url}）\n- 收回者: Codex\n"),
+        "2026-10-14T06:08:00+08:00",
+        2,
+    );
+    let fresh = comment_id(
+        "## 认领\n\n- agent: Claude\n- 改动模块: docs/demo\n",
+        "2026-10-14T06:09:00+08:00",
+        3,
+    );
+    let stale_back = comment_id(
+        &format!("## 收回认领\n\n- 原认领: DemoAgent（{old_url}）\n- 收回者: CodeBuddy\n"),
+        "2026-10-14T06:10:00+08:00",
+        4,
+    );
+    let board = board_of(issue(
+        &[lease::CLAIM_LABEL],
+        vec![old, first_back, fresh, stale_back],
+    ));
+    assert_eq!(
+        board.lease(31).map(|held| held.agent()),
+        Some("Claude"),
+        "迟到的收回只结束它点名的旧租约，不能结束中间的新认领"
+    );
+}
+
+#[test]
+fn a_stale_heartbeat_does_not_refresh_a_new_same_vendor_lease() {
+    let old = comment_id(DEMO_CLAIM, "2026-10-14T03:05:55+08:00", 1);
+    let old_url = old.url.clone();
+    let fresh_url = "https://github.com/zbtzbtzbt/theFlash/issues/31#issuecomment-fresh";
+    let board = board_of(issue(
+        &[lease::CLAIM_LABEL],
+        vec![
+            old,
+            comment_id(
+                &format!("## 收回认领\n\n- 原认领: DemoAgent（{old_url}）\n- 收回者: Codex\n"),
+                "2026-10-14T06:08:00+08:00",
+                2,
+            ),
+            Comment {
+                id: 3,
+                url: fresh_url.to_string(),
+                posted_at: at("2026-10-14T06:09:00+08:00"),
+                body: "## 认领\n\n- agent: DemoAgent\n- 改动模块: docs/new\n".to_string(),
+            },
+            comment_id(
+                &format!("## 心跳\n\n- agent: DemoAgent\n- 认领: {old_url}\n- 进度: 旧会话迟到\n"),
+                "2026-10-14T06:10:00+08:00",
+                4,
+            ),
+        ],
+    ));
+    let held = board.lease(31).expect("新租约仍在");
+    assert_eq!(held.claim.url, fresh_url);
+    assert_eq!(
+        held.last.at,
+        at("2026-10-14T06:09:00+08:00"),
+        "旧租约绑定的迟到心跳不能刷新同厂商的新会话"
+    );
+}
+
+#[test]
 fn claiming_an_issue_someone_else_holds_is_refused() {
     let held = issue(
         &[lease::CLAIM_LABEL],
@@ -390,7 +471,12 @@ fn claiming_modules_another_claim_covers_needs_a_plan() {
         )],
     };
     let board = board_of(other);
-    let free = issue(&[], vec![]);
+    let free = Issue {
+        number: 25,
+        title: "另一个 issue".to_string(),
+        labels: vec![],
+        comments: vec![],
+    };
     let now = at("2026-10-14T03:20:00+08:00");
     let modules = ["backend/src/claim/lease.rs".to_string()];
     let Verdict::Refuse(why) = decide_claim(&board, &free, "Codex", &modules, None, now) else {
@@ -462,9 +548,10 @@ fn the_comments_the_commands_post_read_back_as_what_they_are() {
         "认领评论要告诉持有者多久要心跳一次：{body}"
     );
 
-    let beat = heartbeat_comment("DemoAgent", "在补测试", now);
+    let beat = heartbeat_comment("DemoAgent", "claim-url", "在补测试", now);
     let beat = lease::parse_heartbeat(&beat, "u", now).expect("a posted heartbeat reads back");
     assert!(beat.marked && beat.agent == "DemoAgent");
+    assert_eq!(beat.claim_url.as_deref(), Some("claim-url"));
 
     let lease = board_of(issue(
         &[lease::CLAIM_LABEL],
@@ -617,7 +704,7 @@ fn giving_up_a_claim_that_lost_a_race_does_not_end_the_one_that_won() {
 }
 
 #[test]
-fn a_claim_by_the_same_agent_again_updates_what_it_will_change() {
+fn a_later_claim_with_the_same_agent_name_does_not_replace_the_session() {
     let board = board_of(issue(
         &[lease::CLAIM_LABEL],
         vec![
@@ -629,13 +716,13 @@ fn a_claim_by_the_same_agent_again_updates_what_it_will_change() {
             ),
         ],
     ));
-    let held = board.lease(31).expect("持有者自己重发认领还是它的租约");
+    let held = board.lease(31).expect("最早的认领仍然是租约");
     assert_eq!(held.agent(), "DemoAgent");
-    assert_eq!(held.claim.modules, ["docs/demo", "scripts/demo"]);
+    assert_eq!(held.claim.modules, ["docs/demo/claim-lease-demo.md"]);
     assert_eq!(
         held.last.at,
-        at("2026-10-14T04:00:00+08:00"),
-        "重发一次认领也是一次活着的证据"
+        at("2026-10-14T03:05:55+08:00"),
+        "agent 名只表示厂商，不表示会话；同名的后一条认领不能替换或续租"
     );
 }
 
@@ -722,6 +809,42 @@ fn a_push_time_nobody_can_read_keeps_the_issue_from_being_taken_over() {
         panic!("同样不能直接认领");
     };
     assert!(why.contains("推送时间读不到"), "{why}");
+}
+
+#[test]
+fn a_lease_with_unreadable_pushes_still_reserves_its_modules() {
+    let mut pushes = BTreeMap::new();
+    pushes.insert(
+        "demo/claim-lease".to_string(),
+        Push::Unreadable("Must have push access to repository".to_string()),
+    );
+    let board = board(&Snapshot {
+        issues: vec![issue(
+            &[lease::CLAIM_LABEL],
+            vec![comment(DEMO_CLAIM, "2026-10-14T03:05:55+08:00")],
+        )],
+        pushes,
+    });
+    let free = Issue {
+        number: 25,
+        title: "另一个 issue".to_string(),
+        labels: vec![],
+        comments: vec![],
+    };
+    let Verdict::Refuse(why) = decide_claim(
+        &board,
+        &free,
+        "Codex",
+        &["docs/demo/claim-lease-demo.md".to_string()],
+        None,
+        at("2026-10-14T06:10:00+08:00"),
+    ) else {
+        panic!("证明不了沉默的租约仍要预留模块，不能交给另一个 issue");
+    };
+    assert!(
+        why.contains("#31") && why.contains("--overlap"),
+        "拒绝要指出占用模块的租约：{why}"
+    );
 }
 
 #[test]
