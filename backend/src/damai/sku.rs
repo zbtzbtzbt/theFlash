@@ -88,7 +88,7 @@ pub(crate) fn parse_sku_json(data: &Value) -> Result<PerformSkus, String> {
                     sku_id: string(&s["skuId"])
                         .or_else(|| integer(&s["skuId"]).map(|n| n.to_string())),
                     name: string(&s["priceName"]),
-                    price: string(&s["price"]),
+                    price: sku_price(s),
                     front_end_status: string(&s["frontEndStatus"]),
                     salable: match s["skuSalable"].as_str() {
                         Some("true") => Some(true),
@@ -127,6 +127,31 @@ pub(crate) fn parse_sku_json(data: &Value) -> Result<PerformSkus, String> {
         rtc,
         choose_seat,
     })
+}
+
+/// The price of one tier as `report::price_text` formats it (with a
+/// leading `¥`). For a tier without promotion, that is `price` verbatim.
+/// For a tier with `hasPromotion` true, damai.cn puts the discounted
+/// price in `price`, the face value in `dashPrice`, and the promotion
+/// description in `mktPromotionTips` ("¥108票档，5折，到手¥54"); whether an
+/// account gets the discount is only decided after signing in, so the
+/// face value, the promotion details, and that caveat are all kept (#179).
+fn sku_price(s: &Value) -> Option<String> {
+    let price = string(&s["price"]);
+    let has_promotion =
+        s["hasPromotion"].as_str() == Some("true") || s["hasPromotion"].as_bool() == Some(true);
+    if !has_promotion {
+        return price;
+    }
+    let dash_price = string(&s["dashPrice"]);
+    let tips = string(&s["mktPromotionTips"]);
+    let base = dash_price.or_else(|| price.clone())?;
+    let detail = match (tips, price) {
+        (Some(tips), _) => tips,
+        (None, Some(p)) if p != base => format!("到手¥{p}"),
+        (None, _) => return Some(base),
+    };
+    Some(format!("{base}（优惠：{detail}；是否享受以登录账号为准）"))
 }
 
 /// Why this response carries no tiers for the session that was asked
@@ -218,5 +243,75 @@ mod tests {
     #[test]
     fn a_page_that_is_not_jsonp_is_an_error() {
         assert!(parse_sku_jsonp("<html>oops</html>").is_err());
+    }
+
+    // Item 1089383688003 session 286929360 (#179): tiers with `hasPromotion`
+    // true carry the discounted price in `price`, the face value in
+    // `dashPrice`, and the promotion details in `mktPromotionTips`; tiers
+    // without promotion keep `price` verbatim.
+    #[test]
+    fn promotion_tiers_include_face_price_and_promotion_tips_while_regular_tiers_stay_verbatim() {
+        let data = serde_json::json!({
+            "responseInfo": {"responseSuccess": "true", "responseCode": "0"},
+            "itemBuyBtn": {"btnStatus": "204", "btnText": "立即购票"},
+            "perform": {
+                "performId": "286929360",
+                "skuList": [
+                    {
+                        "skuId": "1",
+                        "priceName": "早鸟票88元",
+                        "price": "88.00",
+                        "dashPrice": "88.00",
+                        "hasPromotion": "false",
+                        "mktPromotionTips": "",
+                        "frontEndStatus": "1",
+                        "skuSalable": "true"
+                    },
+                    {
+                        "skuId": "2",
+                        "priceName": "现场票108元",
+                        "price": "54",
+                        "dashPrice": "108.00",
+                        "hasPromotion": "true",
+                        "mktPromotionTips": "¥108票档，5折，到手¥54",
+                        "frontEndStatus": "1",
+                        "skuSalable": "true"
+                    },
+                    {
+                        "skuId": "3",
+                        "priceName": "VIP票188元（手链+小卡）",
+                        "price": "94",
+                        "dashPrice": "188.00",
+                        "hasPromotion": true,
+                        "mktPromotionTips": "¥188票档，5折，到手¥94",
+                        "frontEndStatus": "1",
+                        "skuSalable": "true"
+                    }
+                ]
+            }
+        });
+        let p = parse_sku_json(&data).unwrap();
+        let skus = p.skus.unwrap();
+        assert_eq!(skus[0].price.as_deref(), Some("88.00"));
+        assert_eq!(
+            skus[1].price.as_deref(),
+            Some("108.00（优惠：¥108票档，5折，到手¥54；是否享受以登录账号为准）")
+        );
+        assert_eq!(
+            skus[2].price.as_deref(),
+            Some("188.00（优惠：¥188票档，5折，到手¥94；是否享受以登录账号为准）")
+        );
+        assert_eq!(
+            crate::report::price_text(skus[0].price.as_deref()),
+            "¥88.00"
+        );
+        assert_eq!(
+            crate::report::price_text(skus[1].price.as_deref()),
+            "¥108.00（优惠：¥108票档，5折，到手¥54；是否享受以登录账号为准）"
+        );
+        assert_eq!(
+            crate::report::price_text(skus[2].price.as_deref()),
+            "¥188.00（优惠：¥188票档，5折，到手¥94；是否享受以登录账号为准）"
+        );
     }
 }

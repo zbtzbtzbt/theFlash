@@ -278,6 +278,24 @@ pub const TIER_FIELDS: &[Field] = &[
     f("perform.skuList[].priceName", &[Str], Always, "票档名称"),
     f("perform.skuList[].price", &[Str], Always, "票价"),
     f(
+        "perform.skuList[].dashPrice",
+        &[Str],
+        Always,
+        "促销票档的票面价",
+    ),
+    f(
+        "perform.skuList[].hasPromotion",
+        &[Bool, Str],
+        Always,
+        "票档是否有促销优惠",
+    ),
+    f(
+        "perform.skuList[].mktPromotionTips",
+        &[Str],
+        Need::Optional,
+        "促销票档的优惠说明（缺货票档可能不带）",
+    ),
+    f(
         "perform.skuList[].frontEndStatus",
         &[Str],
         Always,

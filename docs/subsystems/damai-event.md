@@ -30,7 +30,9 @@
 | 售卖状态 | `dataDefault.buyBtnStatus`（见下表） |
 | 开售时间 | `dataDefault.sellStartTime`（毫秒时间戳），按北京时间显示；只在“未开售”时显示 |
 | 场次 | `dataDefault.performBases[].performs[]`，加上 `dataDefault.calendarPerforms[].performBases[].performs[]`；按 `performId` 去重，按 `performDate` 排序 |
-| 票档 | 票档接口的 `perform.skuList[]`：`priceName`、`price`、`frontEndStatus`、`skuSalable` |
+| 票档 | 票档接口的 `perform.skuList[]`：`priceName`、`price`、`dashPrice`、`hasPromotion`、`mktPromotionTips`、`frontEndStatus`、`skuSalable` |
+
+没有促销的票档（`hasPromotion` 为 `false` 或 `"false"`）直接显示 `¥<price>`（例如 `¥88.00`）。有促销的票档（`hasPromotion` 为 `true` 或 `"true"`），大麦把折后到手价放在 `price`、票面价放在 `dashPrice`、优惠说明放在 `mktPromotionTips`（页面合计旁提示“登录后查看是否享受优惠”）；程序把价格格式化为 `¥<dashPrice>（优惠：<mktPromotionTips>；是否享受以登录账号为准）`（例如 `¥108.00（优惠：¥108票档，5折，到手¥54；是否享受以登录账号为准）`），`theflash event`、浏览器界面（`event-json`）和 `watch` 提醒正文共用同一结果（#179）。
 
 两种页面布局：
 

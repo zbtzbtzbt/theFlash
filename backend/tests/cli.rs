@@ -855,3 +855,90 @@ fn risk_works_with_a_mistyped_request_gap_because_it_sends_nothing() {
         }
     }
 }
+
+// #179: promotional tiers show both the face price (`dashPrice`) and the
+// promotion details (`mktPromotionTips`) with the account caveat across
+// `event` and `event-json`, while non-promotional tiers stay verbatim.
+#[test]
+fn promotion_tiers_show_face_price_and_promotion_tips_in_event_and_event_json() {
+    let original = fixture("sku_on_sale_286937789.jsonp");
+    let open = original.find('(').unwrap();
+    let close = original.rfind(')').unwrap();
+    let mut data: serde_json::Value = serde_json::from_str(&original[open + 1..close]).unwrap();
+    data["perform"]["skuList"] = serde_json::json!([
+        {
+            "skuId": "1",
+            "priceName": "早鸟票88元",
+            "price": "88.00",
+            "dashPrice": "88.00",
+            "hasPromotion": "false",
+            "mktPromotionTips": "",
+            "frontEndStatus": "1",
+            "skuSalable": "true"
+        },
+        {
+            "skuId": "2",
+            "priceName": "现场票108元",
+            "price": "54",
+            "dashPrice": "108.00",
+            "hasPromotion": "true",
+            "mktPromotionTips": "¥108票档，5折，到手¥54",
+            "frontEndStatus": "1",
+            "skuSalable": "true"
+        },
+        {
+            "skuId": "3",
+            "priceName": "VIP票188元（手链+小卡）",
+            "price": "94",
+            "dashPrice": "188.00",
+            "hasPromotion": true,
+            "mktPromotionTips": "¥188票档，5折，到手¥94",
+            "frontEndStatus": "1",
+            "skuSalable": "true"
+        }
+    ]);
+    let damai = MockDamai::start_bodies(vec![
+        (
+            "/item.htm?id=1086791513717".into(),
+            fixture("item_on_sale.html"),
+        ),
+        (
+            "dataType=2&dataId=286937789".into(),
+            format!("__jp0({data})"),
+        ),
+        (
+            "dataType=2&dataId=286937790".into(),
+            fixture("sku_on_sale_286937790.jsonp"),
+        ),
+        (
+            "dataType=2&dataId=286937788".into(),
+            fixture("sku_on_sale_286937788.jsonp"),
+        ),
+    ]);
+
+    let text = theflash(&damai.base_url(), &["event", "1086791513717"]);
+    assert!(text.status.success(), "{}", stderr(&text));
+    let cli = stdout(&text);
+    let want_session = "\
+场次：2026-10-14 周三 17:00
+  早鸟票88元 · ¥88.00 · 可售
+  现场票108元 · ¥108.00（优惠：¥108票档，5折，到手¥54；是否享受以登录账号为准） · 可售
+  VIP票188元（手链+小卡） · ¥188.00（优惠：¥188票档，5折，到手¥94；是否享受以登录账号为准） · 可售
+";
+    assert!(cli.contains(want_session), "{cli}");
+
+    let json_out = theflash(&damai.base_url(), &["event-json", "1086791513717"]);
+    assert!(json_out.status.success(), "{}", stderr(&json_out));
+    let event: serde_json::Value = serde_json::from_str(&stdout(&json_out)).unwrap();
+    assert_eq!(cli_text_from_event_json(&event), cli);
+    let tiers = event["sessions"][0]["tiers"].as_array().unwrap();
+    assert_eq!(tiers[0]["price"], "¥88.00");
+    assert_eq!(
+        tiers[1]["price"],
+        "¥108.00（优惠：¥108票档，5折，到手¥54；是否享受以登录账号为准）"
+    );
+    assert_eq!(
+        tiers[2]["price"],
+        "¥188.00（优惠：¥188票档，5折，到手¥94；是否享受以登录账号为准）"
+    );
+}

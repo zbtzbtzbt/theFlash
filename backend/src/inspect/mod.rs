@@ -723,7 +723,16 @@ fn collect(root: &Value, fields: &'static [Field], changes: &mut Vec<Change>) {
                 entry.1 += outcome.absent.len();
             }
             Need::Optional => {
-                if tier_on_sale && let Some(at) = outcome.absent.first() {
+                // Top-level handoff fields (`perform.chooseSeatType` and
+                // `itemBasicInfo.t`) are always sent when the session is
+                // on sale (#54); per-tier optional fields like
+                // `perform.skuList[].mktPromotionTips` are left out on
+                // out-of-stock tiers even when the session is on sale
+                // (#179).
+                if tier_on_sale
+                    && !field.path.contains("[]")
+                    && let Some(at) = outcome.absent.first()
+                {
                     changes.push(change(field, What::Gone { at: at.clone() }));
                 }
             }
