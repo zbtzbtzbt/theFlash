@@ -2,7 +2,7 @@
 
 > 按大麦时钟提醒开售、轮询回流
 
-`theflash watch <链接或ID> [--session 场次] [--tier 票档] [--interval 秒] [--no-system-notify]` 盯住一场演出：未开售时按大麦的时钟倒计时，开售那一刻提醒，再确认是否真的能买；之后按间隔查询，盯的票档从没票变成可售时提醒。只读，不登录，不下单。为什么这样设计见 [0002](../decisions/0002-watch-timing-and-polling.md)；查询本身见 [damai-event.md](damai-event.md)。
+`theflash watch <链接或ID> [--session 场次] [--tier 票档] [--count 张数] [--interval 秒] [--no-open] [--no-system-notify]` 盯住一场演出：未开售时按大麦的时钟倒计时，开售那一刻提醒，再确认是否真的能买；之后按间隔查询，盯的票档从没票变成可售时提醒，并在默认浏览器中自动打开已选好场次、票档和张数的购买确认页（或选座页），停在用户点“提交订单”之前（[0018](../decisions/0018-browser-handoff.md)）。只读，不登录，不下单。为什么这样设计见 [0002](../decisions/0002-watch-timing-and-polling.md)；查询本身见 [damai-event.md](damai-event.md)。
 
 ## 运行路径
 
@@ -42,6 +42,8 @@
 系统通知：macOS 用 `osascript` 发到通知中心，Linux 用 `notify-send`。标题和正文作为参数传入，不拼进脚本（[`system_notification`](../../backend/src/watch/notify.rs)）。命令不存在时说明一次，之后只在终端提醒。`--no-system-notify` 关掉系统通知。
 
 手机通知：可配置 ntfy，标题与桌面相同，正文在 4095 UTF-8 字节以内时逐字相同。较长正文保留演出、开头完整票档、时间和开售确认状态，并说明省略票档数量；终端和桌面仍保留完整正文。没有配置时行为不变；失败只说明一次投递的固定原因，继续盯票，下一次状态变化照常投递。后台发送不等待第三方服务，`--no-system-notify` 不关闭手机推送。配置、权限和投递限制见 [手机提醒](phone-push.md)。
+
+浏览器交接（#54，[0018](../decisions/0018-browser-handoff.md)）：启动时（未传 `--no-open`）输出一行“开售前检查”，提醒用户先在默认浏览器登录大麦、核对实名观演人与地址、确认支付方式可用。当确认有票可买时（`现在就可以买`、`已经可以买了`、`有票了`），按大麦电脑版 `perform.js` 的同一套参数构造首个可售被盯票档的订单确认页（`h5-ultron-buy/index.html`，带 `exParams`、`buyParam=<itemId>_<count>_<skuId>`、`buyNow=true`、`rtc`）或选座页（`select-seat-biz/kylin.html`），在终端输出 `购买确认页（<场次> · <票档>，<张数> 张）：<URL>`，并用 macOS `open` / Linux `xdg-open` 在默认浏览器中打开（参数直接传给进程，不拼进 shell）。`--count <1..=6>` 指定张数（默认 1），`--no-open` 只打印链接不拉起浏览器。程序绝不自己发出提交订单的请求。
 
 ## 请求量
 

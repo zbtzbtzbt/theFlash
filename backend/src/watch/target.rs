@@ -1,6 +1,6 @@
 //! Which sessions and tiers a watch follows.
 
-use crate::damai::{Event, TierStatus};
+use crate::damai::{Event, Handoff, TierStatus};
 use crate::report::{price_text, tier_label};
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -35,6 +35,7 @@ pub(crate) struct Watched {
     pub tier: String,
     pub price: Option<String>,
     pub status: TierStatus,
+    pub handoff: Option<Handoff>,
 }
 
 impl Watched {
@@ -51,6 +52,15 @@ impl Watched {
             price_text(self.price.as_deref()),
             tier_label(&self.status)
         )
+    }
+
+    /// The order-confirmation or seat-selection URL for this tier, or the
+    /// detail page if damai.cn's tier response lacked a `skuId` (#54).
+    pub fn handoff_url(&self, item_id: u64, count: u32) -> String {
+        match &self.handoff {
+            Some(h) => h.url(item_id, count),
+            None => format!("https://detail.damai.cn/item.htm?id={item_id}"),
+        }
     }
 }
 
@@ -75,6 +85,7 @@ pub(crate) fn watched(event: &Event, f: &Filter) -> Vec<Watched> {
                     tier,
                     price: t.price.clone(),
                     status: t.status.clone(),
+                    handoff: t.handoff.clone(),
                 });
             }
         }

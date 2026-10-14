@@ -297,3 +297,125 @@ fn explicit_validation_gap_paces_heads_and_the_get_to_head_transition() {
         );
     }
 }
+
+#[test]
+fn watch_hands_off_the_selected_tier_to_the_browser_and_no_open_skips_it() {
+    let damai = on_sale();
+    let home = support::Home::new("watch-handoff");
+    let opened_log = home.path().join("opened.txt");
+    let browser = support::stub(
+        home.path(),
+        "fake-browser",
+        &format!("printf '%s\\n' \"$1\" >> '{}'", opened_log.display()),
+    );
+
+    let mut command = home.theflash(&damai.base_url());
+    command.env("THEFLASH_BROWSER", &browser);
+    let mut child = command
+        .args([
+            "watch",
+            "1086791513717",
+            "--session",
+            "10-15",
+            "--tier",
+            "C-178",
+            "--count",
+            "2",
+            "--no-system-notify",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let out = child.stdout.take().unwrap();
+    let (tx, lines) = channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(out).lines().map_while(Result::ok) {
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let mut watch = Watch {
+        child,
+        lines,
+        seen: Vec::new(),
+    };
+    assert!(
+        watch.wait_for(&["购买确认页（2026-10-15 周四 17:00 · C-178元，2 张）："]),
+        "{:#?}",
+        watch.seen
+    );
+    let (status, stdout, stderr) = watch.interrupt();
+    assert!(status.success(), "{status:?} {stderr}");
+    assert!(stdout.contains("开售前检查："), "{stdout}");
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !opened_log.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let launched = std::fs::read_to_string(&opened_log).unwrap_or_default();
+    let urls: Vec<&str> = launched.lines().collect();
+    assert_eq!(urls.len(), 1, "浏览器应当只被拉起一次：{launched}");
+    assert!(
+        urls[0].starts_with("https://m.damai.cn/app/dmfe/h5-ultron-buy/index.html?")
+            && urls[0].contains("buyParam=1086791513717_2_6141329425571")
+            && urls[0].contains("buyNow=true")
+            && urls[0].contains("rtc=1"),
+        "交接给浏览器的确认页 URL 不对：{}",
+        urls[0]
+    );
+    // Program only performs read-only GETs; it never submits an order itself (#6).
+    assert_eq!(damai.hits().len(), 2, "{:?}", damai.hits());
+
+    // `--no-open` prints the URL but does not invoke the browser launcher.
+    let _ = std::fs::remove_file(&opened_log);
+    let mut cmd_no_open = home.theflash(&damai.base_url());
+    cmd_no_open.env("THEFLASH_BROWSER", &browser);
+    let mut child2 = cmd_no_open
+        .args([
+            "watch",
+            "1086791513717",
+            "--session",
+            "10-15",
+            "--tier",
+            "C-178",
+            "--no-open",
+            "--no-system-notify",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let out2 = child2.stdout.take().unwrap();
+    let (tx2, lines2) = channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(out2).lines().map_while(Result::ok) {
+            if tx2.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let mut watch2 = Watch {
+        child: child2,
+        lines: lines2,
+        seen: Vec::new(),
+    };
+    assert!(
+        watch2.wait_for(&["购买确认页（2026-10-15 周四 17:00 · C-178元，1 张）："]),
+        "{:#?}",
+        watch2.seen
+    );
+    let (status2, _, _) = watch2.interrupt();
+    assert!(status2.success());
+    assert!(!opened_log.exists(), "--no-open 时不应调用浏览器启动器");
+
+    // Invalid `--count` is rejected with exit code 2 before any request.
+    for bad in ["0", "7", "abc"] {
+        let mut bad_cmd = home.theflash(&damai.base_url());
+        bad_cmd.args(["watch", "1086791513717", "--count", bad]);
+        let bad_out = support::output_within(bad_cmd, 10);
+        assert_eq!(bad_out.status.code(), Some(2), "--count {bad}");
+        let err = String::from_utf8_lossy(&bad_out.stderr);
+        assert!(err.contains("1 到 6"), "--count {bad}: {err}");
+    }
+}

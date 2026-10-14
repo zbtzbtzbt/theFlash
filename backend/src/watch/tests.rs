@@ -72,6 +72,13 @@ impl Fake {
             .iter()
             .any(|(_, l)| l.starts_with("say ") && l.contains(part))
     }
+
+    fn opened(&self) -> Vec<(i64, String)> {
+        self.log
+            .iter()
+            .filter_map(|(t, l)| l.strip_prefix("open ").map(|u| (*t, u.to_string())))
+            .collect()
+    }
 }
 
 impl Env for Fake {
@@ -146,6 +153,11 @@ impl Env for Fake {
             .push((t, format!("alert {title}: {}", lines.join(" | "))));
     }
 
+    fn open_browser(&mut self, url: &str) {
+        let t = self.damai();
+        self.log.push((t, format!("open {url}")));
+    }
+
     fn say(&mut self, line: &str) {
         let t = self.damai();
         self.log.push((t, format!("say {line}")));
@@ -176,6 +188,15 @@ fn event(sale: SaleState, sell_start: Option<i64>, tier: TierStatus) -> Event {
                 name: Some("180元".into()),
                 price: Some("180.00".into()),
                 status: tier,
+                handoff: Some(crate::damai::Handoff {
+                    sku_id: "6310776418726".into(),
+                    perform_id: 286966465,
+                    project_id: Some("240469001".into()),
+                    sign_key: Some("sig-test".into()),
+                    has_promotion: Some("false".into()),
+                    rtc: Some(true),
+                    choose_seat: false,
+                }),
             }])),
         }],
     }
@@ -199,6 +220,8 @@ fn opts(filter: Filter) -> Options {
         filter,
         interval: DEFAULT_INTERVAL,
         system_notify: false,
+        open_browser: true,
+        count: 1,
     }
 }
 
@@ -539,4 +562,58 @@ fn time_left_reads_in_hours_minutes_and_seconds() {
     assert_eq!(left_text(7_199_001), "2 小时 00 分 00 秒");
     assert_eq!(left_text(65_000), "1 分 05 秒");
     assert_eq!(left_text(1), "1 秒");
+}
+
+#[tokio::test]
+async fn opening_and_restock_hand_off_to_browser_once_per_available_transition() {
+    let mut f = Fake::new(SALE - 120_000, 0, opening_at(SALE + 1_500));
+    f.stop_after_alerts = 2;
+    let mut o = opts(Filter::default());
+    o.count = 2;
+    run(&mut f, &o).await.unwrap();
+    assert!(
+        f.said("开售前检查：请先在默认浏览器登录大麦"),
+        "{:#?}",
+        f.log
+    );
+    let opened = f.opened();
+    assert_eq!(
+        opened.len(),
+        1,
+        "开售时间到（未确认可售）不应提前弹窗，确认可售时只打开一次：{opened:?}"
+    );
+    assert!(
+        opened[0]
+            .1
+            .starts_with("https://m.damai.cn/app/dmfe/h5-ultron-buy/index.html?")
+            && opened[0]
+                .1
+                .contains("buyParam=1092337348536_2_6310776418726")
+            && opened[0].1.contains("buyNow=true")
+            && opened[0].1.contains("rtc=1"),
+        "确认页 URL 不符合预期：{}",
+        opened[0].1
+    );
+
+    // `--no-open` prints the confirmation URL in the terminal but never
+    // launches the browser.
+    let mut f_quiet = Fake::new(
+        SALE + 3_600_000,
+        0,
+        Box::new(|_, _| Ok(on_sale(TierStatus::Available))),
+    );
+    f_quiet.stop_after_calls = 1;
+    let mut no_open = opts(Filter::default());
+    no_open.open_browser = false;
+    run(&mut f_quiet, &no_open).await.unwrap();
+    assert!(
+        f_quiet.opened().is_empty(),
+        "--no-open 时不应打开浏览器：{:?}",
+        f_quiet.opened()
+    );
+    assert!(
+        f_quiet.said("购买确认页（2026-10-15 周四 17:00 · 180元，1 张）：https://m.damai.cn/"),
+        "--no-open 时终端仍应给出购买确认页链接：{:#?}",
+        f_quiet.log
+    );
 }

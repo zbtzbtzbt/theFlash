@@ -135,12 +135,26 @@ impl Client {
                                 Some(b) => sale_state(Some(b)),
                                 None => sale.clone(),
                             };
+                            let project_id = p.project_id.clone();
+                            let sign_key = p.sign_key.clone();
+                            let has_promotion = p.has_promotion.clone();
+                            let rtc = p.rtc;
+                            let choose_seat = p.choose_seat;
                             Ok(p.skus.map(|skus| {
                                 skus.iter()
                                     .map(|s| Tier {
                                         name: s.name.clone(),
                                         price: s.price.clone(),
                                         status: tier_status(&state, s),
+                                        handoff: s.sku_id.as_ref().map(|sku_id| super::Handoff {
+                                            sku_id: sku_id.clone(),
+                                            perform_id: perform.id,
+                                            project_id: project_id.clone(),
+                                            sign_key: sign_key.clone(),
+                                            has_promotion: has_promotion.clone(),
+                                            rtc,
+                                            choose_seat,
+                                        }),
                                     })
                                     .collect()
                             }))

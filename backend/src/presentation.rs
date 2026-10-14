@@ -93,6 +93,7 @@ mod tests {
                         name: None,
                         price: None,
                         status: TierStatus::Unknown("frontEndStatus 9".into()),
+                        handoff: None,
                     }])),
                 },
                 Session {

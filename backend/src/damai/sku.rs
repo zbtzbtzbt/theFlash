@@ -8,6 +8,7 @@ use super::text::{integer, string};
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct SkuRaw {
+    pub sku_id: Option<String>,
     pub name: Option<String>,
     pub price: Option<String>,
     /// "1", "2", "4" seen so far; see docs/subsystems/damai-event.md.
@@ -22,6 +23,11 @@ pub(crate) struct PerformSkus {
     pub buy_button: Option<BuyButton>,
     /// None means skuList was missing or null; Some([]) is explicitly empty.
     pub skus: Option<Vec<SkuRaw>>,
+    pub project_id: Option<String>,
+    pub sign_key: Option<String>,
+    pub has_promotion: Option<String>,
+    pub rtc: Option<bool>,
+    pub choose_seat: bool,
 }
 
 pub(crate) fn tier_url(base: &str, item_id: u64, perform_id: u64) -> String {
@@ -73,6 +79,8 @@ pub(crate) fn parse_sku_json(data: &Value) -> Result<PerformSkus, String> {
             values
                 .iter()
                 .map(|s| SkuRaw {
+                    sku_id: string(&s["skuId"])
+                        .or_else(|| integer(&s["skuId"]).map(|n| n.to_string())),
                     name: string(&s["priceName"]),
                     price: string(&s["price"]),
                     front_end_status: string(&s["frontEndStatus"]),
@@ -87,10 +95,31 @@ pub(crate) fn parse_sku_json(data: &Value) -> Result<PerformSkus, String> {
         _ => return Err("perform.skuList 不是数组".into()),
     };
 
+    let basic = &data["itemBasicInfo"];
+    let project_id =
+        string(&basic["projectId"]).or_else(|| integer(&basic["projectId"]).map(|n| n.to_string()));
+    let sign_key = string(&basic["t"]);
+    let has_promotion = string(&perform["hasPromotion"]);
+    let rtc = match data["actionControl"]["tradeControl"]["rtc"].as_str() {
+        Some("true") => Some(true),
+        Some("false") => Some(false),
+        _ => data["actionControl"]["tradeControl"]["rtc"].as_bool(),
+    };
+    let seat_btn = matches!(
+        buy_button.as_ref().and_then(|b| b.status),
+        Some(206 | 231 | 217 | 224 | 87)
+    );
+    let choose_seat = seat_btn || integer(&perform["chooseSeatType"]) == Some(1);
+
     Ok(PerformSkus {
         perform_id: perform_id(&perform["performId"]),
         buy_button,
         skus,
+        project_id,
+        sign_key,
+        has_promotion,
+        rtc,
+        choose_seat,
     })
 }
 
@@ -145,6 +174,7 @@ mod tests {
         assert_eq!(
             skus[0],
             SkuRaw {
+                sku_id: Some("6141329425570".into()),
                 name: Some("D-118元".into()),
                 price: Some("118.00".into()),
                 front_end_status: Some("2".into()),
