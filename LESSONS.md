@@ -45,6 +45,7 @@
 
 **守护测试失败时，先列出真正没过的用例，再给专用提示；不要一上来就归罪路径编码。**
 - Done right on 10-14: `9a5c72c`（#123）——checkout-path 摘要段先列 FAIL 名，再区分原目录失败 vs 副本路径问题。
+- Done right on 10-14: `6c32db6`（#106）——`fake-gh` 的 `case`/`printf` 路径一律加引号，防止空格路径被 word-split；守护用含空格副本跑 `scripts/check.sh` 并断言 FAIL 后仍退出 1。
 - Seen 1× (2026-10-14)。
 
 **列表 API 固定 `--limit 100` 且不翻页时，最旧的那条（巡检自己的 issue）会掉出第一页，导致每天重复新开。**
