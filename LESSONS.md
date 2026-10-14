@@ -1,4 +1,4 @@
-<!-- reviewed-through: 524222e (2026-10-14 11:01 +0800) -->
+<!-- reviewed-through: ff15558 (2026-10-14 11:08 +0800) -->
 # 已合并工作的教训
 
 本项目的代码由 agent 编写、审查、合并和发布。每天夜里有一个复盘 agent 检查当天的 commit：哪些改动后来又被返工、哪些不该合并、哪些验证得太薄。学到的东西记在这里。改代码之前先读这份文件。
@@ -48,7 +48,7 @@
 **以某个保证命名的测试，在保证被破坏时必须失败；只断言宽泛的退出码或“文字里有文件名”不算。**
 - #53（PR #50 / `78b5a4e`）：docs 索引的三个格式守护（缺状态、标题编号、标题里的 `|`）被删掉后，`scripts/tests/test_docs_index.py` 仍全绿——测试只在索引未更新时跑 `--check`，没把破坏后的生成器再跑一遍。
 - #48（#30 / `a5b9169`）：状态样式颜色测试在 happy-dom 里对“有背景色”的断言永远过；删掉整条 `.not-yet-on-sale` 规则仍全绿。同 issue：`browser_event_json_preserves_cli_content` 名字说保留 CLI 内容，实际只比 `report` 字段。
-- #44（#11 / `dab6050`）：`finish_push` 删掉后全仓测试仍绿。
+- #44（#11 / `dab6050`）：`finish_push` 删掉后全仓测试仍绿。Done right on 10-14: `ff15558`（#44/#66）——风控退出手机提醒与拼错配置有真正会红的离线守护；同窗还合入 `e2eaf65`（#51）、`3dbeabc`（#17）。CI 仍被 #63 挡住未跑。
 - 怎么避免：审查时按 code-standards 故意破坏命名保证；合并前 `git show` 里每个新测试都要有一条“破坏后 FAIL”的记录。未修前不要在相关模块上继续堆功能。
 - Seen 1× (2026-10-14)。
 
@@ -69,6 +69,11 @@
 **CI job 显示 failure 时先看 annotation：账单/额度导致“没启动”不等于测试红，不要当代码回归去修。**
 - `fd68bd7`（#4）的 Test run [38503286512](https://github.com/zbtzbtzbt/theFlash/actions/runs/38503286512) 双平台 failure，annotation 为 account payments failed / spending limit；检查未运行。已开 issue 给 owner。
 - 怎么避免：work-tick / hygiene 判 main 红前读 job annotation 或 `gh run view --json jobs`；命中 billing 就停手报告 owner，不改业务代码。
+- Seen 1× (2026-10-14)。
+
+**GitHub Actions 因账单无法启动时，不要把“空 failure”当成已验证通过；合入须在 issue 写明“未跑远程 CI”，恢复后立刻补跑。**
+- `89d371e`（#14 dispatch）正文写明 Actions 全仓库空失败、未以红 CI 为否决；`d5c4798` 合入 LESSONS（PR #56）同样。合理权宜，但 #63 未关前 main 上连续合入都没有一次真正跑完的检查。
+- 怎么避免：billing 挡着时，合并评论固定写「远程 CI 未跑，#63」；#63 关闭后的第一轮 work-tick 必须对当时 HEAD 触发 Test 并确认双平台绿。
 - Seen 1× (2026-10-14)。
 
 **判断 main 红不红只看 Test 工作流；被设计拒绝的 Release run 不算 main 红。**
