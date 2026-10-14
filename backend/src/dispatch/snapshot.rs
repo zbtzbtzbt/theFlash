@@ -18,6 +18,7 @@ pub struct Issue {
     pub number: u64,
     pub title: String,
     pub labels: Vec<String>,
+    pub body: String,
     /// The agent named by the newest claim or heartbeat comment, if any.
     /// All agents share one GitHub account, so who is working on an issue
     /// comes from what the comments say, not from `user.login` (#15).
@@ -97,6 +98,8 @@ struct ApiIssue {
     number: u64,
     #[serde(default)]
     title: String,
+    #[serde(default)]
+    body: Option<String>,
     #[serde(default)]
     labels: Vec<ApiLabel>,
     /// Present on pull requests only, which the issues endpoint also
@@ -201,6 +204,7 @@ fn issues_from_json(text: &str) -> Result<Vec<Issue>, Error> {
             number: i.number,
             title: i.title,
             labels: i.labels.into_iter().map(|l| l.name).collect(),
+            body: i.body.unwrap_or_default(),
             agent: None,
             last_comment_at: None,
         })

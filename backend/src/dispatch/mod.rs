@@ -21,6 +21,7 @@ mod tests;
 
 use chrono::{DateTime, FixedOffset, Utc};
 
+use crate::claim::priority::{self, Level, WAITING_LABEL};
 use config::Config;
 use snapshot::{MainChecks, Snapshot};
 use state::{Outcome, Session, State};
@@ -160,6 +161,13 @@ pub enum Skip {
     UnknownImplementer,
     /// No agent command line for the vendor this task must go to.
     NoAgent(String),
+    /// The issue has no priority label yet (`P0`–`P3`), so `claims triage`
+    /// must run before `implement` can order it (#103).
+    Untriaged,
+    /// The issue carries two or more priority labels at once (#103).
+    ConflictingPriority(String),
+    /// The issue depends on open issues that have not closed yet (#103).
+    Blocked(Vec<u64>),
     /// Today's ceiling is used up.
     DailyCap(usize),
     /// Too many sessions are already running.
@@ -175,6 +183,19 @@ impl Skip {
             Skip::Done(id) => format!("已经派过 {id}，重试次数用完了"),
             Skip::UnknownImplementer => "看不出是哪个 agent 实现的，不猜".to_string(),
             Skip::NoAgent(vendor) => format!("没配 {vendor} 的命令行"),
+            Skip::Untriaged => {
+                "还没定优先级（P0～P3），先用 scripts/claims triage 定级".to_string()
+            }
+            Skip::ConflictingPriority(levels) => {
+                format!("同时标着 {levels}，先用 scripts/claims triage 定成一个")
+            }
+            Skip::Blocked(by) => format!(
+                "被还没关的 {} 挡着",
+                by.iter()
+                    .map(|n| format!("#{n}"))
+                    .collect::<Vec<_>>()
+                    .join("、")
+            ),
             Skip::DailyCap(cap) => format!("今天已经派了 {cap} 个会话，到上限了"),
             Skip::Concurrency(cap) => format!("已经有 {cap} 个会话在跑，排队"),
         }
@@ -332,16 +353,20 @@ fn candidates(
     }
 
     for pull in &snapshot.pulls {
-        if !allowed(&pull.labels, config) {
+        if !allowed(&pull.labels, config) || pull.labels.iter().any(|l| l == WAITING_LABEL) {
             continue;
         }
-        // A pull request for an issue the settings exclude is excluded
-        // with it: the issue is excluded because nobody is to be sent to
-        // work on it, and its pull request is that same work.
-        if pull
-            .issue
-            .is_some_and(|number| config.ignore_issues.contains(&number))
-        {
+        // A pull request for an issue the settings exclude — or one that
+        // waits on an owner ruling (`等裁决`, #103) — is excluded with it:
+        // nobody is to be sent to work on it, and its pull request is that
+        // same work.
+        if pull.issue.is_some_and(|number| {
+            config.ignore_issues.contains(&number)
+                || snapshot
+                    .issues
+                    .iter()
+                    .any(|i| i.number == number && i.labels.iter().any(|l| l == WAITING_LABEL))
+        }) {
             continue;
         }
         let role = if pull.labels.iter().any(|l| l == FIX_PULL_LABEL) {
@@ -376,46 +401,111 @@ fn candidates(
         });
     }
 
+    let mut fresh = Vec::new();
+    let mut deferred_implement = Vec::new();
     for issue in &snapshot.issues {
         if config.ignore_issues.contains(&issue.number) || !allowed(&issue.labels, config) {
             continue;
         }
         let has = |label: &str| issue.labels.iter().any(|l| l == label);
-        let (role, why) = if has(FIX_ISSUE_LABEL) {
-            (
-                Role::FixIssue,
-                format!("#{} 验收未通过，等实现者修", issue.number),
-            )
-        } else if has(ACCEPT_LABEL) {
-            (Role::Accept, format!("#{} 等另一个厂商验收", issue.number))
-        } else if !BUSY_LABELS.iter().any(|l| has(l)) {
-            (
-                Role::Implement,
-                format!("#{} 还没人认领：{}", issue.number, issue.title),
-            )
-        } else {
+        // Issues waiting on an owner ruling (`等裁决`) are never dispatched
+        // for any role (#103).
+        if has(WAITING_LABEL) {
             continue;
-        };
-        wanted.push(Wanted {
-            role,
-            issue: Some(issue.number),
-            pull: None,
-            // An issue's labels do not say which round this is, so the
-            // sessions already run on it do (see `round`).
-            event: None,
-            // An issue assigned to one agent by label only goes to that
-            // agent; otherwise the agent that last spoke on it is its
-            // implementer.
-            known: assigned_vendor(&issue.labels, config)
-                .or_else(|| vendor_of(issue.agent.as_deref(), config)),
-            why,
-        });
+        }
+        let known = assigned_vendor(&issue.labels, config)
+            .or_else(|| vendor_of(issue.agent.as_deref(), config));
+        if has(FIX_ISSUE_LABEL) {
+            wanted.push(Wanted {
+                role: Role::FixIssue,
+                issue: Some(issue.number),
+                pull: None,
+                event: None,
+                known,
+                why: format!("#{} 验收未通过，等实现者修", issue.number),
+            });
+        } else if has(ACCEPT_LABEL) {
+            wanted.push(Wanted {
+                role: Role::Accept,
+                issue: Some(issue.number),
+                pull: None,
+                event: None,
+                known,
+                why: format!("#{} 等另一个厂商验收", issue.number),
+            });
+        } else if !BUSY_LABELS.iter().any(|l| has(l)) {
+            let w = Wanted {
+                role: Role::Implement,
+                issue: Some(issue.number),
+                pull: None,
+                event: None,
+                known,
+                why: format!("#{} 还没人认领：{}", issue.number, issue.title),
+            };
+            match priority::level(&issue.labels) {
+                Level::Unset => deferred_implement.push((w, Skip::Untriaged)),
+                Level::Several(_) => deferred_implement.push((
+                    w,
+                    Skip::ConflictingPriority(priority::level(&issue.labels).describe()),
+                )),
+                Level::Set(p) => {
+                    let blocking: Vec<u64> = priority::depends_on(&issue.body)
+                        .into_iter()
+                        .filter(|n| {
+                            *n != issue.number && snapshot.issues.iter().any(|o| o.number == *n)
+                        })
+                        .collect();
+                    if !blocking.is_empty() {
+                        deferred_implement.push((w, Skip::Blocked(blocking)));
+                    } else {
+                        fresh.push((p, issue.number, w));
+                    }
+                }
+            }
+        }
     }
+    // `implement` follows the exact `claims queue` order: P0 to P3, and
+    // within a priority the lowest issue number first (#103).
+    fresh.sort_by_key(|(p, number, _)| (*p, *number));
+    wanted.extend(fresh.into_iter().map(|(_, _, w)| w));
 
-    wanted
+    let mut out: Vec<Candidate> = wanted
         .into_iter()
         .map(|w| build(w, state, config, snapshot.main_checks, now))
-        .collect()
+        .collect();
+    for (w, skip) in deferred_implement {
+        out.push(Candidate::Skip(task_of(&w, state), skip));
+    }
+    out
+}
+
+fn task_of(wanted: &Wanted, state: &State) -> Task {
+    let subject = wanted.issue.or(wanted.pull);
+    let base = match (&wanted.role, wanted.issue, wanted.pull) {
+        (Role::Review | Role::FixPull, _, Some(pull)) => format!("{}-{pull}", wanted.role.name()),
+        (_, Some(issue), _) => format!("{}-{issue}", wanted.role.name()),
+        _ => wanted.role.name().to_string(),
+    };
+    let key = match &wanted.event {
+        Some(event) => format!("{base}-{event}"),
+        None => match round(state, subject, wanted.role.name()) {
+            1 => base,
+            n => format!("{base}-r{n}"),
+        },
+    };
+    let attempt = state
+        .sessions
+        .iter()
+        .filter(|s| s.id.starts_with(&format!("{key}-a")))
+        .count();
+    Task {
+        id: format!("{key}-a{}", attempt + 1),
+        role: wanted.role.clone(),
+        vendor: wanted.known.clone().unwrap_or_default(),
+        issue: wanted.issue,
+        pull: wanted.pull,
+        why: wanted.why.clone(),
+    }
 }
 
 /// Turns one wanted session into a task, or into the reason it cannot be

@@ -52,11 +52,27 @@ fn config() -> Config {
 }
 
 fn issue(number: u64, labels: &[&str], agent: Option<&str>) -> Issue {
+    let mut labels: Vec<String> = labels.iter().map(|s| s.to_string()).collect();
+    if matches!(crate::claim::priority::level(&labels), Level::Unset) {
+        labels.push("P1".to_string());
+    }
+    Issue {
+        number,
+        title: format!("issue {number}"),
+        labels,
+        body: String::new(),
+        agent: agent.map(|s| s.to_string()),
+        last_comment_at: None,
+    }
+}
+
+fn raw_issue(number: u64, labels: &[&str], body: &str) -> Issue {
     Issue {
         number,
         title: format!("issue {number}"),
         labels: labels.iter().map(|s| s.to_string()).collect(),
-        agent: agent.map(|s| s.to_string()),
+        body: body.to_string(),
+        agent: None,
         last_comment_at: None,
     }
 }
@@ -1149,4 +1165,51 @@ fn the_vendor_with_the_fewest_sessions_today_gets_the_next_one() {
         at("2026-10-14T04:00:00+08:00"),
     );
     assert_eq!(plan.start[0].vendor, "codebuddy", "{:?}", plan.start);
+}
+
+#[test]
+fn implement_follows_priority_queue_and_skips_waiting_blocked_and_untriaged() {
+    let snapshot = Snapshot {
+        issues: vec![
+            raw_issue(10, &["P2"], ""),
+            raw_issue(11, &["P1"], ""),
+            raw_issue(12, &["P0"], ""),
+            raw_issue(13, &["P1", "等裁决"], ""),
+            raw_issue(14, &["P0", "待验收"], ""),
+            raw_issue(15, &["P1"], "依赖：#11"),
+            raw_issue(16, &[], ""),
+            raw_issue(17, &["P1", "P3"], ""),
+        ],
+        pulls: vec![pull(90, &["待审查"], Some("claude"), Some(13))],
+        main_checks: MainChecks::Green,
+        main_run: None,
+    };
+    let plan = decide(
+        &snapshot,
+        &State::default(),
+        &config(),
+        at("2026-10-14T04:00:00+08:00"),
+    );
+    let implements: Vec<u64> = plan
+        .start
+        .iter()
+        .filter(|t| t.role == Role::Implement)
+        .filter_map(|t| t.issue)
+        .collect();
+    assert_eq!(
+        implements,
+        vec![12, 11, 10],
+        "implement 应按 P0 -> P1 -> P2 顺序派：{implements:?}"
+    );
+    assert!(
+        !plan
+            .start
+            .iter()
+            .any(|t| t.issue == Some(13) || t.pull == Some(90)),
+        "等裁决的 issue 及其 PR 不派任何角色：{:?}",
+        plan.start
+    );
+    assert!(skipped(&plan, "implement-15-a1").contains("#11"));
+    assert!(skipped(&plan, "implement-16-a1").contains("还没定优先级"));
+    assert!(skipped(&plan, "implement-17-a1").contains("P1+P3"));
 }
