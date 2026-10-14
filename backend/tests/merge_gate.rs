@@ -516,12 +516,9 @@ fn a_merge_releases_the_lock_when_it_is_done() {
     let said = said(&out);
     assert_eq!(out.status.code(), Some(0), "{said}");
     assert!(said.contains("没有合并"), "{said}");
-    assert!(
-        !case.state().join("merge.lock").exists(),
-        "锁没有释放：{}",
-        case.state().display()
-    );
-    // And the next session gets the lock.
+    // The stable kernel-lock inode stays in place; release means the
+    // holder metadata is gone and the next session can acquire it.
+    assert!(!case.state().join("merge.lock/holder").exists());
     ready(&case.check());
     assert_eq!(case.dry_merge().status.code(), Some(0));
 }
@@ -533,7 +530,8 @@ fn a_refused_merge_releases_the_lock_too() {
         v["check_runs"][0]["conclusion"] = json!("failure");
     });
     refused(&case.dry_merge(), "CI 不是绿的");
-    assert!(!case.state().join("merge.lock").exists());
+    assert!(!case.state().join("merge.lock/holder").exists());
+    refused(&case.dry_merge(), "CI 不是绿的");
 }
 
 #[test]

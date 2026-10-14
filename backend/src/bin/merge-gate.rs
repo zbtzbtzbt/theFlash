@@ -163,7 +163,10 @@ fn queue(options: &Options) -> ExitCode {
     for pr in pulls {
         // This run is still going, so the next session leaves the lock
         // alone instead of reading the lease as a session that stopped.
-        lock.renew();
+        if let Err(e) = lock.renew() {
+            eprintln!("刷新合并锁失败：{e}；停止队列，不在锁状态不明时继续合并");
+            return ExitCode::from(2);
+        }
         if merge_locked(options, pr) == ExitCode::SUCCESS {
             merged += 1;
         }

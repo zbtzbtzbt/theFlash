@@ -4,27 +4,24 @@
 //! and land two unreviewed-against-each-other commits on main (#15 asks
 //! for a queue). The lock is a directory: creating one either succeeds for
 //! exactly one process or fails for the others, on macOS and on Linux, with
-//! no daemon and no extra dependency.
+//! no daemon.
 //!
 //! What the first version of this got wrong, and what each piece here is
 //! for (审查记录 b1b42f0 的第 3 条):
 //!
-//! - **A lock is only taken over when its holder is gone.** The holder
-//!   writes its pid into the lock, and a session that finds the lock asks
-//!   the operating system whether that process still exists. A merge that
-//!   has been running for an hour is a session to go look at, not a lock
-//!   to take: taking it over is exactly the two-merges-at-once the lock
-//!   exists to prevent. Deciding by the lock's age alone also trusted the
-//!   filesystem's clock, which `touch` can set to anything.
-//! - **Taking over is atomic.** The stale lock is moved aside with a
-//!   single `rename`, which succeeds for one session and fails with
-//!   "not found" for every other session racing it; whoever moved it then
-//!   creates the lock again, which is itself atomic.
-//! - **A session only releases its own lock.** Each holder writes a token
-//!   no other holder has, and releasing checks the token is still there.
-//!   A session whose lock was taken over while it was away must not
-//!   delete the lock of the session that took it over.
+//! - **The kernel owns mutual exclusion.** Every session opens the same
+//!   stable file and takes `flock(LOCK_EX | LOCK_NB)`. The kernel releases
+//!   it when the process exits, so there is no stale-lock takeover
+//!   algorithm and no read/claim ABA window.
+//! - **Holder metadata is diagnostic only and atomically replaced.** A
+//!   reader sees either the old complete holder or the new complete
+//!   holder, never the truncate/write gap of `fs::write`.
+//! - **The lock path is never removed or replaced.** Advisory locks attach
+//!   to an inode; replacing that inode would let a second session lock the
+//!   new file while the first still holds the old one.
 
+use std::fs::File;
+use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -50,6 +47,8 @@ pub fn state_dir() -> PathBuf {
 #[derive(Debug)]
 pub struct Lock {
     path: PathBuf,
+    /// Kept open for the lifetime of the lock. Closing it releases flock.
+    _guard: File,
     /// This holder's token, which is what makes releasing safe.
     token: String,
     what: String,
@@ -77,66 +76,58 @@ impl Lock {
     /// its own temporary directory instead of the real one.
     pub fn acquire_in(dir: &Path, what: &str) -> Result<Lock, Busy> {
         let path = dir.join("merge.lock");
-        let _ = std::fs::create_dir_all(dir);
+        std::fs::create_dir_all(&path).map_err(|e| Busy {
+            holder: format!("建锁目录失败 {}：{e}", path.display()),
+        })?;
+        #[cfg(test)]
+        race_tests::pause_before_guard_acquire(what);
+        let guard_path = path.join("kernel-lock");
+        let guard = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&guard_path)
+            .map_err(|e| Busy {
+                holder: format!("打开合并锁失败 {}：{e}", guard_path.display()),
+            })?;
+        if let Err(e) = try_lock(&guard) {
+            let held = Holder::read(&path);
+            return Err(Busy {
+                holder: if is_lock_busy(&e) {
+                    held.describe()
+                } else {
+                    format!("锁定 {} 失败：{e}", guard_path.display())
+                },
+            });
+        }
+        let previous = Holder::read(&path);
         let lock = Lock {
             path: path.clone(),
+            _guard: guard,
             token: token(),
             what: what.to_string(),
         };
-        match std::fs::create_dir(&path) {
-            Ok(()) => {
-                lock.renew();
-                return Ok(lock);
-            }
-            Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => {
-                return Err(Busy {
-                    holder: format!("建锁失败 {}：{e}", path.display()),
-                });
-            }
-            Err(_) => {}
+        lock.renew().map_err(|e| Busy {
+            holder: format!("写合并锁持有者失败 {}：{e}", path.display()),
+        })?;
+        if previous.pid.is_some_and(|pid| !is_running(pid)) {
+            eprintln!(
+                "接管已经退出的会话留下的锁（原持有者：{}）",
+                previous.describe()
+            );
         }
-        let held = Holder::read(&path);
-        if !held.is_gone() {
-            return Err(Busy {
-                holder: held.describe(),
-            });
-        }
-        // The holder is gone; its lock would stop every merge tonight, so
-        // take it over. The lock directory stays the same directory —
-        // nobody removes it and makes it again, because a session that
-        // read the old holder a moment ago would then delete the lock of
-        // whoever took over first. Instead each taking-over session tries
-        // to create one file named after the holder it is replacing, and
-        // creating a file that must not exist yet succeeds for exactly
-        // one of them, on macOS and on Linux.
-        let claim = path.join(format!("claim-{}", held.id()));
-        if let Err(e) = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&claim)
-        {
-            return Err(Busy {
-                holder: format!(
-                    "{}（另一个会话正在接管它：{e}）",
-                    Holder::read(&path).describe()
-                ),
-            });
-        }
-        eprintln!(
-            "接管已经退出的会话留下的锁（原持有者：{}）",
-            held.describe()
-        );
-        lock.renew();
         Ok(lock)
     }
 
     /// Pushes the lease out, so a merge that takes a while is not mistaken
     /// for one that stopped. Called between the steps of a merge and
     /// between the pull requests of a queue run.
-    pub fn renew(&self) {
+    pub fn renew(&self) -> std::io::Result<()> {
         let until = SystemTime::now() + LEASE;
-        let _ = std::fs::write(
+        write_holder(
             self.path.join("holder"),
+            &self.token,
             format!(
                 "who: {}\npid: {}\ntoken: {}\nlease-until: {}\n",
                 self.what,
@@ -144,8 +135,28 @@ impl Lock {
                 self.token,
                 seconds(until)
             ),
-        );
+        )
     }
+}
+
+fn write_holder(path: PathBuf, token: &str, contents: String) -> std::io::Result<()> {
+    let temporary = path.with_file_name(format!("holder.{token}.new"));
+    let result = (|| {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)?;
+        #[cfg(test)]
+        race_tests::pause_during_holder_write(&contents);
+        use std::io::Write;
+        file.write_all(contents.as_bytes())?;
+        file.sync_all()?;
+        std::fs::rename(&temporary, &path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(temporary);
+    }
+    result
 }
 
 impl Drop for Lock {
@@ -156,12 +167,8 @@ impl Drop for Lock {
         if Holder::read(&self.path).token.as_deref() != Some(self.token.as_str()) {
             return;
         }
-        let aside = self
-            .path
-            .with_file_name(format!("merge.lock.released.{}", self.token));
-        if std::fs::rename(&self.path, &aside).is_ok() {
-            let _ = std::fs::remove_dir_all(&aside);
-        }
+        let _ = std::fs::remove_file(self.path.join("holder"));
+        // `guard` is dropped after this method and releases the kernel lock.
     }
 }
 
@@ -172,19 +179,12 @@ struct Holder {
     pid: Option<u32>,
     token: Option<String>,
     lease_until: Option<SystemTime>,
-    /// The lock's own age, used only when the holder file is unreadable:
-    /// a session killed between creating the lock and writing the file
-    /// leaves a lock nothing else can account for.
-    age: Option<Duration>,
 }
 
 impl Holder {
     fn read(path: &Path) -> Holder {
         let text = std::fs::read_to_string(path.join("holder")).unwrap_or_default();
-        let mut h = Holder {
-            age: age(path),
-            ..Holder::default()
-        };
+        let mut h = Holder::default();
         for line in text.lines() {
             let Some((key, value)) = line.split_once(':') else {
                 continue;
@@ -207,27 +207,6 @@ impl Holder {
             h.who = text.trim().to_string();
         }
         h
-    }
-
-    /// Is the session that took this lock gone? Only then may the lock be
-    /// taken over. A holder that is still running keeps its lock however
-    /// long it has had it; a lock whose holder cannot be identified at
-    /// all (no pid, because it was killed in the moment between creating
-    /// the lock and writing into it) is taken over once it is older than
-    /// the lease.
-    fn is_gone(&self) -> bool {
-        match self.pid {
-            Some(pid) => !is_running(pid),
-            None => self.age.is_none_or(|a| a > LEASE),
-        }
-    }
-
-    /// Which holder this is, for the name of the file that claims its
-    /// lock: the token when it wrote one, and otherwise a fixed name, so
-    /// two sessions replacing the same unidentifiable holder still race
-    /// for one file.
-    fn id(&self) -> String {
-        self.token.clone().unwrap_or_else(|| "unknown".to_string())
     }
 
     fn describe(&self) -> String {
@@ -278,6 +257,23 @@ fn is_running(pid: u32) -> bool {
     std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
+fn try_lock(file: &File) -> std::io::Result<()> {
+    // SAFETY: flock only changes the advisory lock associated with this
+    // open file description; the fd remains owned by `file`.
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+fn is_lock_busy(error: &std::io::Error) -> bool {
+    matches!(
+        error.raw_os_error(),
+        Some(code) if code == libc::EWOULDBLOCK || code == libc::EAGAIN
+    )
+}
+
 /// A string no other holder has: two sessions can share a wall-clock
 /// reading or a pid, but not both at once.
 fn token() -> String {
@@ -297,11 +293,6 @@ fn seconds(t: SystemTime) -> u64 {
         .unwrap_or_default()
 }
 
-fn age(path: &Path) -> Option<Duration> {
-    let created = std::fs::metadata(path).ok()?.modified().ok()?;
-    SystemTime::now().duration_since(created).ok()
-}
-
 /// A lock left behind by another session, for tests: the holder file as
 /// that session would have written it, without running that session.
 #[cfg(test)]
@@ -316,4 +307,112 @@ pub(crate) fn plant(dir: &Path, what: &str, pid: u32) {
         ),
     )
     .unwrap();
+}
+
+#[cfg(test)]
+mod race_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Barrier, OnceLock};
+
+    static TAKEOVER_BARRIERS: OnceLock<(Arc<Barrier>, Arc<Barrier>)> = OnceLock::new();
+    static RENEW_BARRIERS: OnceLock<(Arc<Barrier>, Arc<Barrier>)> = OnceLock::new();
+    static PAUSE_RENEW: AtomicBool = AtomicBool::new(false);
+
+    pub(super) fn pause_before_guard_acquire(what: &str) {
+        if what == "paused-old-contender" {
+            let (read, resume) = TAKEOVER_BARRIERS.get().expect("test barriers");
+            read.wait();
+            resume.wait();
+        }
+    }
+
+    pub(super) fn pause_during_holder_write(contents: &str) {
+        if contents.starts_with("who: renewing-live-holder\n") && PAUSE_RENEW.load(Ordering::SeqCst)
+        {
+            let (read, resume) = RENEW_BARRIERS.get().expect("test barriers");
+            read.wait();
+            resume.wait();
+        }
+    }
+
+    fn state(name: &str) -> PathBuf {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target/merge-gate-race-tests")
+            .join(format!("{name}-{}", token()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn stale_contender_cannot_take_over_a_recreated_live_lock() {
+        let dir = state("stale-contender");
+        plant(&dir, "dead-holder", 0x4000_0000);
+        let read = Arc::new(Barrier::new(2));
+        let resume = Arc::new(Barrier::new(2));
+        TAKEOVER_BARRIERS
+            .set((read.clone(), resume.clone()))
+            .unwrap();
+
+        let state = dir.clone();
+        let stale = std::thread::spawn(move || Lock::acquire_in(&state, "paused-old-contender"));
+        read.wait();
+        let first = Lock::acquire_in(&dir, "first-takeover").unwrap();
+        drop(first);
+        let live = Lock::acquire_in(&dir, "new-live-holder").unwrap();
+        resume.wait();
+
+        let result = stale.join().unwrap();
+        assert!(
+            result.is_err(),
+            "延迟的旧接管者覆盖了重建后的活锁，两个会话同时持锁"
+        );
+        drop(live);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn renewing_a_live_old_lock_cannot_enable_takeover() {
+        let dir = state("renew");
+        let live = Lock::acquire_in(&dir, "renewing-live-holder").unwrap();
+        let old = std::fs::FileTimes::new()
+            .set_modified(SystemTime::now() - LEASE - Duration::from_secs(60));
+        std::fs::File::open(dir.join("merge.lock"))
+            .unwrap()
+            .set_times(old)
+            .unwrap();
+        let read = Arc::new(Barrier::new(2));
+        let resume = Arc::new(Barrier::new(2));
+        RENEW_BARRIERS.set((read.clone(), resume.clone())).unwrap();
+        PAUSE_RENEW.store(true, Ordering::SeqCst);
+
+        let renewer = std::thread::spawn(move || {
+            live.renew().unwrap();
+            live
+        });
+        read.wait();
+        let contender = Lock::acquire_in(&dir, "contender-during-renew");
+        resume.wait();
+        let live = renewer.join().unwrap();
+
+        assert!(
+            contender.is_err(),
+            "续租截空 holder 时，活锁被误接管，两个会话同时持锁"
+        );
+        drop(live);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn renew_reports_a_metadata_write_failure() {
+        let dir = state("renew-error");
+        let live = Lock::acquire_in(&dir, "holder").unwrap();
+        std::fs::create_dir(live.path.join(format!("holder.{}.new", live.token))).unwrap();
+
+        let error = live.renew().expect_err("刷新失败必须返回给调用方");
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+
+        drop(live);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }
