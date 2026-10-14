@@ -5,6 +5,13 @@
 //! `backend/tests/inspect_baseline.rs` holds them against the real
 //! responses in `backend/testdata/damai/`, so they describe what damai.cn
 //! actually sends rather than what an agent remembered.
+//!
+//! Kinds are all these lists say. Whether a response theFlash's readers
+//! can walk through is one they can actually use is a separate question,
+//! asked of the readers themselves: `damai::item_page_problem` for a
+//! detail page and `damai::tier_answer_problem` for a tier response. A
+//! `performId` of `"not-a-number"` is a string, which is declared here,
+//! and still a page no query can be answered from (#73).
 
 use serde_json::Value;
 

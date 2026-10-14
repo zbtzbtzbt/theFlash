@@ -477,6 +477,15 @@ pub async fn run(client: &Client, opts: &Options) -> Result<Report, Error> {
             event.replaced = Some(was);
         }
         collect(&page.json, shape::ITEM_PAGE_FIELDS, &mut event.changes);
+        // Every field can be in place, with a kind theFlash reads, in a
+        // page no query can be answered from: a `performId` that is a
+        // word or a negative number leaves `theflash event` with no
+        // session to ask tiers for, and it fails. Same question, same
+        // reader, so one response cannot be a failure to a user and
+        // 没有变化 to an inspection (#73).
+        if let Some(why) = damai::item_page_problem(&page.json) {
+            add_failure(&mut event, format!("详情页：{why}"));
+        }
 
         // One session's tiers, when this page is the sample of a
         // situation: the backups are not read again.
@@ -496,10 +505,10 @@ pub async fn run(client: &Client, opts: &Options) -> Result<Report, Error> {
                     // Every field can be in place in a response that says
                     // the query failed, or that answers another session.
                     if let Some(why) = damai::tier_answer_problem(&tiers, perform_id) {
-                        event.failed = Some(format!("票档接口：{why}"));
+                        add_failure(&mut event, format!("票档接口：{why}"));
                     }
                 }
-                Err(why) => event.failed = Some(format!("票档接口：{why}")),
+                Err(why) => add_failure(&mut event, format!("票档接口：{why}")),
             }
         }
 
@@ -571,6 +580,17 @@ pub async fn run(client: &Client, opts: &Options) -> Result<Report, Error> {
         ));
     }
     Ok(report)
+}
+
+/// One more reason this event could not be checked, kept beside the ones
+/// found before it: a page theFlash cannot read and a tier response it
+/// cannot read are two separate pieces of news, and the second must not
+/// cover up the first.
+fn add_failure(event: &mut EventReport, why: String) {
+    event.failed = Some(match event.failed.take() {
+        Some(before) => format!("{before}；{why}"),
+        None => why,
+    });
 }
 
 /// A page this run read, kept with the bytes damai.cn sent: a candidate
@@ -873,28 +893,33 @@ fn event_name(json: &Value) -> Option<String> {
 
 /// The first session on the page, which is the one session whose tiers an
 /// inspection reads: one request is enough to see the endpoint's shape.
+/// Its id is read by [`damai::perform_id`], the reader a query uses, and a
+/// first session whose id that reader refuses is no session at all — the
+/// run does not walk past it to a readable one, because a page with such
+/// an id is a page `theflash event` fails on, which
+/// [`damai::item_page_problem`] reports (#73).
 fn first_perform_id(json: &Value) -> Option<u64> {
+    performs(json)
+        .next()
+        .and_then(|perform| damai::perform_id(&perform["performId"]))
+}
+
+/// Every session on the page, in the order damai.cn lists them: the days
+/// in a row (`performBases`), then the months of a calendar page.
+fn performs(json: &Value) -> impl Iterator<Item = &Value> {
     let data = &json["dataDefault"];
-    let bases = data["performBases"].as_array().into_iter().flatten().chain(
-        data["calendarPerforms"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .flat_map(|month| month["performBases"].as_array().into_iter().flatten()),
-    );
-    for base in bases {
-        for perform in base["performs"].as_array().into_iter().flatten() {
-            let id = match &perform["performId"] {
-                Value::Number(n) => n.as_u64(),
-                Value::String(s) => s.trim().parse().ok(),
-                _ => None,
-            };
-            if let Some(id) = id {
-                return Some(id);
-            }
-        }
-    }
-    None
+    data["performBases"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .chain(
+            data["calendarPerforms"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .flat_map(|month| month["performBases"].as_array().into_iter().flatten()),
+        )
+        .flat_map(|base| base["performs"].as_array().into_iter().flatten())
 }
 
 /// This machine's wall clock. chrono is built without its clock feature,
@@ -981,6 +1006,14 @@ pub async fn record(
             reason,
         })?
         .ok_or(Error::NotFound(item_id))?;
+    // A page a query cannot be answered from is exactly the page worth
+    // recording, so the fixture is kept; saying so is what stops the
+    // sessions it left out from looking like all there were (#73).
+    if let Some(why) = damai::item_page_problem(&json) {
+        notes.push(format!(
+            "这一页 theflash event 读不了（{why}），读不了的场次没有录票档"
+        ));
+    }
     let mut performs = perform_ids(&json);
     performs.truncate(sessions);
     for perform_id in performs {
@@ -1022,28 +1055,17 @@ fn finish(written: Vec<PathBuf>, lost: Vec<String>) -> Result<Vec<PathBuf>, Erro
     Err(Error::NotWritten(format!("{}。{kept}", lost.join("；"))))
 }
 
+/// The sessions `record` can fetch tiers for, read the way a query reads
+/// them: an id a tier request cannot be built from is not one, and
+/// `record` says so through [`damai::item_page_problem`] rather than
+/// leaving the session out without a word.
 fn perform_ids(json: &Value) -> Vec<u64> {
-    let data = &json["dataDefault"];
-    let bases = data["performBases"].as_array().into_iter().flatten().chain(
-        data["calendarPerforms"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .flat_map(|month| month["performBases"].as_array().into_iter().flatten()),
-    );
     let mut ids = Vec::new();
-    for base in bases {
-        for perform in base["performs"].as_array().into_iter().flatten() {
-            let id = match &perform["performId"] {
-                Value::Number(n) => n.as_u64(),
-                Value::String(s) => s.trim().parse().ok(),
-                _ => None,
-            };
-            if let Some(id) = id
-                && !ids.contains(&id)
-            {
-                ids.push(id);
-            }
+    for perform in performs(json) {
+        if let Some(id) = damai::perform_id(&perform["performId"])
+            && !ids.contains(&id)
+        {
+            ids.push(id);
         }
     }
     ids

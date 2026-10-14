@@ -19,7 +19,7 @@ pub use event::{
     Event, SaleState, Session, Tier, TierStatus, buy_button_code_is_mapped, sale_state_of_code,
     tier_code_is_mapped,
 };
-pub use page::item_page_json;
+pub use page::{item_page_json, item_page_problem, perform_id};
 pub use sku::{tier_answer_problem, tier_json};
 
 #[derive(Debug, thiserror::Error)]
