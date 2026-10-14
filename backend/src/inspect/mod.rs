@@ -678,6 +678,19 @@ fn collect(root: &Value, fields: &'static [Field], changes: &mut Vec<Change>) {
         used_for: field.used_for,
         what,
     };
+    // On an on-sale tier response (btnStatus 204 or 206), optional handoff
+    // fields (`perform.chooseSeatType` and `itemBasicInfo.t`) are always
+    // sent by damai.cn and needed by `theflash watch` browser handoff (#54).
+    let tier_on_sale = root["itemBuyBtn"]["btnStatus"]
+        .as_str()
+        .map(str::to_string)
+        .or_else(|| {
+            root["itemBuyBtn"]["btnStatus"]
+                .as_i64()
+                .map(|n| n.to_string())
+        })
+        .and_then(|code| damai::sale_state_of_code(&code))
+        == Some(damai::SaleState::OnSale);
     // Places looked at and places the field was absent, per group.
     let mut groups: BTreeMap<&'static str, (usize, usize, &'static Field)> = BTreeMap::new();
     for (field, outcome) in fields.iter().zip(&outcomes) {
@@ -692,7 +705,11 @@ fn collect(root: &Value, fields: &'static [Field], changes: &mut Vec<Change>) {
                 entry.0 += outcome.places;
                 entry.1 += outcome.absent.len();
             }
-            Need::Optional => {}
+            Need::Optional => {
+                if tier_on_sale && let Some(at) = outcome.absent.first() {
+                    changes.push(change(field, What::Gone { at: at.clone() }));
+                }
+            }
         }
         if let Some((at, got)) = &outcome.wrong_kind {
             changes.push(change(

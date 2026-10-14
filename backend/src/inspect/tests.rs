@@ -796,3 +796,65 @@ fn the_sample_set_lives_under_the_users_state_directory() {
         "相对路径的 XDG_STATE_HOME 按规范忽略"
     );
 }
+
+#[test]
+fn removing_any_handoff_field_from_an_on_sale_tier_response_is_a_finding() {
+    let base = tier_json_of("sku_on_sale_286937788.jsonp");
+    for (label, mutate) in [
+        (
+            "skuId",
+            Box::new(|d: &mut Value| {
+                for s in d["perform"]["skuList"].as_array_mut().unwrap() {
+                    s.as_object_mut().unwrap().remove("skuId");
+                }
+            }) as Box<dyn Fn(&mut Value)>,
+        ),
+        (
+            "chooseSeatType",
+            Box::new(|d: &mut Value| {
+                d["perform"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("chooseSeatType");
+            }),
+        ),
+        (
+            "hasPromotion",
+            Box::new(|d: &mut Value| {
+                d["perform"].as_object_mut().unwrap().remove("hasPromotion");
+            }),
+        ),
+        (
+            "projectId",
+            Box::new(|d: &mut Value| {
+                d["itemBasicInfo"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("projectId");
+            }),
+        ),
+        (
+            "t",
+            Box::new(|d: &mut Value| {
+                d["itemBasicInfo"].as_object_mut().unwrap().remove("t");
+            }),
+        ),
+        (
+            "rtc",
+            Box::new(|d: &mut Value| {
+                d["actionControl"]["tradeControl"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("rtc");
+            }),
+        ),
+    ] {
+        let mut modified = base.clone();
+        mutate(&mut modified);
+        let changes = changes_in(&modified, shape::TIER_FIELDS);
+        assert!(
+            !changes.is_empty(),
+            "在售票档响应少了 {label}，巡检却没有报出结构变化"
+        );
+    }
+}

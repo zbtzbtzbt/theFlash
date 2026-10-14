@@ -445,10 +445,17 @@ fn handoff<E: Env>(env: &mut E, opts: &Options, target: &Watched) {
     if opts.open_browser {
         env.open_browser(&url);
     }
-    env.say(&format!(
-        "购买确认页（{} · {}，{count} 张）：{url}",
-        target.session, target.tier
-    ));
+    if target.is_choose_seat() {
+        env.say(&format!(
+            "购买确认页（{} · {}，选座购票请在页面内选座）：{url}",
+            target.session, target.tier
+        ));
+    } else {
+        env.say(&format!(
+            "购买确认页（{} · {}，{count} 张）：{url}",
+            target.session, target.tier
+        ));
+    }
 }
 
 fn with(name: &str, lines: impl Iterator<Item = String>, at: String) -> Vec<String> {

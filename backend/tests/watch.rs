@@ -359,6 +359,7 @@ fn watch_hands_off_the_selected_tier_to_the_browser_and_no_open_skips_it() {
     assert!(
         urls[0].starts_with("https://m.damai.cn/app/dmfe/h5-ultron-buy/index.html?")
             && urls[0].contains("buyParam=1086791513717_2_6141329425571")
+            && urls[0].contains("%22signKey%22%3A%22cEl%2BbnlbXgFiQVx%2FTklha3Fddm94XVABYUNcfEFb")
             && urls[0].contains("buyNow=true")
             && urls[0].contains("rtc=1"),
         "交接给浏览器的确认页 URL 不对：{}",
@@ -366,6 +367,126 @@ fn watch_hands_off_the_selected_tier_to_the_browser_and_no_open_skips_it() {
     );
     // Program only performs read-only GETs; it never submits an order itself (#6).
     assert_eq!(damai.hits().len(), 2, "{:?}", damai.hits());
+
+    // A launcher that exits non-zero (e.g. xdg-open without a browser) must
+    // print a fallback warning instead of failing silently.
+    let failing_browser = support::stub(home.path(), "fail-browser", "exit 1");
+    let mut cmd_fail = home.theflash(&damai.base_url());
+    cmd_fail.env("THEFLASH_BROWSER", &failing_browser);
+    let mut child_fail = cmd_fail
+        .args([
+            "watch",
+            "1086791513717",
+            "--session",
+            "10-15",
+            "--tier",
+            "C-178",
+            "--no-system-notify",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let out_fail = child_fail.stdout.take().unwrap();
+    let (tx_fail, lines_fail) = channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(out_fail).lines().map_while(Result::ok) {
+            if tx_fail.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let mut watch_fail = Watch {
+        child: child_fail,
+        lines: lines_fail,
+        seen: Vec::new(),
+    };
+    assert!(
+        watch_fail.wait_for(&["购买确认页（2026-10-15 周四 17:00 · C-178元，1 张）："]),
+        "{:#?}",
+        watch_fail.seen
+    );
+    let (status_fail, stdout_fail, _) = watch_fail.interrupt();
+    assert!(status_fail.success());
+    assert!(
+        stdout_fail.contains("浏览器打不开（启动器退出码 1）"),
+        "启动器非零退出应提示手动打开链接：{stdout_fail}"
+    );
+
+    // Seat-selection (`sku_calendar_286938129.jsonp`, `btnStatus=206`,
+    // `chooseSeatType=1`): opens `select-seat-biz/kylin.html` and says to
+    // pick seats on the page instead of claiming `2 张`.
+    let mut cal_sku = support::fixture("sku_calendar_286938129.jsonp");
+    cal_sku = cal_sku
+        .replace("\"frontEndStatus\":\"2\"", "\"frontEndStatus\":\"1\"")
+        .replace("\"skuSalable\":\"false\"", "\"skuSalable\":\"true\"");
+    let cal_damai = MockDamai::start_bodies(vec![
+        (
+            "/item.htm?id=1084537866279".to_string(),
+            support::fixture("item_calendar.html"),
+        ),
+        ("dataId=286938129".to_string(), cal_sku),
+    ]);
+    let _ = std::fs::remove_file(&opened_log);
+    let mut cmd_seat = home.theflash(&cal_damai.base_url());
+    cmd_seat.env("THEFLASH_BROWSER", &browser);
+    let mut child_seat = cmd_seat
+        .args([
+            "watch",
+            "1084537866279",
+            "--session",
+            "2026-10-17 星期六 14:30",
+            "--tier",
+            "F（380元）",
+            "--count",
+            "2",
+            "--no-system-notify",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let out_seat = child_seat.stdout.take().unwrap();
+    let (tx_seat, lines_seat) = channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(out_seat).lines().map_while(Result::ok) {
+            if tx_seat.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let mut watch_seat = Watch {
+        child: child_seat,
+        lines: lines_seat,
+        seen: Vec::new(),
+    };
+    assert!(
+        watch_seat.wait_for(&[
+            "购买确认页（2026-10-17 星期六 14:30 · F（380元），选座购票请在页面内选座）："
+        ]),
+        "{:#?}",
+        watch_seat.seen
+    );
+    let (status_seat, stdout_seat, _) = watch_seat.interrupt();
+    assert!(status_seat.success());
+    assert!(
+        !stdout_seat.contains("2 张"),
+        "选座购票不应宣称已预设 2 张：{stdout_seat}"
+    );
+    let deadline_seat = Instant::now() + Duration::from_secs(2);
+    while !opened_log.exists() && Instant::now() < deadline_seat {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let seat_url = std::fs::read_to_string(&opened_log).unwrap_or_default();
+    assert!(
+        seat_url.starts_with("https://m.damai.cn/app/dmfe/select-seat-biz/kylin.html?")
+            && seat_url.contains("performId=286938129")
+            && seat_url.contains("projectId=240266008")
+            && seat_url.contains("skuId=6139783065605")
+            && seat_url.contains("signKey=")
+            && seat_url.contains("rtc=1"),
+        "选座页 URL 不对：{seat_url}"
+    );
 
     // `--no-open` prints the URL but does not invoke the browser launcher.
     let _ = std::fs::remove_file(&opened_log);

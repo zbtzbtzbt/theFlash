@@ -315,6 +315,12 @@ async fn a_restock_alerts_once_each_time_the_tier_comes_back() {
         "{titles:?}"
     );
     assert!(f.said("又没票了：2026-10-15 周四 17:00 · 180元 · ¥180.00 · 缺货"));
+    assert_eq!(
+        f.opened().len(),
+        2,
+        "回流只应在两次从缺货变可售时各打开一次浏览器：{:?}",
+        f.opened()
+    );
     assert_eq!(f.sleeps, [30_000; 5]);
 }
 
@@ -589,10 +595,53 @@ async fn opening_and_restock_hand_off_to_browser_once_per_available_transition()
             && opened[0]
                 .1
                 .contains("buyParam=1092337348536_2_6310776418726")
+            && opened[0].1.contains("%22signKey%22%3A%22sig-test%22")
             && opened[0].1.contains("buyNow=true")
             && opened[0].1.contains("rtc=1"),
         "确认页 URL 不符合预期：{}",
         opened[0].1
+    );
+
+    // Seat-selection (`choose_seat: true`) builds the `kylin.html` URL with
+    // `projectId`, `performId`, `skuId`, `signKey` and `rtc`, and tells the
+    // user to pick seats on the page rather than claiming `2 张`.
+    let mut f_seat = Fake::new(
+        SALE + 3_600_000,
+        0,
+        Box::new(|_, _| {
+            let mut ev = on_sale(TierStatus::Available);
+            if let Ok(Some(tiers)) = &mut ev.sessions[0].tiers
+                && let Some(h) = &mut tiers[0].handoff
+            {
+                h.choose_seat = true;
+            }
+            Ok(ev)
+        }),
+    );
+    f_seat.stop_after_calls = 1;
+    let mut seat_opts = opts(Filter::default());
+    seat_opts.count = 2;
+    run(&mut f_seat, &seat_opts).await.unwrap();
+    let seat_opened = f_seat.opened();
+    assert_eq!(seat_opened.len(), 1, "{seat_opened:?}");
+    assert!(
+        seat_opened[0]
+            .1
+            .starts_with("https://m.damai.cn/app/dmfe/select-seat-biz/kylin.html?")
+            && seat_opened[0].1.contains("itemId=1092337348536")
+            && seat_opened[0].1.contains("projectId=240469001")
+            && seat_opened[0].1.contains("performId=286966465")
+            && seat_opened[0].1.contains("skuId=6310776418726")
+            && seat_opened[0].1.contains("signKey=sig-test")
+            && seat_opened[0].1.contains("rtc=1"),
+        "选座页 URL 不符合预期：{}",
+        seat_opened[0].1
+    );
+    assert!(
+        f_seat.said("购买确认页（2026-10-15 周四 17:00 · 180元，选座购票请在页面内选座）：")
+            && !f_seat.said("2 张"),
+        "选座页不应声称已预设 2 张：{:#?}",
+        f_seat.log
     );
 
     // `--no-open` prints the confirmation URL in the terminal but never
