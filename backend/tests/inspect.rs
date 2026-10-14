@@ -320,7 +320,10 @@ fn a_stale_sample_is_replaced_from_the_pool_without_asking_the_home_page() {
         &["--samples", samples.to_str().unwrap(), "--max-events", "8"],
     );
     let text = stdout(&out);
-    assert!(text.contains("换掉了过期的样本 1077137031347"), "{text}");
+    assert!(
+        text.contains("换掉了这一类原来的样本 1077137031347（不再是这个状态）"),
+        "{text}"
+    );
     assert!(text.contains("[已开售] 1086791513717"), "{text}");
     assert!(
         !damai.hits().iter().any(|h| h == "GET /"),
@@ -332,6 +335,11 @@ fn a_stale_sample_is_replaced_from_the_pool_without_asking_the_home_page() {
     assert!(
         saved.contains("\"onSale\""),
         "新样本没有按状态存下来：{saved}"
+    );
+    assert_eq!(
+        saved_ids(&samples, "onSale"),
+        [1086791513717],
+        "报告说换掉了样本，写下去的却不是：{saved}"
     );
     assert_eq!(out.status.code(), Some(0), "换样本本身不算发现：{text}");
 }
@@ -375,6 +383,245 @@ fn an_event_whose_sale_opened_becomes_the_on_sale_sample() {
         on_sale.first().map(|s| s["itemId"].as_u64()),
         Some(Some(1086791513717)),
         "开售了的那一场没有被存成已开售的样本：{saved}"
+    );
+}
+
+/// The events one situation holds in the saved sample file, in order: the
+/// first is what the next run reads, the rest are its backups. A report
+/// that says a sample was swapped out has to agree with this (#79).
+fn saved_ids(path: &Path, category: &str) -> Vec<u64> {
+    let saved: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    saved["samples"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|s| s["category"] == category)
+        .map(|s| s["itemId"].as_u64().unwrap())
+        .collect()
+}
+
+/// An event whose sale opened joins a situation another sample still
+/// covers. Nothing was swapped out: the sample file keeps 1086791513717
+/// first under 已开售 and the newcomer behind it. The report used to tell
+/// the newcomer it had replaced the sample that is still there, which is
+/// what #79 was opened for — the real run on 2026-10-14 10:56 printed
+/// 换掉了过期的样本 1086791513717 while saving that very event as the
+/// 已开售 sample.
+#[test]
+fn an_event_that_joined_a_situation_another_sample_still_covers_replaced_nothing() {
+    let home = Home::new("joined-situation");
+    let samples = home.path().join("samples.json");
+    // The seed set: both samples are the ones the real run started from.
+    std::fs::write(
+        &samples,
+        r#"{"updatedAt":"2026-10-14 03:00（北京时间）","samples":[
+             {"itemId":1086791513717,"category":"onSale"},
+             {"itemId":1092337348536,"category":"notYetOnSale"},
+             {"itemId":1077137031347,"category":"soldOut"},
+             {"itemId":1084537866279,"category":"calendar"},
+             {"itemId":1080486727522,"category":"notOnPcChannel"}]}"#,
+    )
+    .unwrap();
+    // The 未开售 sample's page with only its buy button changed: its sale
+    // opened, as 1092337348536's did at 10:18 that day.
+    let routes = changed(unchanged_routes(), "/item.htm?id=1092337348536", |body| {
+        body.replace("\"buyBtnStatus\":106", "\"buyBtnStatus\":204")
+    });
+    // The home page damai.cn serves today: no detail link, so 未开售 has
+    // nothing left to replace it with (0014).
+    let empty_home = (
+        "/".to_string(),
+        "<html><body>没有演出链接</body></html>".to_string(),
+    );
+    let damai = support::MockDamai::start_bodies(with_route(routes, empty_home));
+    let out = run(
+        &home,
+        &damai,
+        &["--samples", samples.to_str().unwrap(), "--max-events", "8"],
+    );
+    let text = stdout(&out);
+    assert!(text.contains("[已开售] 1092337348536"), "{text}");
+    assert!(
+        !text.contains("换掉了"),
+        "没有任何样本被换掉，报告却说换了：{text}"
+    );
+    assert_eq!(
+        saved_ids(&samples, "onSale"),
+        [1086791513717, 1092337348536],
+        "报告说的和写进样本文件的对不上：{text}"
+    );
+}
+
+/// A candidate probed for one situation can turn out to show another one.
+/// It is kept as a backup behind the sample that already covers that
+/// situation, so it swapped nothing out, and the report may not say it
+/// did (#79).
+#[test]
+fn a_candidate_that_was_probed_and_not_chosen_replaced_nothing() {
+    let home = Home::new("probed-not-chosen");
+    let samples = home.path().join("samples.json");
+    // The saved 已售罄 sample is on sale, so the run goes looking for a
+    // replacement in the pool.
+    std::fs::write(
+        &samples,
+        r#"{"updatedAt":"2026-10-14 03:00（北京时间）","samples":[
+             {"itemId":1086791513717,"category":"onSale"},
+             {"itemId":1092337348536,"category":"notYetOnSale"},
+             {"itemId":1086791513717,"category":"soldOut"},
+             {"itemId":1084537866279,"category":"calendar"},
+             {"itemId":1080486727522,"category":"notOnPcChannel"}]}"#,
+    )
+    .unwrap();
+    // The pool's 已售罄 candidate answers with an on-sale page, so the run
+    // probes it, files it under 已开售 and still has no 已售罄 sample.
+    let routes = changed(unchanged_routes(), "/item.htm?id=1077137031347", |_| {
+        support::fixture("item_on_sale.html")
+    });
+    let empty_home = (
+        "/".to_string(),
+        "<html><body>没有演出链接</body></html>".to_string(),
+    );
+    let damai = support::MockDamai::start_bodies(with_route(routes, empty_home));
+    let out = run(
+        &home,
+        &damai,
+        &["--samples", samples.to_str().unwrap(), "--max-events", "8"],
+    );
+    let text = stdout(&out);
+    assert!(text.contains("样本缺口：没有已售罄的样本了"), "{text}");
+    assert!(
+        !text.contains("换掉了"),
+        "被探了一下又没被选中的候选，报告却说它换掉了已开售的样本：{text}"
+    );
+    assert_eq!(
+        saved_ids(&samples, "onSale"),
+        [1086791513717, 1077137031347],
+        "报告说的和写进样本文件的对不上：{text}"
+    );
+}
+
+/// The report lines about one event, from its `[状态] <id> <名字>` line to
+/// the blank line before the next event: what one event is said to have
+/// replaced cannot be read off the whole report, because another event in
+/// the same run may really have replaced something.
+fn event_block(text: &str, item_id: u64) -> String {
+    let at = text
+        .find(&format!("] {item_id} "))
+        .unwrap_or_else(|| panic!("报告里没有 {item_id}：{text}"));
+    let from = text[..at].rfind('\n').map_or(0, |n| n + 1);
+    let rest = &text[from..];
+    let to = rest.find("\n\n").map_or(rest.len(), |n| n + 1);
+    rest[..to].to_string()
+}
+
+/// Two samples swapped situations and a third joined one of them. Each
+/// situation's new first sample names the event it took that situation
+/// over from, and the one kept as a backup behind it names nothing: a
+/// report that only asks "was a sample of this situation someone else
+/// last time" hands the same replacement to every page that shows the
+/// situation (#79).
+#[test]
+fn only_the_sample_a_situation_is_read_from_next_says_it_took_the_situation_over() {
+    let home = Home::new("backup-took-nothing");
+    let samples = home.path().join("samples.json");
+    // 1077137031347 and 1086791513717 swapped: the one saved as 已开售 is
+    // sold out now and the one saved as 已售罄 is on sale. 1111111111111
+    // was the 日历选日期 sample and is on sale too, so it joins 已开售
+    // behind the event that took it over.
+    std::fs::write(
+        &samples,
+        r#"{"updatedAt":"2026-10-14 03:00（北京时间）","samples":[
+             {"itemId":1077137031347,"category":"onSale"},
+             {"itemId":1092337348536,"category":"notYetOnSale"},
+             {"itemId":1086791513717,"category":"soldOut"},
+             {"itemId":1111111111111,"category":"calendar"},
+             {"itemId":1080486727522,"category":"notOnPcChannel"}]}"#,
+    )
+    .unwrap();
+    let a_third_on_sale_event = (
+        "/item.htm?id=1111111111111".to_string(),
+        support::fixture("item_on_sale.html"),
+    );
+    let damai =
+        support::MockDamai::start_bodies(with_route(unchanged_routes(), a_third_on_sale_event));
+    let out = run(
+        &home,
+        &damai,
+        &["--samples", samples.to_str().unwrap(), "--max-events", "8"],
+    );
+    let text = stdout(&out);
+    let took_over = event_block(&text, 1086791513717);
+    assert!(
+        took_over.contains("换掉了这一类原来的样本 1077137031347（不再是这个状态）"),
+        "{text}"
+    );
+    let backup = event_block(&text, 1111111111111);
+    assert!(
+        !backup.contains("换掉了"),
+        "1111111111111 排在 1086791513717 后面，什么也没换掉：{text}"
+    );
+    assert_eq!(
+        saved_ids(&samples, "onSale"),
+        [1086791513717, 1111111111111],
+        "报告说的和写进样本文件的对不上：{text}"
+    );
+}
+
+/// A sample that moved into a situation already covered takes the front
+/// of it, because this run read it first. The sample behind it is still
+/// showing that situation, so it did not go stale and the report may not
+/// say so; the one real replacement in this run — the 已开售 sample that
+/// sold out — is the only one reported, and it says what became of it
+/// (#79).
+#[test]
+fn only_the_sample_that_stopped_covering_its_situation_is_reported_as_replaced() {
+    let home = Home::new("one-real-replacement");
+    let samples = home.path().join("samples.json");
+    // 1077137031347 is sold out, saved here as the 已开售 sample: its sale
+    // ended since the last run. 1111111111111 is a second sold-out event,
+    // and it is still sold out.
+    std::fs::write(
+        &samples,
+        r#"{"updatedAt":"2026-10-14 03:00（北京时间）","samples":[
+             {"itemId":1077137031347,"category":"onSale"},
+             {"itemId":1092337348536,"category":"notYetOnSale"},
+             {"itemId":1111111111111,"category":"soldOut"},
+             {"itemId":1084537866279,"category":"calendar"},
+             {"itemId":1080486727522,"category":"notOnPcChannel"}]}"#,
+    )
+    .unwrap();
+    let second_sold_out = (
+        "/item.htm?id=1111111111111".to_string(),
+        support::fixture("item_sold_out.html"),
+    );
+    let damai = support::MockDamai::start_bodies(with_route(unchanged_routes(), second_sold_out));
+    let out = run(
+        &home,
+        &damai,
+        &["--samples", samples.to_str().unwrap(), "--max-events", "8"],
+    );
+    let text = stdout(&out);
+    // The real one: the pool's on-sale event takes 已开售 over from the
+    // sample that is now sold out.
+    assert!(text.contains("[已开售] 1086791513717"), "{text}");
+    assert!(
+        text.contains("换掉了这一类原来的样本 1077137031347（不再是这个状态）"),
+        "真正的换样本没有报出来，或者没说原来那一场怎么了：{text}"
+    );
+    assert!(
+        !text.contains("换掉了这一类原来的样本 1111111111111"),
+        "1111111111111 还是已售罄，没有被换掉：{text}"
+    );
+    assert_eq!(
+        saved_ids(&samples, "onSale"),
+        [1086791513717],
+        "报告说的和写进样本文件的对不上：{text}"
+    );
+    assert_eq!(
+        saved_ids(&samples, "soldOut"),
+        [1077137031347, 1111111111111],
+        "两场都还是已售罄，都该留在样本文件里：{text}"
     );
 }
 
