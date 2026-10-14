@@ -1857,7 +1857,7 @@ fn record_says_when_the_page_it_saved_is_one_a_query_cannot_read() {
     let home = Home::new("record-bad-perform-id");
     let dir = home.path().join("testdata");
     std::fs::create_dir_all(&dir).unwrap();
-    let routes = changed(unchanged_routes(), "/item.htm?id=1086791513717", |body| {
+    let base_routes = changed(unchanged_routes(), "/item.htm?id=1086791513717", |body| {
         body.replacen(
             "\"performId\":286937788",
             "\"performId\":\"not-a-number\"",
@@ -1868,7 +1868,7 @@ fn record_says_when_the_page_it_saved_is_one_a_query_cannot_read() {
         "dataId=286937790".to_string(),
         support::fixture("sku_on_sale_286937790.jsonp"),
     );
-    let damai = support::MockDamai::start_bodies(with_route(routes, next));
+    let damai = support::MockDamai::start_bodies(with_route(base_routes.clone(), next));
     let mut cmd = home.theflash(&damai.base_url());
     cmd.args([
         "inspect",
@@ -1885,14 +1885,94 @@ fn record_says_when_the_page_it_saved_is_one_a_query_cannot_read() {
     ]);
     let out = support::output_within(cmd, 60);
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "读不了场次的说明不该让成功落盘的录制退出 1：{stderr}"
+    );
     assert!(
-        dir.join("item_broken.html").is_file(),
-        "读不了的页面才是要复现的那一份，它没被录下来：{stderr}"
+        dir.join("item_broken.html").is_file() && dir.join("sku_broken_286937790.jsonp").is_file(),
+        "读不了的页面和可读场次的票档都该被录下来：{stderr}"
     );
     assert!(
         stderr.contains("theflash event 读不了") && stderr.contains("performId"),
         "没说这一页查询读不了：{stderr}"
     );
+
+    // A page a query cannot read and a tier fixture this machine could
+    // not write down: both the #73 note and the #78 lost-fixture summary
+    // have to appear under exit 1 (#128).
+    std::fs::create_dir_all(dir.join("sku_broken2_286937790.jsonp")).unwrap();
+    let mut cmd = home.theflash(&damai.base_url());
+    cmd.args([
+        "inspect",
+        "record",
+        "1086791513717",
+        "--as",
+        "broken2",
+        "--dir",
+        dir.to_str().unwrap(),
+        "--sessions",
+        "1",
+        "--gap",
+        "0",
+    ]);
+    let out = support::output_within(cmd, 60);
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    for needle in [
+        "theflash event 读不了",
+        "sku_broken2_286937790.jsonp",
+        "写不进去",
+        "写下来的是",
+        "item_broken2.html",
+    ] {
+        assert!(
+            stderr.contains(needle),
+            "缺少 {needle:?}（notes 与 lost 必须同时打印）：{stderr}"
+        );
+    }
+
+    // A page a query cannot read followed by risk control on the tier
+    // request: `report_partial` has to print both the #73 note and the
+    // kept-files summary before returning the risk-control error (#128).
+    let risk_home = Home::new("record-bad-perform-id-risk");
+    let risk_dir = risk_home.path().join("testdata");
+    std::fs::create_dir_all(&risk_dir).unwrap();
+    let risk_damai = support::MockDamai::start_bodies(with_route(
+        base_routes,
+        (
+            "dataId=286937790".to_string(),
+            support::fixture("risk_control.html"),
+        ),
+    ));
+    let mut cmd = risk_home.theflash(&risk_damai.base_url());
+    cmd.args([
+        "inspect",
+        "record",
+        "1086791513717",
+        "--as",
+        "broken_risk",
+        "--dir",
+        risk_dir.to_str().unwrap(),
+        "--sessions",
+        "1",
+        "--gap",
+        "0",
+    ]);
+    let out = support::output_within(cmd, 60);
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    for needle in [
+        "theflash event 读不了",
+        "item_broken_risk.html",
+        "触发了风控",
+    ] {
+        assert!(
+            stderr.contains(needle),
+            "风控中断时缺少 {needle:?}：{stderr}"
+        );
+    }
 }
 
 /// The owner's rule: no credential or personal data in the repository. A
