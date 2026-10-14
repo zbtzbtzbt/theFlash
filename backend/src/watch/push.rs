@@ -13,7 +13,8 @@ use tokio::sync::mpsc;
 
 const TIMEOUT: Duration = Duration::from_secs(3);
 const CONFIG_LIMIT: u64 = 65_536;
-const NTFY_MESSAGE_LIMIT: usize = 4096;
+// ntfy.sh rejects exactly 4096 bytes in JSON publishes (PR #93, 2026-10-14).
+const NTFY_MESSAGE_LIMIT: usize = 4095;
 
 /// Each channel consumes the same desktop notification; channels do not deduplicate.
 trait PushChannel: Send + 'static {
@@ -297,9 +298,20 @@ mod tests {
 
     #[test]
     fn ntfy_size_boundary_counts_bytes_and_preserves_utf8() {
-        for size in [4095, 4096] {
+        for size in [4094, 4095] {
             let text = "票".repeat(size / 3) + &"x".repeat(size % 3);
             assert_eq!(ntfy_message(&text), text);
+        }
+        for text in ["x".repeat(4096), "票".repeat(1365) + "x"] {
+            assert_eq!(text.len(), 4096);
+            let body = ntfy_message(&text);
+            assert!(
+                body.len() <= 4095,
+                "4096-byte message must be shortened; got {} bytes",
+                body.len()
+            );
+            assert!(body.ends_with('…'));
+            assert!(text.starts_with(body.strip_suffix('…').unwrap()));
         }
         let footer = "时间：2026-10-14 11:00（大麦时间），正在确认能不能买";
         for text in [
@@ -309,13 +321,30 @@ mod tests {
             format!("演出\n{}", "很长的时间备注🎫".repeat(1000)),
         ] {
             let body = ntfy_message(&text);
-            assert!(body.len() <= 4096, "body has {} bytes", body.len());
+            assert!(body.len() <= 4095, "body has {} bytes", body.len());
             assert!(!body.contains('\u{fffd}'));
             assert!(body.contains('…'));
             if text.ends_with(footer) {
                 assert!(body.ends_with(footer));
             }
         }
+    }
+
+    #[test]
+    fn ntfy_summary_budget_stays_below_the_rejected_4096_byte_boundary() {
+        let footer = "时间：2026-10-14 11:00（大麦时间），正在确认能不能买";
+        // An oversized ASCII name uses every available byte of the summary budget.
+        // This guards compressed messages as well as the unchanged-message path.
+        let text = format!("{}\n票档 · 可售\n{footer}", "x".repeat(5000));
+        let body = ntfy_message(&text);
+        assert!(
+            body.len() <= 4095,
+            "compressed message must stay below 4096; got {} bytes",
+            body.len()
+        );
+        assert!(body.ends_with(footer));
+        assert!(body.contains("……另有 1 个票档，详见终端"));
+        assert!(body.lines().next().unwrap().ends_with('…'));
     }
 
     #[test]

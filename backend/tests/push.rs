@@ -594,7 +594,7 @@ fn size_limited_push() -> Server {
     Server::start(Box::new(|_, body| {
         let payload: serde_json::Value = serde_json::from_str(body).unwrap();
         // Reproduce ntfy's rejection at the protocol boundary, locally.
-        if payload["message"].as_str().unwrap().len() > 4096 {
+        if payload["message"].as_str().unwrap().len() >= 4096 {
             (
                 500,
                 r#"{"code":50001,"http":500,"error":"internal server error"}"#.into(),
@@ -623,8 +623,8 @@ fn assert_calendar_summary(payload: &serde_json::Value, out: &str) {
     );
     let body = payload["message"].as_str().unwrap();
     assert!(
-        body.len() <= 4096,
-        "ntfy body has {} bytes, limit 4096",
+        body.len() <= 4095,
+        "ntfy body has {} bytes, limit 4095",
         body.len()
     );
     let lines: Vec<&str> = body.lines().collect();
