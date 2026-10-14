@@ -5,6 +5,7 @@
 
 use serde_json::Value;
 
+use super::redact;
 use crate::damai::{buy_button_code_is_mapped, tier_code_is_mapped};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,10 +114,15 @@ fn code_text(v: &Value) -> Option<String> {
     }
 }
 
+/// Words damai.cn put on its own page, as a report may carry them: the
+/// button's text, a tier's tag and a tier's name all go into the report
+/// and into the issue a run opens, so the owner's rules apply to them
+/// before they leave this machine (#72).
 fn text(v: &Value) -> Option<String> {
     v.as_str()
         .map(|s| s.split_whitespace().collect::<Vec<_>>().join(" "))
         .filter(|s| !s.is_empty())
+        .map(|s| redact::for_report(&s))
 }
 
 #[cfg(test)]

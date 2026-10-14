@@ -101,6 +101,42 @@ pub fn redact(text: &str) -> String {
     out
 }
 
+/// damai.cn's own text as something theFlash prints may carry it. Values
+/// [`redact`] can replace are replaced; a line that still trips a rule
+/// afterwards is dropped and named instead, because a login header has no
+/// value to swap out and the text is on its way somewhere that cannot be
+/// taken back.
+///
+/// A fixture is written once and read by whoever fixes a change, so a
+/// response it cannot clean is refused whole. A report is not: it goes to
+/// a terminal, to a scheduled run's log and into the issue `theflash
+/// inspect --open-issue` opens by itself, and dropping it would throw away
+/// the finding along with the credential. So every string an inspection
+/// copies out of a response comes through here — the event's name, the
+/// words beside a status code nobody has mapped, a tier's label, and the
+/// errors theFlash builds out of a response's own bytes — and what is left
+/// is a safe error summary, a field path and redacted page text (#72).
+pub fn for_report(text: &str) -> String {
+    let redacted = redact(text);
+    let left = sensitive(&redacted);
+    if left.is_empty() {
+        return redacted;
+    }
+    redacted
+        .split_inclusive('\n')
+        .enumerate()
+        .map(
+            |(i, line)| match left.iter().find(|hit| hit.line == i + 1) {
+                Some(hit) => {
+                    let ending = &line[line.trim_end_matches(['\n', '\r']).len()..];
+                    format!("〈这一行命中“{}”，没有写进报告〉{ending}", hit.rule.name())
+                }
+                None => line.to_string(),
+            },
+        )
+        .collect()
+}
+
 fn redact_line(line: &str) -> String {
     let mut spans: Vec<(usize, usize, &str)> = Vec::new();
     for (start, end) in cookie_values(line) {
@@ -410,5 +446,54 @@ mod tests {
     fn multiple_lines_keep_their_line_endings() {
         assert_eq!(redact("a\nb\n"), "a\nb\n");
         assert_eq!(redact("a\r\nb"), "a\r\nb");
+    }
+
+    /// What a report may carry: the same replacements a fixture gets, and
+    /// nothing left over. A fixture that still trips a rule is refused
+    /// whole, but a report is on its way to a terminal, a log and an
+    /// automatically opened issue, so only the line that trips it goes —
+    /// the rest is the finding whoever reads the report is there for.
+    #[test]
+    fn a_report_keeps_the_text_around_what_it_had_to_drop() {
+        let text = format!(
+            "不是 JSONP：{}=abc123\nSet-Cookie: sid=1\n手机 {}\n<html>changed layout</html>\n",
+            COOKIE_NAMES[4],
+            sample_mobile()
+        );
+        let out = for_report(&text);
+        assert_eq!(
+            out,
+            format!(
+                "不是 JSONP：{}=<redacted>\n〈这一行命中“{}”，没有写进报告〉\n手机 00000000000\n<html>changed layout</html>\n",
+                COOKIE_NAMES[4],
+                Rule::Header.name()
+            )
+        );
+        assert!(rules(&out).is_empty(), "{out}");
+        assert!(
+            out.contains("不是 JSONP") && out.contains("changed layout"),
+            "脱敏把报告要说的事也一起抹掉了：{out}"
+        );
+    }
+
+    /// A report is put together out of pieces that have each been through
+    /// here, and then printed, so running it twice may not change the text
+    /// again — a line this module dropped must not read as a finding of its
+    /// own the second time round.
+    #[test]
+    fn text_a_report_already_holds_is_left_as_it_is() {
+        for text in [
+            "结构：和 testdata 里的一样\n".to_string(),
+            "__jp0({\"perform\":{\"performId\":\"286937790\"}})\n".to_string(),
+            format!(
+                "不是 JSONP：{}=abc123\nSet-Cookie: sid=1\n",
+                COOKIE_NAMES[4]
+            ),
+            format!("手机 {}\n身份证 {}\n", sample_mobile(), sample_id()),
+        ] {
+            let once = for_report(&text);
+            assert_eq!(for_report(&once), once, "{text}");
+            assert!(rules(&once).is_empty(), "{once}");
+        }
     }
 }
