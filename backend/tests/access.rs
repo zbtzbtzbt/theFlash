@@ -498,6 +498,182 @@ async fn a_redirect_that_never_lands_stops_after_a_few_hops() {
     );
 }
 
+/// A redirect response whose `Location` looks ordinary but whose body is
+/// the slider challenge (`risk_control.html`) is still risk control (#109):
+/// every GET exit must trip the breaker on that hop and stop without
+/// following `Location`, and when the breaker file cannot be written it
+/// must return `RiskNotRecorded` rather than following on.
+#[tokio::test]
+async fn redirect_risk_body_must_stop_before_clean_location() {
+    for exit in [Exit::ItemPage, Exit::TierPage, Exit::HomePage] {
+        let home = Home::new(&format!("redirect-risk-body-{exit:?}"));
+        let server = MockDamai::start_replies(vec![
+            (
+                "moved".to_string(),
+                Reply::ok(support::fixture("item_on_sale.html")),
+            ),
+            (
+                "/".to_string(),
+                Reply {
+                    status: "302 Found",
+                    location: Some("/item.htm?id=1086791513717&moved=1".to_string()),
+                    body: support::fixture("risk_control.html"),
+                },
+            ),
+        ]);
+        let (gate, client) = client_at(&home, &server, Duration::ZERO);
+        let result = exit.call(&client).await;
+        assert!(
+            matches!(result, Err(Error::RiskControl(_))),
+            "{}：302 risk body was lost; result_ok={} hits={:?} breaker={:?}",
+            exit.name(),
+            result.is_ok(),
+            server.hits(),
+            gate.stop()
+        );
+        assert_eq!(
+            server.hits().len(),
+            1,
+            "{}：{:?}",
+            exit.name(),
+            server.hits()
+        );
+        let stop = gate
+            .stop()
+            .unwrap()
+            .unwrap_or_else(|| panic!("{}：熔断没有写下来", exit.name()));
+        assert_eq!(stop.marker, "_____tmd_____", "{}", exit.name());
+
+        let again = exit
+            .call(&client)
+            .await
+            .expect_err(&format!("{}：熔断之后还在放行", exit.name()));
+        assert!(
+            matches!(again, Error::RiskStopped(_)),
+            "{}：{again}",
+            exit.name()
+        );
+        assert_eq!(server.hits().len(), 1, "{:?}", server.hits());
+    }
+
+    // If the state directory becomes unwritable after Gate::new, a risk
+    // body on a redirect hop still stops on hop 1 with RiskNotRecorded.
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let home = Home::new("redirect-risk-body-unrecorded");
+        let server = MockDamai::start_replies(vec![
+            (
+                "moved".to_string(),
+                Reply::ok(support::fixture("item_on_sale.html")),
+            ),
+            (
+                "/".to_string(),
+                Reply {
+                    status: "302 Found",
+                    location: Some("/item.htm?id=1086791513717&moved=1".to_string()),
+                    body: support::fixture("risk_control.html"),
+                },
+            ),
+        ]);
+        let (_gate, client) = client_at(&home, &server, Duration::ZERO);
+        let dir = home.state_dir();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let writable_anyway = std::fs::write(dir.join("by-root"), b"").is_ok();
+        let result = client.item_page(ITEM).await;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if !writable_anyway {
+            assert!(
+                matches!(result, Err(Error::RiskNotRecorded { .. })),
+                "expected RiskNotRecorded, got {result:?}"
+            );
+            assert_eq!(server.hits().len(), 1, "{:?}", server.hits());
+        }
+    }
+}
+
+/// Only the HTTP redirect status codes (301, 302, 303, 307, 308) may be
+/// followed (#111). `304 Not Modified` (and other 3xx codes like 300, 305,
+/// 306) carrying a `Location` header must not be followed and must fail as
+/// an HTTP status error on the first hop, matching reqwest's policy.
+#[tokio::test]
+async fn status304_with_location_is_not_a_followable_redirect() {
+    for (status_line, code) in [
+        ("304 Not Modified", 304u16),
+        ("300 Multiple Choices", 300u16),
+        ("305 Use Proxy", 305u16),
+        ("306 Switch Proxy", 306u16),
+    ] {
+        for exit in [
+            Exit::ItemPage,
+            Exit::TierPage,
+            Exit::HomePage,
+            Exit::ClockReading,
+        ] {
+            let home = Home::new(&format!("status-{code}-{exit:?}"));
+            let server = MockDamai::start_replies(vec![
+                (
+                    "moved".to_string(),
+                    Reply::ok(support::fixture("item_on_sale.html")),
+                ),
+                (
+                    "/".to_string(),
+                    Reply {
+                        status: status_line,
+                        location: Some("/item.htm?id=1086791513717&moved=1".to_string()),
+                        body: String::new(),
+                    },
+                ),
+            ]);
+            let (_gate, client) = client_at(&home, &server, Duration::ZERO);
+            let result = exit.call(&client).await;
+            assert!(
+                matches!(result, Err(Error::Http { status, .. }) if status == code),
+                "{}：{code} was followed or misreported; result={result:?} hits={:?}",
+                exit.name(),
+                server.hits()
+            );
+            assert_eq!(
+                server.hits().len(),
+                1,
+                "{}：{code} followed Location: {:?}",
+                exit.name(),
+                server.hits()
+            );
+        }
+    }
+
+    for status_line in [
+        "301 Moved Permanently",
+        "302 Found",
+        "303 See Other",
+        "307 Temporary Redirect",
+        "308 Permanent Redirect",
+    ] {
+        let home = Home::new("followable-3xx");
+        let server = MockDamai::start_replies(vec![
+            (
+                "moved".to_string(),
+                Reply::ok(support::fixture("item_on_sale.html")),
+            ),
+            (
+                "/".to_string(),
+                Reply {
+                    status: status_line,
+                    location: Some("/item.htm?id=1086791513717&moved=1".to_string()),
+                    body: String::new(),
+                },
+            ),
+        ]);
+        let (_gate, client) = client_at(&home, &server, Duration::ZERO);
+        let html = client
+            .item_page(ITEM)
+            .await
+            .unwrap_or_else(|e| panic!("{status_line} 没有跟随：{e}"));
+        assert!(html.contains("dataDefault"), "{status_line}");
+        assert_eq!(server.hits().len(), 2, "{status_line}: {:?}", server.hits());
+    }
+}
+
 const TWO_CLIENTS_PROBE: &str = "two_default_clients_in_one_process_probe";
 
 /// Two default clients in one process, which is what a command that

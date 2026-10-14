@@ -251,6 +251,8 @@ impl Client {
     /// itself, so it records the breaker instead of being followed — on a
     /// HEAD, and on a GET whose challenge page says nothing in its body,
     /// that redirect is the only place the challenge can be seen (#74).
+    /// A redirect hop whose body already carries a risk marker is stopped
+    /// there too, before following an ordinary-looking Location (#109).
     async fn send(
         &self,
         method: reqwest::Method,
@@ -281,6 +283,13 @@ impl Client {
             if let Some(marker) = risk_control_marker(&location) {
                 return Err(self.gate.trip(&at, marker));
             }
+            let body = resp.text().await.map_err(|e| Error::Network {
+                url: at.clone(),
+                reason: chain(&e),
+            })?;
+            if let Some(marker) = risk_control_marker(&body) {
+                return Err(self.gate.trip(&at, marker));
+            }
             at = location;
         }
         Err(Error::Network {
@@ -304,10 +313,13 @@ struct Answer {
 }
 
 /// Where this response says to go next, as an absolute URL, or None when
-/// it is the answer itself. A Location that is not a URL at all is
-/// returned as it came, so a risk marker in it is still seen.
+/// it is the answer itself. Only the HTTP redirect status codes that
+/// reqwest's policy follows (301, 302, 303, 307, 308) count as redirects;
+/// other 3xx codes like 304 Not Modified must not follow a Location
+/// header (#111). A Location that is not a URL at all is returned as it
+/// came, so a risk marker in it is still seen.
 fn redirect_target(resp: &reqwest::Response) -> Option<String> {
-    if !resp.status().is_redirection() {
+    if !matches!(resp.status().as_u16(), 301 | 302 | 303 | 307 | 308) {
         return None;
     }
     let location = resp
