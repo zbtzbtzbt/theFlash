@@ -1,4 +1,4 @@
-<!-- reviewed-through: e4f0590 (2026-10-14 13:09 +0800) -->
+<!-- reviewed-through: de4931d (2026-10-14 13:31 +0800) -->
 # 已合并工作的教训
 
 本项目的代码由 agent 编写、审查、合并和发布。每天夜里有一个复盘 agent 检查当天的 commit：哪些改动后来又被返工、哪些不该合并、哪些验证得太薄。学到的东西记在这里。改代码之前先读这份文件。
@@ -134,6 +134,11 @@
 - Seen 1× (2026-10-14)。
 
 ## 合并与关闭
+
+**并行 PR 改同一函数的不同变量/语义时，文本不冲突也会把 main 编不过；合入前要在最新 main 上重编，不能只看 Git 无冲突。**
+- `e4f0590`（#73）在 `inspect::record` 里 `notes.push`；更早合入的 `d31600e`（#78）已删掉 `notes` 改成 `lost`。两边各自相对当时 main 绿，合起来 `cannot find value notes`（#129）。Done right on 10-14: `de4931d`——分开 lost（失败）与 notes（stderr 说明），并有破坏测试守住 stderr。
+- 怎么避免：审查/合并前 `git fetch && rebase origin/main && make check`；同一模块连续合入时看相邻 PR 是否改同一收尾路径。merge-gate 过 CI 是必要但不充分——要以**合到当时最新 main 之后**的 head 为准。
+- Seen 1× (2026-10-14)。
 
 **流程工具链（认领租约、合并闸门）合入时，fixture 回放可以代替“真多智能体演示”，但要在 Not tried 写清。**
 - Done right on 10-14: `c72af3d`（#16 claims）——有 0008 决定与子系统文档、882 行回放测试；Not tried 只留真实多 agent 演示。本轮未见恶意模式或手改护栏被拆。
