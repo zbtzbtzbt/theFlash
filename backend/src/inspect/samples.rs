@@ -89,7 +89,7 @@ pub const KEEP_PER_CATEGORY: usize = 3;
 /// finding asking for a new event here, instead of going quietly blind.
 const POOL: [(Category, &[u64]); 5] = [
     (Category::OnSale, &[1086791513717]),
-    (Category::NotYetOnSale, &[1092337348536]),
+    (Category::NotYetOnSale, &[1092337348536, 1091895653399]),
     (Category::SoldOut, &[1077137031347]),
     (Category::Calendar, &[1084537866279]),
     (Category::NotOnPcChannel, &[1080486727522]),
