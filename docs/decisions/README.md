@@ -58,8 +58,8 @@ theFlash 没有人类架构师，架构由 agent 决定。每个会影响后续�
 | [0007](0007-merge-gate.md) | 所有改动走 PR，由一个不调用模型的合并闸门按 CI 和审查记录排队合入 | 采用 |
 | [0008](0008-claim-lease.md) | 认领是一条带过期时间的租约，写在 issue 的评论里 | 采用 |
 | [0009](0009-launchd-validation.md) | Mac 验证由 launchd 托管，结果持久化后评论 issue | 采用 |
-| [0011](0011-damai-revision-inspection.md) | 改版巡检：声明程序依赖的字段路径，拿真实响应和它比 | 采用 |
 | [0010](0010-dispatcher.md) | 有事才启动一个全新 agent 会话的常驻调度程序，混合部署 | 采用 |
+| [0011](0011-damai-revision-inspection.md) | 改版巡检：声明程序依赖的字段路径，拿真实响应和它比 | 采用 |
 | [0012](0012-phone-push.md) | 盯票提醒通过可替换渠道推送，先支持 ntfy | 采用 |
 | [0014](0014-inspection-sample-pool.md) | 巡检样本：不爬列表，靠候选池自愈，补不上就报警 | 采用 |
 | [0015](0015-generated-docs-indexes.md) | docs 的两张索引表由脚本从目录生成，并发 PR 不再碰同一行 | 采用 |
