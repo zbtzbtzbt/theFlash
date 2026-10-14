@@ -2480,3 +2480,65 @@ fn the_inspections_own_issue_is_found_even_past_the_first_hundred() {
     );
     assert_eq!(out.status.code(), Some(1), "{text}{said}");
 }
+
+/// #71: the scan `record` runs before it writes went line by line and saw
+/// only `name=value` and `"name": "value"`, while `repo_guard.rs` has read
+/// a name and its value across lines, inside a `{"name": …, "value": …}`
+/// object, on a cookies.txt line and as adjacent arguments since #21. A
+/// response carrying any of those was written with the value still in it
+/// and exited 0; the rule only caught it later, when someone committed the
+/// fixture. The values below are made up and joined from pieces, so this
+/// file carries none of what the rules look for.
+#[test]
+fn record_takes_out_every_form_of_login_cookie_the_repository_guard_reads() {
+    let home = Home::new("record-cookie-forms");
+    let dir = home.path().join("testdata");
+    std::fs::create_dir_all(&dir).unwrap();
+    let cookie = ["un", "b"].concat();
+    let value = ["synthetic", "123"].concat();
+    let forms = [
+        // The name and its value on different lines, as a pretty-printed
+        // JSON dump writes them.
+        format!("<script>var s = {{\"{cookie}\":\n  \"{value}\"}};</script>"),
+        // How a HAR file, Playwright's storageState and browser
+        // extensions export one cookie.
+        format!("<script>var c = {{\"name\": \"{cookie}\", \"value\": \"{value}\"}};</script>"),
+        // The Netscape cookies.txt line `curl -c` writes.
+        format!("<pre>.damai.cn\tTRUE\t/\tFALSE\t1760000000\t{cookie}\t{value}</pre>"),
+        // The name and the value as adjacent arguments.
+        format!("<script>cookies.set(\"{cookie}\", \"{value}\");</script>"),
+    ]
+    .join("\n");
+    let damai =
+        support::MockDamai::start_bodies(vec![("/".to_string(), format!("<html>{forms}</html>"))]);
+    let mut cmd = home.theflash(&damai.base_url());
+    cmd.args([
+        "inspect",
+        "record",
+        "home",
+        "--as",
+        "probe",
+        "--dir",
+        dir.to_str().unwrap(),
+        "--gap",
+        "0",
+    ]);
+    let out = support::output_within(cmd, 60);
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    let page = dir.join("probe.html");
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    let recorded = std::fs::read_to_string(&page).unwrap();
+    assert!(
+        !recorded.contains(&value),
+        "录下来的首页里还留着 cookie 的值，提交时才会被 repo_guard 拦下：{recorded}"
+    );
+    assert_eq!(
+        recorded.matches("<redacted>").count(),
+        4,
+        "四种写法应该各被脱敏一次：{recorded}"
+    );
+    // The same rules repo_guard.rs runs over the repository: a fixture it
+    // would refuse must not be on disk here either.
+    let left = theflash::inspect::redact::sensitive(&recorded);
+    assert!(left.is_empty(), "脱敏之后仍然命中规则：{left:?}");
+}

@@ -144,7 +144,9 @@ owner 的裁决（#9）：要访问大麦的定时任务在 owner 的 Mac 上跑
 
 ## 脱敏
 
-`inspect::redact` 按 [code-standards](../code-standards.md) 的同一条规则处理：登录 cookie 的值换成 `<redacted>`，手机号和身份证号的数字换成等长的 0（响应的长度和结构不变），`Cookie`/`Set-Cookie`/`Authorization` 请求头不脱敏而是整份拒绝保存。规则在这里和 `backend/tests/repo_guard.rs` 里各有一份，为什么以及以后怎么合并见 [0011](../decisions/0011-damai-revision-inspection.md) 的“后果”。
+`inspect::redact` 按 [code-standards](../code-standards.md) 的同一条规则处理：登录 cookie 的值换成 `<redacted>`，手机号和身份证号的数字换成等长的 0（响应的长度和结构不变），`Cookie`/`Set-Cookie`/`Authorization` 请求头不脱敏而是整份拒绝保存。
+
+**规则只有一份**：`backend/tests/repo_guard.rs` 扫整个仓库时调用的就是 `inspect::redact::sensitive`，所以“录下来能不能写”和“提交时能不能过”是同一段代码判的，不会一边松一边紧（#71）。登录 cookie 的名字和值不一定写在同一行、也不一定是 `name=value`：跨行、`{"name": …, "value": …}` 导出对象、cookies.txt 的制表符行、相邻参数（`set("unb", "…")`）都算，所以扫描读的是整份文本，命中算在名字所在那一行。这些写法 `redact` 都能把值换掉；换不掉的只有请求头，它本来就是整份拒绝。守这一条的是 `redact.rs` 的 `redacting_leaves_nothing_but_the_headers_that_refuse_a_response`：新加一种写法却没给它脱敏的办法，这个测试会红，而不是等到录下来的 fixture 被提交时才发现。
 
 **报告、日志和 issue 正文走同一条规则**：fixture 是写一次、给人回放的文件，所以脱敏之后还命中规则的响应整份不写；报告不一样，它同时去终端、定时任务的日志和 `--open-issue` 自动开的 issue，整份丢掉会把这次的发现也一起丢掉。所以凡是巡检从响应里抄出来的字符串，都先经过 `redact::for_report`：能替换的值替换掉，替换不掉的那一行换成“这一行命中<某条规则>”，其余照常留下。报告里剩下的只有安全的错误摘要、字段路径和脱敏后的网页文字（#72）。
 
