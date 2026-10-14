@@ -917,3 +917,116 @@ fn settings_that_would_send_work_nowhere_are_refused_at_start() {
     assert_eq!(code, 2, "{out}");
     assert!(out.contains("example-config"), "说清怎么弄一份设置：{out}");
 }
+
+#[test]
+fn implement_follows_claims_queue_and_skips_waiting_blocked_and_untriaged() {
+    let home = Home::new("priority-queue");
+    let replay = home.path().join("replay");
+    std::fs::create_dir_all(&replay).unwrap();
+    let priority_dir =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("testdata/github/claims/priority");
+    std::fs::copy(
+        priority_dir.join("open-issues.json"),
+        replay.join("issues.json"),
+    )
+    .unwrap();
+    for entry in std::fs::read_dir(&priority_dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with("comments-"))
+        {
+            std::fs::copy(&path, replay.join(path.file_name().unwrap())).unwrap();
+        }
+    }
+    std::fs::write(replay.join("pulls.json"), "[]").unwrap();
+    std::fs::copy(
+        PathBuf::from(fixtures("night")).join("main-test-runs.json"),
+        replay.join("main-test-runs.json"),
+    )
+    .unwrap();
+
+    let config = home.config(serde_json::json!({
+        "max_sessions": 50,
+        "max_sessions_per_day": 50,
+        "ignore_issues": [],
+    }));
+    let (code, out) = run(
+        &home,
+        &[
+            "plan",
+            "--json",
+            "--config",
+            &config.display().to_string(),
+            "--replay",
+            &replay.display().to_string(),
+            "--now",
+            "2026-10-14T11:12:00+08:00",
+        ],
+    );
+    assert_eq!(code, 0, "{out}");
+    let plan: serde_json::Value = serde_json::from_str(out.trim()).expect(&out);
+    let implements: Vec<u64> = plan["start"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|t| t["role"] == "implement")
+        .map(|t| t["issue"].as_u64().unwrap())
+        .collect();
+    assert_eq!(
+        implements.first().copied(),
+        Some(2),
+        "第一个派出的 implement 应当是队列的下一个 #2（P1）：{implements:?}"
+    );
+    let pos = |n: u64| {
+        implements
+            .iter()
+            .position(|x| *x == n)
+            .unwrap_or_else(|| panic!("#{n} 不在 implement 列表里：{implements:?}"))
+    };
+    assert!(
+        pos(2) < pos(46) && pos(46) < pos(20),
+        "P1（#2）应排在 P2（#46）前，P2 排在 P3（#20）前：{implements:?}"
+    );
+    for waiting in [25_u64, 63, 65, 67] {
+        assert!(
+            !plan["start"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|t| t["issue"].as_u64() == Some(waiting)),
+            "等裁决的 #{waiting} 不该派任何角色：{plan:#}"
+        );
+    }
+    assert!(
+        !implements.contains(&54),
+        "被 #4 挡住的 #54 不该派 implement：{implements:?}"
+    );
+    let skip_why = |n: u64| -> String {
+        plan["skip"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["issue"].as_u64() == Some(n) && s["role"] == "implement")
+            .and_then(|s| s["skipped"].as_str())
+            .unwrap_or_else(|| panic!("#{n} 不在 implement 跳过列表里：{plan:#}"))
+            .to_string()
+    };
+    assert!(
+        skip_why(54).contains("#4"),
+        "#54 应说明被 #4 挡着：{}",
+        skip_why(54)
+    );
+    for untriaged in [70_u64, 71, 80, 81] {
+        assert!(
+            !implements.contains(&untriaged),
+            "没定级的 #{untriaged} 不该派 implement：{implements:?}"
+        );
+        assert!(
+            skip_why(untriaged).contains("还没定优先级"),
+            "#{untriaged} 应说明没定优先级：{}",
+            skip_why(untriaged)
+        );
+    }
+}
