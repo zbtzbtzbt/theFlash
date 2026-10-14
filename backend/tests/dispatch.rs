@@ -497,6 +497,157 @@ fn a_session_that_finished_is_closed_on_the_next_tick() {
 }
 
 #[test]
+fn a_failed_session_releases_its_claim_and_tells_the_issue() {
+    use std::os::unix::process::CommandExt;
+
+    let home = Home::new("failed-cleanup");
+    checkout(&home);
+    real_tool(home.path(), "git");
+    real_tool(home.path(), "cat");
+    stub(home.path(), "agent-claude", "exit 1");
+    stub(
+        home.path(),
+        "claims",
+        &format!(
+            "echo \"$@\" >> {}; echo '已经收回'",
+            home.path().join("claims-calls").display()
+        ),
+    );
+    stub(
+        home.path(),
+        "gh",
+        &format!(
+            "echo \"$@\" >> {calls}; cat \"$7\" >> {body}",
+            calls = home.path().join("gh-calls").display(),
+            body = home.path().join("gh-body").display(),
+        ),
+    );
+    let config = home.config(serde_json::json!({
+        "interval_seconds": 1,
+        "max_sessions": 1,
+        "ignore_issues": [20],
+    }));
+    let mut resident = dispatch(home.path())
+        .args([
+            "run",
+            "--config",
+            &config.display().to_string(),
+            "--replay",
+            &fixtures("accept"),
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .process_group(0)
+        .spawn()
+        .unwrap();
+
+    let state_file = home.path().join("state/state.json");
+    let mut cleaned_up = false;
+    for _ in 0..150 {
+        let failed = std::fs::read_to_string(&state_file)
+            .ok()
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+            .is_some_and(|state| state["sessions"][0]["outcome"] == "failed");
+        if failed
+            && home.path().join("claims-calls").exists()
+            && home.path().join("gh-body").exists()
+        {
+            cleaned_up = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let _ = resident.kill();
+    let _ = resident.wait();
+
+    assert!(cleaned_up, "失败会话必须走认领释放协议并通知 issue");
+    let claims = std::fs::read_to_string(home.path().join("claims-calls")).unwrap();
+    assert!(claims.contains("reclaim --issue 22"), "{claims}");
+    let body = std::fs::read_to_string(home.path().join("gh-body")).unwrap();
+    assert!(body.contains("失败"), "{body}");
+    assert!(body.contains("accept-22-a1"), "{body}");
+}
+
+#[test]
+fn the_resident_loop_sees_the_time_pass_so_a_session_can_time_out() {
+    use std::os::unix::process::CommandExt;
+
+    // 常驻循环每轮都要用这一轮的时间。按启动时刻算，会话跑多久都不到超时，
+    // 跨日的额度和之后到点的定时任务也一样永远不发生。
+    let home = Home::new("clock");
+    let mut child = Command::new("sleep")
+        .arg("600")
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    // chrono 在这个项目里没开 `clock`，时间从系统时钟的时间戳来，和调度程序用的
+    // 是同一个函数。
+    let started = theflash::dispatch::now() - chrono::Duration::seconds(55);
+    let state_dir = home.path().join("state");
+    std::fs::create_dir_all(&state_dir).unwrap();
+    std::fs::write(
+        state_dir.join("state.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "sessions": [{
+                "id": "accept-22-a1",
+                "role": "accept",
+                "vendor": "codex",
+                "issue": 22,
+                "started_at": started.to_rfc3339(),
+                "pid": child.id(),
+                "log": home.path().join("logs/accept-22-a1.log"),
+                "worktree": home.path().join("sessions/accept-22-a1"),
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    real_tool(home.path(), "cat");
+    stub(home.path(), "gh", "cat \"$7\" > /dev/null");
+    stub(home.path(), "claims", "echo '已经收回'");
+    // 没有活可派（演示标签没人带），这一轮只会做收尾。
+    let config = home.config(serde_json::json!({
+        "interval_seconds": 1,
+        "session_timeout_minutes": 1,
+        "require_label": "演示:调度",
+    }));
+    let mut resident = dispatch(home.path())
+        .args([
+            "run",
+            "--config",
+            &config.display().to_string(),
+            "--replay",
+            &fixtures("cancelled-main"),
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .process_group(0)
+        .spawn()
+        .unwrap();
+
+    let mut outcome = serde_json::Value::Null;
+    for _ in 0..400 {
+        if let Ok(text) = std::fs::read_to_string(state_dir.join("state.json"))
+            && let Ok(state) = serde_json::from_str::<serde_json::Value>(&text)
+            && !state["sessions"][0]["outcome"].is_null()
+        {
+            outcome = state["sessions"][0]["outcome"].clone();
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let _ = resident.kill();
+    let _ = resident.wait();
+    let _ = child.kill();
+    let _ = child.wait();
+
+    assert_eq!(
+        outcome, "timed-out",
+        "跑过超时上限的会话，下一轮就要收尾，而不是按调度程序的启动时刻算"
+    );
+}
+
+#[test]
 fn a_session_that_ran_too_long_is_stopped_the_claim_released_and_the_issue_told() {
     use std::os::unix::process::CommandExt;
 
@@ -710,10 +861,22 @@ fn install_prints_the_service_file_without_touching_this_machine() {
 #[test]
 fn the_example_settings_are_settings_the_dispatcher_accepts() {
     let home = Home::new("example");
-    let (code, out) = run(&home, &["example-config"]);
-    assert_eq!(code, 0, "{out}");
+    let out = dispatch(home.path())
+        .arg("example-config")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).unwrap();
     let json: serde_json::Value =
-        serde_json::from_str(out.split("\n#").next().unwrap()).expect("要是合法的 JSON");
+        serde_json::from_str(&stdout).expect("重定向的 stdout 要是合法的 JSON");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("checkout"),
+        "操作提示留在 stderr"
+    );
     assert_eq!(json["max_sessions"], 1, "一开始只许一个会话：{json}");
     assert_eq!(json["require_label"], "演示:调度", "{json}");
     assert_eq!(
@@ -723,7 +886,7 @@ fn the_example_settings_are_settings_the_dispatcher_accepts() {
     );
     // 存下来就能直接用。
     let path = home.path().join("example.json");
-    std::fs::write(&path, out.split("\n#").next().unwrap()).unwrap();
+    std::fs::write(&path, &stdout).unwrap();
     let (code, out) = run(
         &home,
         &[

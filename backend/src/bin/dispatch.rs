@@ -27,7 +27,8 @@ const USAGE: &str = "\
 每个子命令都接受：
   --config <文件>   设置（默认 ~/.config/theflash/dispatch.json）
   --replay <目录>   用保存下来的 GitHub 响应判断，不访问 GitHub（测试和演示用）
-  --now <时间>      当成这个时刻（带时区，例如 2026-10-14T04:00:00+08:00）
+  --now <时间>      当成这个时刻（带时区，例如 2026-10-14T04:00:00+08:00）；
+                    常驻的 run 是把时钟挪过去，不是停在那里
   --dry-run         只打印要做什么，不启动会话、不写状态、不评论
 ";
 
@@ -46,9 +47,22 @@ struct Args {
     config: PathBuf,
     replay: Option<PathBuf>,
     now: DateTime<Utc>,
+    /// How far `--now` moved the clock. The resident loop decides from its
+    /// own time every tick, so `--now` shifts that clock rather than
+    /// freezing it: a frozen clock means a session never reaches its
+    /// timeout, a daily ceiling never turns over and a job due later
+    /// today never becomes due.
+    offset: chrono::TimeDelta,
     json: bool,
     dry_run: bool,
     print: bool,
+}
+
+impl Args {
+    /// This tick's time.
+    fn now(&self) -> DateTime<Utc> {
+        dispatch::now() + self.offset
+    }
 }
 
 fn parse() -> Result<Args, String> {
@@ -59,6 +73,7 @@ fn parse() -> Result<Args, String> {
         config: dispatch::config::default_path(),
         replay: None,
         now: dispatch::now(),
+        offset: chrono::TimeDelta::zero(),
         json: false,
         dry_run: false,
         print: false,
@@ -76,6 +91,7 @@ fn parse() -> Result<Args, String> {
                 out.now = DateTime::parse_from_rfc3339(&text)
                     .map_err(|e| format!("--now {text} 不是带时区的时间：{e}"))?
                     .with_timezone(&Utc);
+                out.offset = out.now - dispatch::now();
             }
             "--json" => out.json = true,
             "--dry-run" => out.dry_run = true,
@@ -95,7 +111,7 @@ fn command() -> Result<i32, String> {
                 "{}",
                 serde_json::to_string_pretty(&Config::example()).map_err(|e| e.to_string())?
             );
-            println!(
+            eprintln!(
                 "\n# 存到 {}，把 checkout 改成这台机器上的 theFlash 路径，\n\
                  # 再 scripts/dispatch install。agent 的凭据由各自的命令行自己管，不进这个文件，也不进仓库。",
                 dispatch::config::default_path().display()
@@ -124,20 +140,22 @@ fn read_config(args: &Args) -> Result<Config, String> {
     })
 }
 
-fn read_plan(args: &Args, config: &Config) -> Result<(Plan, State), String> {
+/// What to do at `now`. Every command passes the time it is deciding for,
+/// and the resident loop passes this tick's.
+fn read_plan(args: &Args, config: &Config, now: DateTime<Utc>) -> Result<(Plan, State), String> {
     let snapshot = match &args.replay {
         Some(dir) => snapshot::Snapshot::replay(dir).map_err(|e| e.to_string())?,
         None => snapshot::fetch(&config.gh_command, &config.repo, &config.test_workflow)
             .map_err(|e| e.to_string())?,
     };
     let state = State::read(&config.state)?;
-    let plan = dispatch::plan(&snapshot, &state, config, args.now);
+    let plan = dispatch::plan(&snapshot, &state, config, now);
     Ok((plan, state))
 }
 
 fn plan(args: &Args) -> Result<i32, String> {
     let config = read_config(args)?;
-    let (plan, _) = read_plan(args, &config)?;
+    let (plan, _) = read_plan(args, &config, args.now)?;
     if args.json {
         println!("{}", as_json(&plan));
         return Ok(0);
@@ -230,7 +248,8 @@ fn as_json(plan: &Plan) -> String {
 fn tick(args: &Args) -> Result<i32, String> {
     let config = read_config(args)?;
     let _lock = Lock::take(&config.state)?;
-    let (plan, mut state) = read_plan(args, &config)?;
+    let now = args.now();
+    let (plan, mut state) = read_plan(args, &config, now)?;
     if args.dry_run {
         print_plan(&plan, &config);
         return Ok(if plan.start.is_empty() { 1 } else { 0 });
@@ -239,15 +258,15 @@ fn tick(args: &Args) -> Result<i32, String> {
         &plan,
         &mut state,
         &config,
-        args.now,
+        now,
         &mut runner::Sessions::new(),
     );
-    report(&done, &plan);
+    report(&done, &plan, now);
     Ok(if done.started.is_empty() { 1 } else { 0 })
 }
 
-fn report(done: &runner::Done, plan: &Plan) {
-    let at = dispatch::stamp(dispatch::now());
+fn report(done: &runner::Done, plan: &Plan, now: DateTime<Utc>) {
+    let at = dispatch::stamp(now);
     for note in &done.ended {
         println!("[{at}] 收尾 {note}");
     }
@@ -272,7 +291,7 @@ fn run(args: &Args) -> Result<i32, String> {
     let interval = std::time::Duration::from_secs(config.interval_seconds.max(5));
     println!(
         "[{}] 调度程序启动：{}，每 {} 秒看一次，同时最多 {} 个会话，今天最多 {} 个{}",
-        dispatch::stamp(dispatch::now()),
+        dispatch::stamp(args.now()),
         config.repo,
         config.interval_seconds,
         config.max_sessions,
@@ -287,13 +306,17 @@ fn run(args: &Args) -> Result<i32, String> {
     // known across ticks.
     let mut sessions = runner::Sessions::new();
     loop {
-        let now = dispatch::now();
-        match read_plan(args, &config) {
+        // This tick's time, used for the plan, for starting sessions and
+        // for closing them out alike: a plan made at one time and carried
+        // out at another is how a session ran past its timeout without
+        // anyone noticing.
+        let now = args.now();
+        match read_plan(args, &config, now) {
             Ok((plan, mut state)) => {
                 let done = runner::run(&plan, &mut state, &config, now, &mut sessions);
-                report(&done, &plan);
+                report(&done, &plan, now);
             }
-            Err(why) => println!("[{}] 这一轮没看成：{why}", dispatch::stamp(dispatch::now())),
+            Err(why) => println!("[{}] 这一轮没看成：{why}", dispatch::stamp(now)),
         }
         use std::io::Write;
         let _ = std::io::stdout().flush();

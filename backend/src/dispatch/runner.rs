@@ -64,36 +64,29 @@ impl Sessions {
     /// minutes ago would hold its slot until it timed out. Seen on the
     /// real run: the agent had already written its report and exited,
     /// the dispatcher kept saying "1 个候选被跳过".
-    fn reap(&mut self, state: &mut State, config: &Config, now: DateTime<Utc>) -> Vec<String> {
-        let ended: Vec<(String, Outcome)> = self
-            .children
+    fn ended(&mut self, state: &State, now: DateTime<Utc>) -> Vec<Sweep> {
+        self.children
             .iter_mut()
             .filter_map(|(id, child)| match child.try_wait() {
-                Ok(Some(status)) if status.success() => Some((id.clone(), Outcome::Done)),
-                Ok(Some(_)) => Some((id.clone(), Outcome::Failed)),
+                Ok(Some(status)) => {
+                    let session = state.session(id)?;
+                    let outcome = if status.success() {
+                        Outcome::Done
+                    } else {
+                        Outcome::Failed
+                    };
+                    Some(Sweep {
+                        id: id.clone(),
+                        issue: session.issue,
+                        outcome,
+                        after_minutes: (now - session.started_at).num_minutes().max(0),
+                        log: session.log.clone(),
+                        release_claim: outcome == Outcome::Failed,
+                    })
+                }
                 _ => None,
             })
-            .collect();
-        let mut notes = Vec::new();
-        for (id, outcome) in ended {
-            self.children.remove(&id);
-            let Some(session) = state.session_mut(&id) else {
-                continue;
-            };
-            if session.finished_at.is_some() {
-                continue;
-            }
-            let minutes = (now - session.started_at).num_minutes().max(0);
-            session.finished_at = Some(now);
-            session.outcome = Some(outcome);
-            notes.push(format!("{id} {}（{minutes} 分钟）", outcome.name()));
-        }
-        if !notes.is_empty()
-            && let Err(e) = state.write(&config.state)
-        {
-            notes.push(format!("状态写不下去：{e}"));
-        }
-        notes
+            .collect()
     }
 
     fn forget(&mut self, id: &str) {
@@ -112,10 +105,28 @@ pub fn run(
     sessions: &mut Sessions,
 ) -> Done {
     let mut done = Done::default();
-    // Collect what has already exited before acting on the plan: a
-    // session closed here frees its slot on the next tick.
-    done.ended.extend(sessions.reap(state, config, now));
+    // Collect what has already exited before acting on the plan. Failed
+    // sessions use the same release-and-comment contract as timeouts.
+    // Keep the child until cleanup succeeds so a failed protocol call or
+    // comment is retried on the next tick.
+    let reaped = sessions.ended(state, now);
+    let reaped_ids: Vec<&str> = reaped.iter().map(|s| s.id.as_str()).collect();
+    for sweep in &reaped {
+        match finish(sweep, state, config, now) {
+            Ok(note) => {
+                sessions.forget(&sweep.id);
+                done.ended.push(note);
+            }
+            Err(why) => done.notes.push(why),
+        }
+        if let Err(why) = state.write(&config.state) {
+            done.notes.push(why);
+        }
+    }
     for sweep in &plan.sweep {
+        if reaped_ids.contains(&sweep.id.as_str()) {
+            continue;
+        }
         // The exit code, when this dispatcher is the one that started it,
         // says more than "the process is gone".
         let sweep = &match sessions.outcome_of(&sweep.id) {
@@ -126,9 +137,11 @@ pub fn run(
             },
             None => sweep.clone(),
         };
-        sessions.forget(&sweep.id);
         match finish(sweep, state, config, now) {
-            Ok(note) => done.ended.push(note),
+            Ok(note) => {
+                sessions.forget(&sweep.id);
+                done.ended.push(note);
+            }
             Err(why) => done.notes.push(why),
         }
         if let Err(why) = state.write(&config.state) {
@@ -318,27 +331,29 @@ fn finish(
     {
         stop(pid);
     }
+    if sweep.release_claim
+        && let Some(issue) = sweep.issue
+    {
+        let claims = release_claim(config, issue, &sweep.id)?;
+        let result = match sweep.outcome {
+            Outcome::TimedOut => format!("{} 分钟后超时，已经停掉", sweep.after_minutes),
+            Outcome::Failed => format!("运行失败（{} 分钟）", sweep.after_minutes),
+            other => format!("{}（{} 分钟）", other.name(), sweep.after_minutes),
+        };
+        let body = format!(
+            "## 调度程序\n\n- 会话: {}（{}）\n- 日志: {}\n- 认领: {}\n- 下一步: 这个 issue 现在没有会话在做。接手的 agent 先看日志和分支做到哪一步，再按 AGENTS.md 认领，不要重复已经完成的步骤。\n\nAgent: dispatcher\n",
+            sweep.id,
+            result,
+            sweep.log.display(),
+            claims,
+        );
+        snapshot::comment(&config.gh_command, &config.repo, issue, &body)
+            .map_err(|e| format!("{} 收尾通知失败，下轮重试：{e}", sweep.id))?;
+        note.push_str(&format!("，已在 #{issue} 上说明（{claims}）"));
+    }
     if let Some(session) = state.session_mut(&sweep.id) {
         session.finished_at = Some(now);
         session.outcome = Some(sweep.outcome);
-    }
-    if !sweep.release_claim {
-        return Ok(note);
-    }
-    let Some(issue) = sweep.issue else {
-        return Ok(note);
-    };
-    let claims = release_claim(config, issue, &sweep.id);
-    let body = format!(
-        "## 调度程序\n\n- 会话: {}（{} 分钟后超时，已经停掉）\n- 日志: {}\n- 认领: {}\n- 下一步: 这个 issue 现在没有会话在做。接手的 agent 先看日志和分支做到哪一步，再按 AGENTS.md 认领，不要重复已经完成的步骤。\n\nAgent: dispatcher\n",
-        sweep.id,
-        sweep.after_minutes,
-        sweep.log.display(),
-        claims,
-    );
-    match snapshot::comment(&config.gh_command, &config.repo, issue, &body) {
-        Ok(()) => note.push_str(&format!("，已在 #{issue} 上说明（{claims}）")),
-        Err(e) => note.push_str(&format!("，#{issue} 上说明失败：{e}")),
     }
     Ok(note)
 }
@@ -347,9 +362,9 @@ fn finish(
 /// not expired yet, which is the right answer and goes into the comment
 /// as it is: the next agent then follows the lease rules instead of the
 /// dispatcher deciding for it.
-fn release_claim(config: &Config, issue: u64, task: &str) -> String {
+fn release_claim(config: &Config, issue: u64, task: &str) -> Result<String, String> {
     let Some((program, args)) = config.claims_command.split_first() else {
-        return "没配 claims_command，认领没有被收回".to_string();
+        return Err(format!("{task} 没配 claims_command，收尾下轮重试"));
     };
     let out = Command::new(program)
         .args(args)
@@ -364,16 +379,16 @@ fn release_claim(config: &Config, issue: u64, task: &str) -> String {
         .env("THEFLASH_DISPATCH_TASK", task)
         .output();
     match out {
-        Ok(out) if out.status.success() => "已经收回（scripts/claims reclaim）".to_string(),
-        Ok(out) => format!(
+        Ok(out) if out.status.success() => Ok("已经收回（scripts/claims reclaim）".to_string()),
+        Ok(out) => Ok(format!(
             "scripts/claims reclaim 拒绝收回（退出码 {}）：{}。租约还没过期时这是对的，等它过期后任何 agent 都可以收回。",
             out.status.code().unwrap_or(-1),
             first_line(
                 &String::from_utf8_lossy(&out.stdout),
                 &String::from_utf8_lossy(&out.stderr)
             ),
-        ),
-        Err(e) => format!("跑不起 {program}：{e}，认领没有被收回"),
+        )),
+        Err(e) => Err(format!("{task} 跑不起 {program}：{e}，收尾下轮重试")),
     }
 }
 
