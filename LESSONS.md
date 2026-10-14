@@ -36,6 +36,11 @@
 
 ## 用户的数据和设置
 
+**促销票档必须同时给出票面价、优惠说明和“是否享受以登录账号为准”；不能把部分账号折后价当成普票价。**
+- Done right on 10-14: `233855c`（#179/#182，经闸门）——`hasPromotion` 时用 `dashPrice` + `mktPromotionTips` 拼价格串；无促销一字不变；inspect 声明补字段；改动前 FAIL。
+- 怎么避免：票档 JSON 新增价格相关字段时对照真实促销 fixture；UI/watch/CLI 共用同一 `sku_price`。
+- Seen 1× (2026-10-14)。
+
 **从响应抄进报告 / issue / stderr 的每个字符串都要过报告脱敏；落盘 fixture 与 `repo_guard` 必须共用同一套凭据扫描。**
 - Done right on 10-14: `b4840a1`（#72/#158）——`redact::for_report` 覆盖报告/issue/stderr 出口；候选 fixture 脱敏不能代替这些出口。
 - `inspect/redact` 曾只认逐行 `name=value`，而 `repo_guard`（#21）已认跨行、导出对象、cookies.txt、相邻参数——`record` 写出带 cookie 的 fixture 仍退出 0，要等提交才被拦住（#71）。Done right on 10-14: `2d9f628`（#71/#143，经闸门）——规则合成一份；四种写法值均 `<redacted>`；`record_takes_out_every_form…` 改动前 FAIL；故意不跨行扫描会红。
