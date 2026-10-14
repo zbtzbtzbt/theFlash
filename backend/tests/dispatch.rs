@@ -269,10 +269,10 @@ fn gh_serving(home: &Home, dir: &str, extra_page: &str) {
         "gh",
         &format!(
             "case \"$*\" in\n\
-             *comments*) cat {dir}/comments-22.json; {extra_page} ;;\n\
-             *issues*) cat {dir}/issues.json ;;\n\
-             *pulls*) cat {dir}/pulls.json ;;\n\
-             *runs*) cat {dir}/main-test-runs.json ;;\n\
+             *comments*) cat '{dir}/comments-22.json'; {extra_page} ;;\n\
+             *issues*) cat '{dir}/issues.json' ;;\n\
+             *pulls*) cat '{dir}/pulls.json' ;;\n\
+             *runs*) cat '{dir}/main-test-runs.json' ;;\n\
              *) echo '[]' ;;\n\
              esac"
         ),
@@ -281,27 +281,37 @@ fn gh_serving(home: &Home, dir: &str, extra_page: &str) {
 
 #[test]
 fn comments_that_arrive_in_pages_are_all_read() {
-    let home = Home::new("pages");
-    gh_serving(&home, &fixtures("accept"), "echo '[]'");
+    let home = Home::new("pages 空格");
+    let spaced = home.path().join("theFlash-验收 空格/accept");
+    std::fs::create_dir_all(&spaced).unwrap();
+    for entry in std::fs::read_dir(fixtures("accept")).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_file() {
+            std::fs::copy(&path, spaced.join(path.file_name().unwrap())).unwrap();
+        }
+    }
     let config = home.config(serde_json::json!({}));
-    let (code, out) = run(
-        &home,
-        &[
-            "plan",
-            "--json",
-            "--config",
-            &config.display().to_string(),
-            "--now",
-            "2026-10-14T04:00:00+08:00",
-        ],
-    );
-    assert_eq!(code, 0, "分页的评论要读完，不是整轮失败：{out}");
-    let plan: serde_json::Value = serde_json::from_str(out.trim()).expect("--json 要是 JSON");
-    assert_eq!(plan["start"][0]["role"], "accept", "{plan}");
-    assert_ne!(
-        plan["start"][0]["vendor"], "codebuddy",
-        "第一页里的认领评论仍然决定实现者：{plan}"
-    );
+    for dir in [fixtures("accept"), spaced.display().to_string()] {
+        gh_serving(&home, &dir, "echo '[]'");
+        let (code, out) = run(
+            &home,
+            &[
+                "plan",
+                "--json",
+                "--config",
+                &config.display().to_string(),
+                "--now",
+                "2026-10-14T04:00:00+08:00",
+            ],
+        );
+        assert_eq!(code, 0, "分页的评论要读完，不是整轮失败（{dir}）：{out}");
+        let plan: serde_json::Value = serde_json::from_str(out.trim()).expect("--json 要是 JSON");
+        assert_eq!(plan["start"][0]["role"], "accept", "{plan}");
+        assert_ne!(
+            plan["start"][0]["vendor"], "codebuddy",
+            "第一页里的认领评论仍然决定实现者：{plan}"
+        );
+    }
 }
 
 #[test]
@@ -500,7 +510,7 @@ fn a_session_that_finished_is_closed_on_the_next_tick() {
 fn a_failed_session_releases_its_claim_and_tells_the_issue() {
     use std::os::unix::process::CommandExt;
 
-    let home = Home::new("failed-cleanup");
+    let home = Home::new("failed-cleanup 空格");
     checkout(&home);
     real_tool(home.path(), "git");
     real_tool(home.path(), "cat");
@@ -509,7 +519,7 @@ fn a_failed_session_releases_its_claim_and_tells_the_issue() {
         home.path(),
         "claims",
         &format!(
-            "echo \"$@\" >> {}; echo '已经收回'",
+            "echo \"$@\" >> '{}'; echo '已经收回'",
             home.path().join("claims-calls").display()
         ),
     );
@@ -517,7 +527,7 @@ fn a_failed_session_releases_its_claim_and_tells_the_issue() {
         home.path(),
         "gh",
         &format!(
-            "echo \"$@\" >> {calls}; cat \"$7\" >> {body}",
+            "echo \"$@\" >> '{calls}'; cat \"$7\" >> '{body}'",
             calls = home.path().join("gh-calls").display(),
             body = home.path().join("gh-body").display(),
         ),
@@ -651,7 +661,7 @@ fn the_resident_loop_sees_the_time_pass_so_a_session_can_time_out() {
 fn a_session_that_ran_too_long_is_stopped_the_claim_released_and_the_issue_told() {
     use std::os::unix::process::CommandExt;
 
-    let home = Home::new("timeout");
+    let home = Home::new("timeout 空格");
     // A process standing in for a session that will not end on its own,
     // in its own process group, exactly as the dispatcher starts one.
     let mut child = Command::new("sleep")
@@ -686,7 +696,7 @@ fn a_session_that_ran_too_long_is_stopped_the_claim_released_and_the_issue_told(
         home.path(),
         "gh",
         &format!(
-            "echo \"$@\" >> {calls}; cat \"$7\" >> {body}",
+            "echo \"$@\" >> '{calls}'; cat \"$7\" >> '{body}'",
             calls = home.path().join("gh-calls").display(),
             body = home.path().join("gh-body").display(),
         ),
@@ -695,7 +705,7 @@ fn a_session_that_ran_too_long_is_stopped_the_claim_released_and_the_issue_told(
         home.path(),
         "claims",
         &format!(
-            "echo \"$@\" >> {calls}; echo '拒绝：#22 的认领还没过期，还差 44 分钟'; exit 1",
+            "echo \"$@\" >> '{calls}'; echo '拒绝：#22 的认领还没过期，还差 44 分钟'; exit 1",
             calls = home.path().join("claims-calls").display(),
         ),
     );
@@ -747,13 +757,13 @@ fn a_session_that_ran_too_long_is_stopped_the_claim_released_and_the_issue_told(
 
 #[test]
 fn the_daily_ceiling_is_explained_on_the_issue_once() {
-    let home = Home::new("cap");
+    let home = Home::new("cap 空格");
     real_tool(home.path(), "cat");
     stub(
         home.path(),
         "gh",
         &format!(
-            "echo \"$@\" >> {calls}; cat \"$7\" >> {body}",
+            "echo \"$@\" >> '{calls}'; cat \"$7\" >> '{body}'",
             calls = home.path().join("gh-calls").display(),
             body = home.path().join("gh-body").display(),
         ),
