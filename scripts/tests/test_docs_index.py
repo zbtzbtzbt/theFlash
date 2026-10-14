@@ -9,6 +9,10 @@ import unittest
 SCRIPT = Path(__file__).resolve().parents[1] / 'docs_index.py'
 REPO = Path(__file__).resolve().parents[2]
 
+sys.path.insert(0, str(SCRIPT.parent))
+# 索引漂移的修复提示。文档本身写得不对时不该出现它：重新生成一遍不会好，要作者改文件。
+from docs_index import FIX as REGENERATE  # noqa: E402
+
 DECISIONS_README = """# 架构决定记录
 
 前言。
@@ -95,6 +99,10 @@ class Fixture:
 
     def subsystems_index(self):
         return (self.subsystems / 'README.md').read_text(encoding='utf-8')
+
+    def index_bytes(self):
+        return ((self.decisions / 'README.md').read_bytes(),
+                (self.subsystems / 'README.md').read_bytes())
 
 
 class Check(unittest.TestCase):
@@ -210,68 +218,65 @@ class Write(unittest.TestCase):
 
 
 class Malformed(unittest.TestCase):
+    """文档本身写得不对，和索引漂移是两回事：漂移跑一下生成就好，这里要作者改文件。
+
+    每项都用 assert_rejected 断言，因为「退出 1 加文件名」区分不了这两件事：写得不对的
+    文档同时也是一个没进索引的新文件，删掉生成器里的格式拒绝之后，它照样让 `--check`
+    报漂移、照样退出 1，于是守护被删也没有测试变红（#53）。
+    """
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.fixture = Fixture(self.tmp.name)
 
+    def assert_rejected(self, *diagnosis):
+        """两个模式都拒绝，说清是哪里写得不对，两个 README 一个字节都不动。"""
+        before = self.fixture.index_bytes()
+        for mode in ('--check', '--write'):
+            result = run(self.fixture.root, mode)
+            output = result.stdout + result.stderr
+            self.assertEqual(result.returncode, 1, f'{mode} 要拒绝写得不对的文档：{output}')
+            for text in diagnosis:
+                self.assertIn(text, output, f'{mode} 要说出是哪里写得不对：{output}')
+            self.assertNotIn(REGENERATE, output,
+                             f'{mode} 报的是索引漂移，不是文档格式：{output}')
+        self.assertEqual(self.fixture.index_bytes(), before,
+                         '错误输入不能靠先生成糊过去：两张表都要原样不动')
+
+    def test_decision_without_a_title_is_reported(self):
+        (self.fixture.decisions / '0003-no-title.md').write_text(
+            '- 状态：采用\n\n## 背景\n略。\n', encoding='utf-8')
+        self.assert_rejected('0003-no-title.md', '一级标题')
+
     def test_decision_without_status_is_reported(self):
         (self.fixture.decisions / '0003-no-status.md').write_text(
             '# 0003. 没有状态\n\n- 日期：2026-10-14\n', encoding='utf-8')
-        result = run(self.fixture.root, '--check')
-        self.assertEqual(result.returncode, 1)
-        self.assertIn('状态', result.stdout + result.stderr)
-        self.assertIn('0003-no-status.md', result.stdout + result.stderr)
+        self.assert_rejected('0003-no-status.md', '- 状态：采用')
 
     def test_two_records_with_the_same_number_are_reported(self):
         # 并行的两个会话拿了同一个编号：索引表盖不住，后合的那条会被挤掉。
         self.fixture.add_decision('0003', 'one-session', '一个会话写的')
         self.fixture.add_decision('0003', 'another-session', '另一个会话写的')
-        result = run(self.fixture.root, '--check')
-        self.assertEqual(result.returncode, 1)
-        self.assertIn('同一个编号 0003', result.stdout + result.stderr,
-                      '要说出是编号撞了，而不是只说表和目录对不上')
-        self.assertIn('0003-another-session.md', result.stdout + result.stderr)
-        self.assertIn('0003-one-session.md', result.stdout + result.stderr)
-        before = self.fixture.decisions_index()
-        self.assertEqual(run(self.fixture.root, '--write').returncode, 1,
-                         '编号撞了不能靠生成糊过去：表里会出现两行同号')
-        self.assertEqual(self.fixture.decisions_index(), before)
+        self.assert_rejected('同一个编号 0003',
+                             '0003-one-session.md', '0003-another-session.md')
 
     def test_decision_title_must_start_with_its_number(self):
         (self.fixture.decisions / '0003-wrong-number.md').write_text(
             '# 0004. 编号对不上\n\n- 状态：采用\n', encoding='utf-8')
-        result = run(self.fixture.root, '--check')
-        self.assertEqual(result.returncode, 1)
-        self.assertIn('0003-wrong-number.md', result.stdout + result.stderr)
+        self.assert_rejected('0003-wrong-number.md', '要以“0003. ”开头')
 
     def test_subsystem_without_a_summary_is_reported(self):
         (self.fixture.subsystems / 'bare.md').write_text('# 没有摘要\n\n正文。\n', encoding='utf-8')
-        result = run(self.fixture.root, '--check')
-        self.assertEqual(result.returncode, 1)
-        self.assertIn('bare.md', result.stdout + result.stderr)
-        self.assertIn('>', result.stdout + result.stderr,
-                      '要告诉作者摘要怎么写')
-
-    def test_malformed_input_does_not_write(self):
-        (self.fixture.subsystems / 'bare.md').write_text('# 没有摘要\n\n正文。\n', encoding='utf-8')
-        before = self.fixture.subsystems_index()
-        result = run(self.fixture.root, '--write')
-        self.assertEqual(result.returncode, 1)
-        self.assertEqual(self.fixture.subsystems_index(), before,
-                         '输入有问题时不能写出半张表')
+        self.assert_rejected('bare.md', '> 一句话')
 
     def test_missing_markers_are_reported(self):
         (self.fixture.decisions / 'README.md').write_text('# 架构决定记录\n\n没有标记。\n', encoding='utf-8')
-        result = run(self.fixture.root, '--check')
-        self.assertEqual(result.returncode, 1)
-        self.assertIn('docs-index:begin', result.stdout + result.stderr)
+        self.assert_rejected('docs-index:begin')
 
     def test_a_pipe_in_a_title_is_reported(self):
         self.fixture.add_decision('0003', 'pipe', '带 | 竖线的标题')
-        result = run(self.fixture.root, '--check')
-        self.assertEqual(result.returncode, 1)
-        self.assertIn('0003-pipe.md', result.stdout + result.stderr)
+        self.assert_rejected('0003-pipe.md', '里有竖线')
 
 
 class ThisRepo(unittest.TestCase):
