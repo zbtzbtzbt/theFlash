@@ -1,0 +1,17 @@
+[
+  {
+    "sha": "0dbf6fcc0f0b9df91ec77ddf385112b3a50c0a0c",
+    "commit": {
+      "message": "frontend: 在本机浏览器查看演出场次和票档（#3）\n\nWhat changed:\n- 原来只能使用命令行。增加 make serve 启动的 TypeScript 浏览器界面、本机 HTTP 服务及 Rust event-json 展示契约；查询和所有状态/时间文字与 event CLI 共用。\n- 显示加载、全部场次/票档、五类状态及可读错误。服务只绑定127.0.0.1，校验Host/Origin，串行查询，断开连接取消，风控后停止全服务且不重试。\n- 记录架构选择、子系统契约、真实演出与宽窄屏截图；新增 happy-dom 仅用于离线DOM测试。\n\nRun:\n- browser_event_json_preserves_cli_content 改动前 FAIL：“浏览器查询没有返回演出：用法…”。临时HOME下换回旧main复测FAIL，恢复PASS。\n- offers a labelled event query 改动前 FAIL：“用户没有可输入演出链接的查询表单”。破坏挂载后FAIL：“查询界面初始化失败”，恢复PASS。\n- rebase 到293d237（保留 #2 watch 和 #7 护栏）后临时HOME make check：47单元/18 event CLI/5 watch CLI/2离线/16仓库护栏/23前端测试，fmt/clippy/build、Biome/tsc/前端构建全部通过。离线回放真实大麦响应；CLI与界面完整报告相同。\n- make serve：打印本机URL。Chrome 1280/390px查询三场真实演出和无效链接，加载及全部字段正常，手机宽度无横向溢出；保存8张无凭据截图。Safari实机宽/窄窗口查询三场和错误，移动布局可读；原站逐场核对票档，未登录/下单。\n- 详细证据：docs/validation/issue-3.md。实现者：Codex。\n\nNot tried:\n- Linux本地浏览器没跑，等Linux/macOS CI；未在真实账号上制造风控，使用既有fixture验证无重试。无登录、下单、支付。\n- agent-browser匿名Chrome原站跳404，使用Safari原站完成对照；axe渐变背景对比度部分incomplete，未声称全自动覆盖。\n- 独立验收由其他agent完成，实现者不关闭issue。不单独打发布tag。",
+      "author": {
+        "name": "bintaozhou",
+        "date": "2026-10-13T17:37:28Z"
+      },
+      "committer": {
+        "name": "bintaozhou",
+        "date": "2026-10-13T18:03:08Z"
+      }
+    },
+    "html_url": "https://github.com/zbtzbtzbt/theFlash/commit/0dbf6fcc0f0b9df91ec77ddf385112b3a50c0a0c"
+  }
+]

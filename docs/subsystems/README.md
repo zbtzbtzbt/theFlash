@@ -10,6 +10,7 @@
 | 从大麦读演出的场次、票档和售卖状态 | [大麦演出信息查询](damai-event.md) |
 | 按大麦时钟提醒开售、轮询回流 | [盯票：开售提醒和回流提醒](damai-watch.md) |
 | 浏览器中的本机演出查询 | [本地演出查询界面](event-ui.md) |
+| 机械核对 PR、审查记录和 CI，并用内核文件锁串行执行获准的合并。 | [合并闸门](merge-gate.md) |
 | 把盯票提醒推到手机 | [手机提醒（ntfy）](phone-push.md) |
 | 推 tag 发布 macOS 和 Linux 的程序 | [发布](release.md) |
 | Mac 上独立于终端的定时验证及 issue 摘要 | [launchd 验证任务](validation.md) |

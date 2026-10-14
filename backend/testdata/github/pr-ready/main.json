@@ -1,0 +1,15 @@
+{
+  "sha": "293d2372fa018243ca53962a7e6fdfa9154469bd",
+  "commit": {
+    "message": "Merge pull request #18 from zbtzbtzbt/issue7-offline-guards\n\ntests, ci: 测试连不上真实大麦，仓库里出现凭据或个人信息时检查失败（#7）",
+    "author": {
+      "name": "zbtzbtzbt",
+      "date": "2026-10-13T17:56:46Z"
+    },
+    "committer": {
+      "name": "GitHub",
+      "date": "2026-10-13T17:56:46Z"
+    }
+  },
+  "html_url": "https://github.com/zbtzbtzbt/theFlash/commit/293d2372fa018243ca53962a7e6fdfa9154469bd"
+}

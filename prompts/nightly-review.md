@@ -36,6 +36,29 @@ gh pr list --state merged --search "merged:>=<水位线日期>" --json number,ti
 - 打 tag 时 CI run 没跑完、被取消或是红的。
 - PR 自己的新测试失败，或者没有记录在哪个 head 上跑了什么。
 - 两个会话共用 checkout 导致的串文件、空 commit。
+- **绕过合并闸门的合并**。闸门写的 message 里有“合并闸门：审查者 … 在 … 上审查通过”这一段，没有这一段的提交就是绕过来的（#13 那次就是）。闸门一律 squash 合并，squash 提交只有一个 parent，所以**不能用 `--merges` 找**（那样恰好把要查的提交全漏掉）；要逐个提交看 message：
+
+  ```sh
+  # main 上每一个提交：有闸门那一段的是闸门合的，其余都要有解释
+  # （直接推 main、`gh pr merge` 绕过去、或者 revert 和发版提交）
+  for sha in $(git rev-list --first-parent "$from"..origin/main); do
+    git log -1 --format=%B "$sha" | grep -q 合并闸门 \
+      || echo "没有闸门记录：$(git log -1 --format='%h %s' "$sha")"
+  done
+  ```
+
+  再逐个 PR 核对审查记录（评论里的和写成 PR review 的都算）早于合并时间：
+
+  ```sh
+  gh pr list --state merged --search "merged:>=<水位线日期>" \
+    --json number,mergedAt,mergeCommit,comments,reviews \
+    --jq '.[] | {pr: .number, mergedAt, commit: .mergeCommit.oid,
+      records: [(.comments[], .reviews[])
+        | select(.body != null and (.body | contains("审查记录")))
+        | (.submittedAt // .createdAt)]}'
+  ```
+
+  `records` 是空的，或者最早的记录时间晚于 `mergedAt`，就是一次没有独立审查的合并。上面第一条命令报出的每个 sha，在这里要能对上一个 PR；对不上就是直接推的 main。闸门挡不住这两种情况（见 [0007](../docs/decisions/0007-merge-gate.md)），所以这里是唯一会发现它们的地方。
 
 **验证太薄的**：
 

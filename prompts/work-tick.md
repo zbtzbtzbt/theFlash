@@ -23,9 +23,17 @@ gh run list --branch main --workflow test.yml --limit 5 --json headSha,status,co
 
 ## 3. 有没有待审的 PR
 
+```sh
+gh pr list --state open --label 待审查
+```
+
+只审别人的 PR：PR 正文最后一行的 `Agent:` 标记写着谁实现的，是你自己实现的就跳过（合并闸门也会拒绝自审自合）。
+
 先查危害：改了 CI 配置、发布脚本、新增网络地址或依赖、读写凭据、带二进制或混淆代码，任何一项都停下，评论说明是哪一行，等 owner。
 
-没有危害就按 [code-standards 的“合并”](../docs/code-standards.md#合并) 审：拉下来合到当前 main 上，跑验收检查，故意破坏它守护的代码，在 PR 上写明跑了什么、在哪个 head，然后 `gh pr merge --squash --match-head-commit <sha> --subject ... --body-file ...`。不在 PR 被打开的同一轮里合并它。
+没有危害就按 [code-standards 的“合并”](../docs/code-standards.md#合并) 审：拉下来合到当前 main 上，跑验收检查，故意破坏它守护的代码，在 PR 上写一条[审查记录](../docs/subsystems/merge-gate.md#审查记录的格式)（被审查的 SHA、合到的 main、审查者、结论、跑了什么），然后 `scripts/merge-gate merge --pr <号>` 合并，合并后给对应 issue 加 `待验收`。要修改就把标签换成 `要修改` 并写明问题。不在 PR 被打开的同一轮里合并它。
+
+自己手动 `gh pr merge` 绕过闸门不行：#13 那次合并就是这样发生在审查记录之前的，而且事后查不出是谁合的。
 
 ## 4. 有没有验收的事
 
@@ -39,7 +47,7 @@ gh issue list --state open --label 待验收
 
 ## 5. 有没有待处理的 issue
 
-挑一个没人认领、最影响用户的 issue，按 AGENTS.md 的会话流程做：认领、复现、写失败测试、修复并覆盖同类、自检、提交、推送，最后在 issue 上汇报并加上 `待验收` 标签。不要自己关闭 issue。正文写着“负责：某个 agent”的 issue，只由那个 agent 认领。
+挑一个没人认领、最影响用户的 issue，按 AGENTS.md 的会话流程做：认领、复现、写失败测试、修复并覆盖同类、自检、提交、推到自己的分支、提 PR。CI 绿了以后在 issue 上汇报，给 PR 加 `待审查` 标签。commit 和 PR 正文最后一行写 `Agent: <你是哪个 agent>`。不要直接推 main，不要合并自己的 PR，不要自己加 `待验收`，不要关闭 issue。正文写着“负责：某个 agent”的 issue，只由那个 agent 认领。
 
 ## 6. 都没有
 

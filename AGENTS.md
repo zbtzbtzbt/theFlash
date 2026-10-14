@@ -44,8 +44,21 @@ theFlash 是大麦网（damai.cn）的抢票程序，一个 AI Native 项目：�
 5. **修复，并覆盖同类**：grep 同样的模式，同类位置在同一个改动里一起修。
 6. **自检**：跑 [code-standards 的验收标准](docs/code-standards.md#验收标准)，记下每条命令和结果。没跑的写“没跑”。
 7. **提交**：一个 commit 只做一件事，格式见下。提交后 `git show --stat HEAD` 必须只列出你的文件。
-8. **推送并盯 CI**：push 后等 CI。CI 红了，修它就是你当下的任务。
-9. **交给验收**：在 issue 上汇报怎么运行、每条验收标准的证据、没做的部分，然后加上 `待验收` 标签。不要自己关闭 issue。另一个 agent 按 [prompts/acceptance.md](prompts/acceptance.md) 验收：通过就由它关闭；不通过它会把标签换成 `验收未通过` 并写明问题，由你或下一个接手的 agent 修好后重新加上 `待验收`。
+8. **开 PR 并盯 CI**：推到自己的分支，`gh pr create` 提 PR，等 CI。不直接推 main（只有发版 tag 例外，见 [0007](docs/decisions/0007-merge-gate.md)）。CI 红了，修它就是你当下的任务。
+9. **交给审查，再交给验收**：CI 绿了以后在 issue 上汇报怎么运行、每条验收标准的证据、没做的部分，附 PR 链接，然后给 PR 加 `待审查` 标签。不要合并自己的 PR，不要给自己的 issue 加 `待验收`，不要关闭 issue。另一个 agent 审查并合并（见下面的[审查和合并](#审查和合并)），合并后由审查者加 `待验收`；再由第三个 agent 按 [prompts/acceptance.md](prompts/acceptance.md) 验收：通过就由它关闭；不通过它会把标签换成 `验收未通过` 并写明问题，由你或下一个接手的 agent 修好后重新加上 `待验收`。
+
+## 审查和合并
+
+所有改动走 PR，合并由 [合并闸门](docs/subsystems/merge-gate.md) 完成，它按 CI 和独立审查记录机械核对，不调用模型。理由和取舍见 [0007](docs/decisions/0007-merge-gate.md)。
+
+审查一个别人的 PR（审查者必须是实现者之外的 agent，看 PR 正文的 `Agent:` 标记）：
+
+1. 按 [code-standards 的“合并”](docs/code-standards.md#合并) 审：把 PR 拉下来合到当前 main 上，在结果上跑验收检查，故意弄坏它守护的代码，确认新测试会红。只读 diff 不算审查。
+2. 在 PR 上写一条审查记录评论，格式和字段见 [合并闸门](docs/subsystems/merge-gate.md#审查记录的格式)：被审查的 SHA、合到的 main、审查者、结论、跑了什么。记录写在合并之前，合并后补的记录不算。
+3. 合并：`scripts/merge-gate merge --pr <号>`（或 `scripts/merge-gate queue` 把所有能合的依次合入）。它会重新核对一遍，然后用 `--match-head-commit` 合并被审查的那个提交。被它拒绝时，拒绝信息里写了是哪一条不满足。
+4. 合并后给对应 issue 加 `待验收`。
+
+`scripts/merge-gate check --pr <号>` 只核对、不合并，实现者自己也可以跑，看看还差什么。
 
 ## 用 computer use 验证
 
@@ -71,6 +84,8 @@ theFlash 是大麦网（damai.cn）的抢票程序，一个 AI Native 项目：�
 <模块>: <用户现在看到的行为>（#<issue> 或 <报告人>: <原话>）
 ```
 
+commit 正文和 PR 正文的最后一行写 `Agent: <你是哪个 agent>`，例如 `Agent: Claude`。所有 agent 共用一个 GitHub 账号，这个标记是唯一能看出改动是谁写的、审查者是不是实现者的东西；没有它，合并闸门会拒绝合并。
+
 改动超过约 50 行时必须写正文：
 
 ```
@@ -90,6 +105,7 @@ squash 合并时自己写 message，不用 GitHub 默认的（默认会把分支
 ## 发版
 
 - 只有当包含该 commit 的 CI run 已经跑完并且是绿的，才能打 tag。被取消的 run 不算通过。
+- tag 是唯一直接推到 origin 的东西（`git push origin <tag>`）。代码改动一律走 PR。
 - 打 tag 前先 `git fetch --tags`，找下一个可用的版本号，因为可能有多个会话在发版。
 - 攒一批修复再发，不要每个 commit 发一次。
 - 只加测试的改动不单独发版。
@@ -97,6 +113,7 @@ squash 合并时自己写 message，不用 GitHub 默认的（默认会把分支
 ## 不要做
 
 - 不要违反上面的大麦网安全规则。
+- 不要直接推 main（发版 tag 除外），不要合并自己的 PR，不要绕过合并闸门自己 `gh pr merge`。PR #12 就是在独立审查记录写出来之前被合并的，事后查不出是谁合的（#13）。
 - main 红着的时候不要往上叠新改动。先修红，或者开一个写明原因的 issue。
 - 不要把“main 上也一样红”当成基线。
 - 不要推翻 [code-standards 里的 owner 决定](docs/code-standards.md#owner-的决定)。要改这些，留给 owner。
