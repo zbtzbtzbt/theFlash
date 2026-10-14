@@ -269,7 +269,11 @@ fn tripwire() -> &'static str {
 /// harness hides what `eprintln!` prints from a passing or a killed test.
 fn tripped(stream: TcpStream) {
     let mut request = String::new();
-    let _ = BufReader::new(stream).read_line(&mut request);
+    // Read through a reference: the connection must stay open until the
+    // process exits. Closed earlier, theflash fails on the dropped tunnel and
+    // returns, and the test that started it can report a pass or its own
+    // panic before the exit below ends the run.
+    let _ = BufReader::new(&stream).read_line(&mut request);
     let message = format!(
         "\n测试试图访问真实大麦：theflash 发出了 `{}`，目标不是本机。\n\
          测试必须把 THEFLASH_DAMAI_BASE_URL 指向本地假服务器（MockDamai）。\
