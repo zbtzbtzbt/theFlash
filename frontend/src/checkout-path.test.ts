@@ -9,6 +9,7 @@ import { cpSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync } from
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { stripVTControlCharacters } from "node:util";
 import { expect, it } from "vitest";
 import { tempHome } from "./test-support.js";
 
@@ -78,16 +79,72 @@ async function inCopy<T>(built: boolean, run: (frontend: string) => Promise<T>):
   }
 }
 
+function expectCopyPassed(run: { code: number; output: string }): void {
+  const failed = Array.from(
+    stripVTControlCharacters(run.output).matchAll(/^\s*FAIL\s+(.+)$/gm),
+    (match) => match[1]?.trim() ?? "",
+  ).filter(Boolean);
+  const list =
+    failed.length > 0
+      ? `前端测试在路径含中文和空格的 checkout 副本里失败，没过的测试：\n${failed.map((item) => `  - ${item}\n`).join("")}`
+      : "前端测试在路径含中文和空格的 checkout 副本里失败。\n";
+  expect(
+    run.code,
+    `${list}这些测试在原 checkout 里也失败的话，先修它们，原因不在路径；` +
+      "只在副本里失败，多半是用了 `URL.pathname`（#49）。从 import.meta.url 得到文件路径要用 " +
+      "fileURLToPath，不能用 URL.pathname：它保留百分号编码，中文和空格变成 %E9%AA%8C、%20，" +
+      `这个路径不存在。那次运行的输出：\n${run.output}`,
+  ).toBe(0);
+}
+
+it.skipIf(probing)(
+  "lists failed tests before the checkout-path hint so ordinary regressions are not misattributed to URL.pathname",
+  () => {
+    const output = [
+      " RUN  v5.0.4 /tmp/theFlash 验收/frontend",
+      "",
+      " ❯ src/app.test.ts (18 tests | 1 failed) 210ms",
+      "   × the five status styles have distinct foreground and background colors 18ms",
+      "",
+      "⎯⎯⎯⎯⎯⎯⎯ Failed Suites 1 ⎯⎯⎯⎯⎯⎯⎯",
+      "",
+      " FAIL  src/query.test.ts [ src/query.test.ts ]",
+      "Error: spawn /tmp/theFlash%20%E9%AA%8C%E6%94%B6/backend/target/debug/theflash ENOENT",
+      "",
+      "⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯",
+      "",
+      " \u001b[41m\u001b[1m FAIL \u001b[22m\u001b[49m src/app.test.ts > the five status styles have distinct foreground and background colors",
+      "AssertionError: “未开售”没有自己的文字颜色: expected 'rgb(236, 239, 233)' not to be 'rgb(236, 239, 233)'",
+      "",
+      " Test Files  2 failed | 4 passed (6)",
+      "      Tests  1 failed | 35 passed | 3 skipped (39)",
+    ].join("\n");
+    let message = "";
+    try {
+      expectCopyPassed({ code: 1, output });
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+    const [summary = "", raw = ""] = message.split("那次运行的输出：\n");
+    const suite = "src/query.test.ts [ src/query.test.ts ]";
+    const test =
+      "src/app.test.ts > the five status styles have distinct foreground and background colors";
+    const guidance =
+      "这些测试在原 checkout 里也失败的话，先修它们，原因不在路径；只在副本里失败，多半是用了 `URL.pathname`（#49）";
+    expect(summary).toContain(suite);
+    expect(summary).toContain(test);
+    expect(summary).toContain(guidance);
+    expect(summary.indexOf(suite)).toBeLessThan(summary.indexOf(guidance));
+    expect(summary.indexOf(test)).toBeLessThan(summary.indexOf(guidance));
+    expect(raw).toContain(output);
+  },
+);
+
 it.skipIf(probing)(
   "the frontend tests pass in a checkout whose path has Chinese characters and a space",
   async () => {
     const run = await inCopy(true, (frontend) => vitest(frontend));
-    expect(
-      run.code,
-      "前端测试在路径含中文和空格的 checkout 里失败。从 import.meta.url 得到文件路径要用 " +
-        "fileURLToPath，不能用 URL.pathname：它保留百分号编码，中文和空格变成 %E9%AA%8C、%20，" +
-        `这个路径不存在（#49）。那次运行的输出：\n${run.output}`,
-    ).toBe(0);
+    expectCopyPassed(run);
   },
   120_000,
 );
