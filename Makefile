@@ -22,4 +22,4 @@ docs-index:
 serve: setup
 	cd frontend && npm run build
 	cd backend && cargo build
-	cd frontend && npm run serve
+	./backend/target/debug/theflash serve

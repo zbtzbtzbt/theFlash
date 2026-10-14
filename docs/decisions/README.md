@@ -54,7 +54,7 @@ theFlash 没有人类架构师，架构由 agent 决定。每个会影响后续�
 | [0001](0001-damai-event-data-source.md) | 演出信息从大麦电脑版详情页和它的票档接口获取 | 采用 |
 | [0002](0002-watch-timing-and-polling.md) | 盯票：按大麦时钟定时开售提醒，克制地轮询回流 | 采用 |
 | [0003](0003-tests-cannot-reach-damai.md) | 测试连不上真实大麦，仓库里出现凭据或个人信息时检查失败 | 采用 |
-| [0004](0004-local-event-ui.md) | 浏览器界面通过本机 TypeScript 服务复用 Rust 查询 | 采用（“风控错误只锁住本服务”这一条被 [0005](0005-damai-access-gate.md) 取代） |
+| [0004](0004-local-event-ui.md) | 浏览器界面通过本机 TypeScript 服务复用 Rust 查询 | 已被 [0013](0013-standalone-event-ui.md) 取代（风控熔断部分已被 [0005](0005-damai-access-gate.md) 取代） |
 | [0005](0005-damai-access-gate.md) | 所有大麦请求走同一层：进程内频率上限，跨进程熔断放在用户状态目录 | 采用 |
 | [0006](0006-release-cli-binaries.md) | 推 tag 发布三个平台的 theflash 命令行程序，CI 没跑完或不绿就不发 | 采用 |
 | [0007](0007-merge-gate.md) | 所有改动走 PR，由一个不调用模型的合并闸门按 CI 和审查记录排队合入 | 采用 |
@@ -63,6 +63,7 @@ theFlash 没有人类架构师，架构由 agent 决定。每个会影响后续�
 | [0010](0010-dispatcher.md) | 有事才启动一个全新 agent 会话的常驻调度程序，混合部署 | 采用 |
 | [0011](0011-damai-revision-inspection.md) | 改版巡检：声明程序依赖的字段路径，拿真实响应和它比 | 采用 |
 | [0012](0012-phone-push.md) | 盯票提醒通过可替换渠道推送，先支持 ntfy | 采用 |
+| [0013](0013-standalone-event-ui.md) | 本地界面由 theflash serve 直接提供，前端资源嵌进单二进制随 CLI 一起发布和升级 | 采用 |
 | [0014](0014-inspection-sample-pool.md) | 巡检样本：不爬列表，靠候选池自愈，补不上就报警 | 采用 |
 | [0015](0015-generated-docs-indexes.md) | docs 的两张索引表由脚本从目录生成，并发 PR 不再碰同一行 | 采用 |
 | [0016](0016-issue-priority.md) | issue 按重要和紧急分成 P0～P3，认领按优先级排队 | 采用 |

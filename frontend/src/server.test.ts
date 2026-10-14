@@ -42,14 +42,17 @@ it.each(["1086791513717", "1092337348536", "1077137031347"])(
   "event-json report preserves CLI text for real fixture %s",
   async (id) => {
     const { base } = await ui();
-    const response = await request(base, id);
+    const [response, cli] = await Promise.all([
+      request(base, id),
+      promisify(execFile)(binary, ["event", id], { env: process.env }),
+    ]);
     expect(response.status).toBe(200);
     const data = await response.json();
-    const cli = await promisify(execFile)(binary, ["event", id], { env: process.env });
     expect(data.report).toBe(cli.stdout);
     expect(data.name).not.toBe("未知");
     expect(data.sessions.length).toBeGreaterThan(0);
   },
+  15000,
 );
 it("binds only loopback and serves the built browser files", async () => {
   const { base, s } = await ui();

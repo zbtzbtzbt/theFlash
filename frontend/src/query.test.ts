@@ -1,8 +1,10 @@
 import { type ChildProcess, execFile } from "node:child_process";
 import { once } from "node:events";
+import { symlinkSync } from "node:fs";
 import type { Server } from "node:http";
+import { join } from "node:path";
 import { expect, it, vi } from "vitest";
-import { loadEvent } from "./query.js";
+import { binary, loadEvent, resolveBinary } from "./query.js";
 import { startServer } from "./server.js";
 import { address, close, offline, replay, tempHome } from "./test-support.js";
 
@@ -10,6 +12,42 @@ import { address, close, offline, replay, tempHome } from "./test-support.js";
 vi.mock("node:child_process", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:child_process")>();
   return { ...actual, execFile: vi.fn(actual.execFile) };
+});
+
+it("prefers THEFLASH_BIN over the default checkout binary", async () => {
+  expect(resolveBinary({ THEFLASH_BIN: "/opt/bin/theflash" }, () => true)).toBe(
+    "/opt/bin/theflash",
+  );
+  expect(resolveBinary({}, (p) => p.endsWith("/target/release/theflash"))).toMatch(
+    /backend\/target\/release\/theflash$/,
+  );
+  expect(resolveBinary({}, () => false)).toMatch(/backend\/target\/debug\/theflash$/);
+
+  const savedEnv = { ...process.env };
+  const home = tempHome();
+  const servers: Server[] = [];
+  vi.mocked(execFile).mockClear();
+  try {
+    const guard = await offline();
+    servers.push(guard.server);
+    const upstream = await replay();
+    servers.push(upstream.server);
+    process.env.THEFLASH_DAMAI_BASE_URL = upstream.base;
+    const customBin = join(home.home, "custom-theflash");
+    symlinkSync(binary, customBin);
+    process.env.THEFLASH_BIN = customBin;
+    const event = await loadEvent("1077137031347", new AbortController().signal);
+    expect(event.itemId).toBe("1077137031347");
+    expect(vi.mocked(execFile).mock.calls[0]?.[0]).toBe(customBin);
+    expect(guard.hits, "测试试图访问真实大麦").toHaveLength(0);
+  } finally {
+    for (const server of servers.reverse()) await close(server);
+    for (const key of Object.keys(process.env)) {
+      if (!(key in savedEnv)) delete process.env[key];
+    }
+    Object.assign(process.env, savedEnv);
+    home.remove();
+  }
 });
 
 it.each(["loadEvent abort", "browser disconnect"])(
