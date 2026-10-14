@@ -1330,3 +1330,180 @@ fn an_expired_claim_is_offered_for_implement_like_claims_queue() {
     );
     assert!(plan.start[0].why.contains("过期"), "{}", plan.start[0].why);
 }
+
+#[test]
+fn snapshot_replay_matches_claim_lease_on_push_unreadable_and_url_binding() {
+    let dir = std::env::temp_dir().join(format!(
+        "theflash-dispatch-lease-unit-{}",
+        std::process::id()
+    ));
+    let run_case = |name: &str,
+                    comments_json: &str,
+                    branch_json: Option<&str>,
+                    now_str: &str|
+     -> (Vec<u64>, Snapshot) {
+        let case_dir = dir.join(name);
+        let _ = std::fs::remove_dir_all(&case_dir);
+        std::fs::create_dir_all(&case_dir).unwrap();
+        std::fs::write(
+            case_dir.join("issues.json"),
+            r#"[
+                {"number": 14, "title": "dispatch", "labels": [{"name": "P1"}, {"name": "认领中"}], "body": ""},
+                {"number": 58, "title": "other", "labels": [{"name": "P1"}], "body": ""}
+            ]"#,
+        )
+        .unwrap();
+        std::fs::write(case_dir.join("pulls.json"), "[]").unwrap();
+        std::fs::write(case_dir.join("comments-14.json"), comments_json).unwrap();
+        std::fs::write(case_dir.join("comments-58.json"), "[]").unwrap();
+        if let Some(b) = branch_json {
+            std::fs::write(case_dir.join("branch-night-issue-14.json"), b).unwrap();
+        }
+        let snap = Snapshot::replay(&case_dir).unwrap();
+        let mut cfg = config();
+        cfg.max_sessions = 1;
+        let p = decide(&snap, &State::default(), &cfg, at(now_str));
+        let started: Vec<u64> = p
+            .start
+            .iter()
+            .filter(|t| t.role == Role::Implement)
+            .filter_map(|t| t.issue)
+            .collect();
+        (started, snap)
+    };
+
+    let base_claim = serde_json::json!([{
+        "id": 6153808195_u64,
+        "created_at": "2026-10-13T19:46:51Z",
+        "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/14#issuecomment-6153808195",
+        "body": "## 认领\n- agent: Claude\n- 改动模块: backend/src/dispatch\n- 分支: night/issue-14\nAgent: Claude",
+    }])
+    .to_string();
+
+    // 1. Live push renews the lease: comment is >7h old at 11:12+08:00,
+    //    but force_push at 03:04:49Z (11:04:49+08:00) keeps #14 alive.
+    let (started, _) = run_case(
+        "live-push",
+        &base_claim,
+        Some(r#"[{"activity_type": "force_push", "timestamp": "2026-10-14T03:04:49Z"}]"#),
+        "2026-10-14T11:12:00+08:00",
+    );
+    assert_eq!(
+        started,
+        vec![58],
+        "刚 push 的活租约不能当过期重派 #14：{started:?}"
+    );
+
+    // 2. Unreadable push activity (e.g. API error): lease cannot be proven silent.
+    let (started, _) = run_case(
+        "unreadable-push",
+        &base_claim,
+        Some(r#"{"message": "Must have push access"}"#),
+        "2026-10-14T15:00:00+08:00",
+    );
+    assert_eq!(
+        started,
+        vec![58],
+        "推送时间读不到时不能当过期重派 #14：{started:?}"
+    );
+
+    // 3. Empty comments on a `认领中` issue is Unreadable, not HandedBack.
+    let (started, _) = run_case("empty-comments", "[]", None, "2026-10-14T15:00:00+08:00");
+    assert_eq!(
+        started,
+        vec![58],
+        "认领中但 comments=[] 是不可读，不能当已结束派 #14：{started:?}"
+    );
+
+    // 4. Claim missing `改动模块` is Unreadable, not expired/free.
+    let malformed = serde_json::json!([{
+        "id": 999_u64,
+        "created_at": "2026-10-14T03:00:00Z",
+        "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/14#issuecomment-999",
+        "body": "## 认领\n- agent: Claude\nAgent: Claude",
+    }])
+    .to_string();
+    let (started, _) = run_case(
+        "malformed-claim",
+        &malformed,
+        None,
+        "2026-10-14T15:00:00+08:00",
+    );
+    assert_eq!(
+        started,
+        vec![58],
+        "缺改动模块的认领是不可读，不能派 #14：{started:?}"
+    );
+
+    // 5. Heartbeat from another vendor / another claim URL does not renew the current lease.
+    let wrong_beat = serde_json::json!([
+        {
+            "id": 6153808195_u64,
+            "created_at": "2026-10-13T19:46:51Z",
+            "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/14#issuecomment-6153808195",
+            "body": "## 认领\n- agent: Claude\n- 改动模块: backend/src/dispatch\n- 分支: night/issue-14\nAgent: Claude",
+        },
+        {
+            "id": 999_u64,
+            "created_at": "2026-10-14T06:59:00Z",
+            "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/14#issuecomment-999",
+            "body": "## 心跳\n- agent: Codex\n- 认领: https://github.com/zbtzbtzbt/theFlash/issues/14#issuecomment-9999\n- 进度: 另一条租约的迟到心跳\nAgent: Codex",
+        }
+    ])
+    .to_string();
+    let (started, _) = run_case(
+        "wrong-heartbeat",
+        &wrong_beat,
+        None,
+        "2026-10-14T15:00:00+08:00",
+    );
+    assert_eq!(
+        started,
+        vec![14],
+        "其他会话/URL 的迟到心跳不能续上当前租约：{started:?}"
+    );
+
+    // 6. Reclaim pointing at another claim URL does not end the current lease.
+    let stale_reclaim = serde_json::json!([
+        {
+            "id": 6153808195_u64,
+            "created_at": "2026-10-13T19:46:51Z",
+            "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/14#issuecomment-6153808195",
+            "body": "## 认领\n- agent: Claude\n- 改动模块: backend/src/dispatch\n- 分支: night/issue-14\nAgent: Claude",
+        },
+        {
+            "id": 998_u64,
+            "created_at": "2026-10-14T03:10:00Z",
+            "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/14#issuecomment-998",
+            "body": "## 收回认领\n- 原认领: Claude（https://github.com/zbtzbtzbt/theFlash/issues/14#issuecomment-9999）\n- 收回者: Codex\nAgent: Codex",
+        }
+    ])
+    .to_string();
+    let (started, _) = run_case(
+        "stale-reclaim",
+        &stale_reclaim,
+        Some(r#"[{"activity_type": "force_push", "timestamp": "2026-10-14T03:04:49Z"}]"#),
+        "2026-10-14T11:12:00+08:00",
+    );
+    assert_eq!(
+        started,
+        vec![58],
+        "指向旧 URL 的收回认领不能结束当前活租约：{started:?}"
+    );
+
+    // 7. Valid reclaim pointing at current claim URL ends the lease (HandedBack).
+    let valid_reclaim = stale_reclaim.replace("issuecomment-9999", "issuecomment-6153808195");
+    let (started, _) = run_case(
+        "valid-reclaim",
+        &valid_reclaim,
+        Some(r#"[{"activity_type": "force_push", "timestamp": "2026-10-14T03:04:49Z"}]"#),
+        "2026-10-14T11:12:00+08:00",
+    );
+    assert_eq!(
+        started,
+        vec![14],
+        "指向当前认领 URL 的收回认领使 #14 重新可派：{started:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -935,7 +935,7 @@ fn implement_follows_claims_queue_and_skips_waiting_blocked_and_untriaged() {
         if path
             .file_name()
             .and_then(|n| n.to_str())
-            .is_some_and(|n| n.starts_with("comments-"))
+            .is_some_and(|n| n.starts_with("comments-") || n.starts_with("branch-"))
         {
             std::fs::copy(&path, replay.join(path.file_name().unwrap())).unwrap();
         }
@@ -946,6 +946,37 @@ fn implement_follows_claims_queue_and_skips_waiting_blocked_and_untriaged() {
         replay.join("main-test-runs.json"),
     )
     .unwrap();
+
+    let mut queue_cmd = support::claims(home.path());
+    queue_cmd.args([
+        "queue",
+        "--json",
+        "--replay",
+        &priority_dir.display().to_string(),
+        "--now",
+        "2026-10-14T11:12:00+08:00",
+    ]);
+    let queue_out = output_within(queue_cmd, 60);
+    assert!(
+        queue_out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&queue_out.stderr)
+    );
+    let queue_json: serde_json::Value =
+        serde_json::from_slice(&queue_out.stdout).expect("claims queue --json");
+    let queue_ready_fresh: Vec<u64> = queue_json["ready"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| matches!(r["priority"].as_str(), Some("P0" | "P1" | "P2" | "P3")))
+        .filter(|r| {
+            !r["notes"].as_array().is_some_and(|ns| {
+                ns.iter()
+                    .any(|n| n.as_str().is_some_and(|s| s.contains("验收没通过")))
+            })
+        })
+        .map(|r| r["issue"].as_u64().unwrap())
+        .collect();
 
     let config = home.config(serde_json::json!({
         "max_sessions": 50,
@@ -974,6 +1005,14 @@ fn implement_follows_claims_queue_and_skips_waiting_blocked_and_untriaged() {
         .filter(|t| t["role"] == "implement")
         .map(|t| t["issue"].as_u64().unwrap())
         .collect();
+    assert_eq!(
+        implements, queue_ready_fresh,
+        "dispatch 的 implement 序列应与 claims queue 的已定级新活序列完全一致"
+    );
+    assert!(
+        !implements.contains(&14),
+        "#14 在 11:04:49 刚 force-push 续租，11:12 时不该派 implement：{implements:?}"
+    );
     assert_eq!(
         implements.first().copied(),
         Some(2),
@@ -1027,6 +1066,277 @@ fn implement_follows_claims_queue_and_skips_waiting_blocked_and_untriaged() {
             skip_why(untriaged).contains("还没定优先级"),
             "#{untriaged} 应说明没定优先级：{}",
             skip_why(untriaged)
+        );
+    }
+}
+
+#[test]
+fn implement_matches_claims_queue_across_push_unreadable_and_url_bound_lease_cases() {
+    let priority_dir =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("testdata/github/claims/priority");
+    let opened: Vec<serde_json::Value> = serde_json::from_str(
+        &std::fs::read_to_string(priority_dir.join("open-issues.json")).unwrap(),
+    )
+    .unwrap();
+    let claimed: Vec<serde_json::Value> =
+        serde_json::from_str(&std::fs::read_to_string(priority_dir.join("issues.json")).unwrap())
+            .unwrap();
+
+    struct Case {
+        name: &'static str,
+        numbers: &'static [u64],
+        vendors: &'static [&'static str],
+        now: &'static str,
+        alter: Option<&'static str>,
+    }
+
+    let cases = [
+        Case {
+            name: "missing-assignee",
+            numbers: &[53, 58],
+            vendors: &["codex"],
+            now: "2026-10-14T11:12:00+08:00",
+            alter: None,
+        },
+        Case {
+            name: "expired",
+            numbers: &[14, 58],
+            vendors: &["claude", "codex"],
+            now: "2026-10-14T15:00:00+08:00",
+            alter: None,
+        },
+        Case {
+            name: "live-push",
+            numbers: &[14, 58],
+            vendors: &["claude", "codex"],
+            now: "2026-10-14T11:12:00+08:00",
+            alter: None,
+        },
+        Case {
+            name: "no-push-evidence",
+            numbers: &[14, 58],
+            vendors: &["claude", "codex"],
+            now: "2026-10-14T15:00:00+08:00",
+            alter: Some("no-push"),
+        },
+        Case {
+            name: "empty-comments",
+            numbers: &[14, 58],
+            vendors: &["claude", "codex"],
+            now: "2026-10-14T15:00:00+08:00",
+            alter: Some("empty"),
+        },
+        Case {
+            name: "valid-heartbeat",
+            numbers: &[14, 58],
+            vendors: &["claude", "codex"],
+            now: "2026-10-14T15:00:00+08:00",
+            alter: Some("validbeat"),
+        },
+        Case {
+            name: "valid-reclaim",
+            numbers: &[14, 58],
+            vendors: &["claude", "codex"],
+            now: "2026-10-14T11:12:00+08:00",
+            alter: Some("validreclaim"),
+        },
+        Case {
+            name: "malformed-claim",
+            numbers: &[14, 58],
+            vendors: &["claude", "codex"],
+            now: "2026-10-14T15:00:00+08:00",
+            alter: Some("malformed"),
+        },
+        Case {
+            name: "wrong-heartbeat",
+            numbers: &[14, 58],
+            vendors: &["claude", "codex"],
+            now: "2026-10-14T15:00:00+08:00",
+            alter: Some("heartbeat"),
+        },
+        Case {
+            name: "stale-reclaim",
+            numbers: &[14, 58],
+            vendors: &["claude", "codex"],
+            now: "2026-10-14T11:12:00+08:00",
+            alter: Some("reclaim"),
+        },
+    ];
+
+    for case in &cases {
+        let Case {
+            name,
+            numbers,
+            vendors,
+            now,
+            alter,
+        } = *case;
+        let home = Home::new(&format!("queue-parity-{name}"));
+        let replay = home.path().join("replay");
+        std::fs::create_dir_all(&replay).unwrap();
+        for entry in std::fs::read_dir(&priority_dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_file() {
+                std::fs::copy(&path, replay.join(path.file_name().unwrap())).unwrap();
+            }
+        }
+        let selected: Vec<serde_json::Value> = opened
+            .iter()
+            .filter(|i| numbers.contains(&i["number"].as_u64().unwrap()))
+            .cloned()
+            .collect();
+        let selected_claimed: Vec<serde_json::Value> = claimed
+            .iter()
+            .filter(|i| numbers.contains(&i["number"].as_u64().unwrap()))
+            .cloned()
+            .collect();
+        std::fs::write(
+            replay.join("open-issues.json"),
+            serde_json::to_string(&selected).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            replay.join("issues.json"),
+            serde_json::to_string(&selected_claimed).unwrap(),
+        )
+        .unwrap();
+
+        let mut comments: Vec<serde_json::Value> = serde_json::from_str(
+            &std::fs::read_to_string(replay.join("comments-14.json")).unwrap(),
+        )
+        .unwrap();
+        match alter {
+            Some("no-push") => {
+                let _ = std::fs::remove_file(replay.join("branch-night-issue-14.json"));
+            }
+            Some("empty") => {
+                std::fs::write(replay.join("comments-14.json"), "[]").unwrap();
+            }
+            Some("heartbeat" | "validbeat") => {
+                let mut body = "## 心跳\n- agent: Codex\n- 认领: https://github.com/zbtzbtzbt/theFlash/issues/14#issuecomment-9999\n- 进度: 另一条租约的迟到心跳\nAgent: Codex".to_string();
+                if alter == Some("validbeat") {
+                    body = body
+                        .replace("issuecomment-9999", "issuecomment-6153808195")
+                        .replace("- agent: Codex", "- agent: Claude")
+                        .replace("Agent: Codex", "Agent: Claude");
+                }
+                comments.push(serde_json::json!({
+                    "id": 999,
+                    "created_at": "2026-10-14T06:59:00Z",
+                    "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/14#issuecomment-999",
+                    "body": body,
+                }));
+                std::fs::write(
+                    replay.join("comments-14.json"),
+                    serde_json::to_string(&comments).unwrap(),
+                )
+                .unwrap();
+            }
+            Some("reclaim" | "validreclaim") => {
+                let mut body = "## 收回认领\n- 原认领: Claude（https://github.com/zbtzbtzbt/theFlash/issues/14#issuecomment-9999）\n- 收回者: Codex\nAgent: Codex".to_string();
+                if alter == Some("validreclaim") {
+                    body = body.replace("issuecomment-9999", "issuecomment-6153808195");
+                }
+                comments.push(serde_json::json!({
+                    "id": 998,
+                    "created_at": "2026-10-14T03:10:00Z",
+                    "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/14#issuecomment-998",
+                    "body": body,
+                }));
+                std::fs::write(
+                    replay.join("comments-14.json"),
+                    serde_json::to_string(&comments).unwrap(),
+                )
+                .unwrap();
+            }
+            Some("malformed") => {
+                std::fs::write(
+                    replay.join("comments-14.json"),
+                    serde_json::to_string(&serde_json::json!([{
+                        "id": 999,
+                        "created_at": "2026-10-14T03:00:00Z",
+                        "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/14#issuecomment-999",
+                        "body": "## 认领\n- agent: Claude\nAgent: Claude",
+                    }]))
+                    .unwrap(),
+                )
+                .unwrap();
+            }
+            _ => {}
+        }
+
+        let mut q_cmd = support::claims(home.path());
+        q_cmd.args([
+            "queue",
+            "--json",
+            "--agent",
+            vendors[0],
+            "--replay",
+            &replay.display().to_string(),
+            "--now",
+            now,
+        ]);
+        let q_out = output_within(q_cmd, 60);
+        assert!(
+            q_out.status.success(),
+            "{name}: {}",
+            String::from_utf8_lossy(&q_out.stderr)
+        );
+        let q: serde_json::Value = serde_json::from_slice(&q_out.stdout).unwrap();
+        let expected: Vec<u64> = q["next"].as_u64().into_iter().collect();
+
+        std::fs::write(
+            replay.join("issues.json"),
+            serde_json::to_string(&selected).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(replay.join("pulls.json"), "[]").unwrap();
+        std::fs::copy(
+            PathBuf::from(fixtures("night")).join("main-test-runs.json"),
+            replay.join("main-test-runs.json"),
+        )
+        .unwrap();
+
+        let mut agents = serde_json::Map::new();
+        for v in vendors {
+            agents.insert(
+                (*v).to_string(),
+                serde_json::json!({ "command": ["true"], "prompt": "argv" }),
+            );
+        }
+        let cfg = home.config(serde_json::json!({
+            "max_sessions": 1,
+            "max_sessions_per_day": 10,
+            "cloud_roles": [],
+            "require_label": "",
+            "ignore_issues": [],
+            "agents": agents,
+            "vendor_order": vendors,
+        }));
+        let (_, p_text) = run(
+            &home,
+            &[
+                "plan",
+                "--json",
+                "--config",
+                &cfg.display().to_string(),
+                "--replay",
+                &replay.display().to_string(),
+                "--now",
+                now,
+            ],
+        );
+        let p: serde_json::Value = serde_json::from_str(p_text.trim()).expect(&p_text);
+        let actual: Vec<u64> = p["start"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|t| t["role"] == "implement")
+            .map(|t| t["issue"].as_u64().unwrap())
+            .collect();
+        assert_eq!(
+            actual, expected,
+            "用例 {name}：dispatch implement ({actual:?}) != claims queue next ({expected:?})"
         );
     }
 }
