@@ -538,6 +538,66 @@ fn a_second_failing_run_on_main_is_a_second_thing_to_fix() {
 }
 
 #[test]
+fn the_lease_says_who_is_working_not_who_implemented_it() {
+    let comments = |bodies: &[&str]| -> Vec<(DateTime<Utc>, String)> {
+        bodies
+            .iter()
+            .enumerate()
+            .map(|(i, body)| {
+                (
+                    at(&format!("2026-10-14T0{}:00:00+08:00", i + 1)),
+                    body.to_string(),
+                )
+            })
+            .collect()
+    };
+    let claim = |agent: &str| format!("## 认领\n- agent: {agent}\nAgent: {agent}");
+    let heartbeat = |agent: &str| format!("## 心跳\n- agent: {agent}\nAgent: {agent}");
+    let reclaim = "## 收回认领\n- 最后更新: 2026-10-14T02:00:00+08:00\nAgent: dispatcher";
+
+    // 验收者在验收时也会按租约格式认领这个 issue；它不是实现者。
+    assert_eq!(
+        snapshot::implementer(&comments(&[
+            &claim("CodeBuddy"),
+            "实现已推到 night/issue-22，PR #29。\nAgent: CodeBuddy",
+            &claim("Codex"),
+            "## 验收未通过\n撤销脚本在 CRLF 上留下空行。\nAgent: Codex",
+        ])),
+        Some("codebuddy".to_string()),
+        "验收认领改写不了谁实现的"
+    );
+
+    // 认领被收回以后接手的 agent，从那以后就是实现者。
+    assert_eq!(
+        snapshot::implementer(&comments(&[
+            &claim("Claude"),
+            &heartbeat("Claude"),
+            reclaim,
+            &claim("Codex"),
+            "接着做：已经把 #16 推到 night/issue-16。\nAgent: Codex",
+        ])),
+        Some("codex".to_string()),
+        "收回以后接手的人是实现者"
+    );
+
+    // 收回之后没人接手：这个 issue 现在没人在做，但改动还是原来那个 agent 写的。
+    assert_eq!(
+        snapshot::implementer(&comments(&[&claim("Claude"), reclaim])),
+        Some("claude".to_string()),
+        "没人接手时，改动仍然是原来那个 agent 的"
+    );
+
+    // 一条认领评论都没有，最早签名的那个是实现者。
+    assert_eq!(
+        snapshot::implementer(&comments(&[
+            "实现者：CodeBuddy，PR #29。\nAgent: CodeBuddy",
+            "PR #29 已合并，等验收。\nAgent: Claude",
+        ])),
+        Some("codebuddy".to_string()),
+    );
+}
+
+#[test]
 fn the_concurrency_ceiling_queues_the_rest() {
     let snapshot = Snapshot {
         issues: vec![issue(50, &[], None), issue(52, &[], None)],

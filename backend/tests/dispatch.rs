@@ -195,6 +195,34 @@ fn acceptance_goes_to_another_vendor_than_the_one_that_implemented_it() {
 }
 
 #[test]
+fn work_sent_back_by_acceptance_goes_to_the_agent_that_wrote_it() {
+    // #22 的真实评论加上验收者按租约格式留的认领评论。租约说的是“现在谁在
+    // 干活”，改写不了“是谁实现的”：#22 是 CodeBuddy 实现的，Codex 只是验收。
+    let home = Home::new("backtoauthor");
+    let config = home.config(serde_json::json!({}));
+    let (code, out) = run(
+        &home,
+        &[
+            "plan",
+            "--json",
+            "--config",
+            &config.display().to_string(),
+            "--replay",
+            &fixtures("fix-issue"),
+            "--now",
+            "2026-10-14T04:00:00+08:00",
+        ],
+    );
+    assert_eq!(code, 0, "{out}");
+    let plan: serde_json::Value = serde_json::from_str(out.trim()).expect("--json 要是 JSON");
+    assert_eq!(plan["start"][0]["role"], "fix-issue", "{plan}");
+    assert_eq!(
+        plan["start"][0]["vendor"], "codebuddy",
+        "验收未通过要回到实现它的 CodeBuddy，不是最后认领的验收者 Codex：{plan}"
+    );
+}
+
+#[test]
 fn a_cancelled_run_is_not_a_red_main_but_a_failed_one_is() {
     let home = Home::new("ci");
     let config = home.config(serde_json::json!({}));

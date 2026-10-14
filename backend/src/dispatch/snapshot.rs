@@ -345,26 +345,33 @@ fn apply_comments(issue: &mut Issue, text: &str) -> Result<(), Error> {
     Ok(())
 }
 
-/// The agent that is doing an issue, which is not the agent that spoke
-/// last: on an issue waiting for acceptance the newest comment is the
-/// acceptor's, and taking it would send the next round back to the agent
-/// that just reviewed it (seen on #22, where CodeBuddy implemented and
-/// Codex accepted).
+/// The agent that wrote the change an issue is about. Two different
+/// questions get mixed up here, and only this one decides who is sent
+/// back to fix something and whose vendor a reviewer may not be:
 ///
-/// The claim lease says who is doing the issue, so the newest claim or
-/// heartbeat comment wins. Without one, the earliest `Agent:` signature
-/// is the implementer: it reports before any reviewer or acceptor shows up.
-fn implementer(comments: &[(DateTime<Utc>, String)]) -> Option<String> {
-    for (_, body) in comments.iter().rev() {
+/// - *Who is holding the lease right now* is the newest `## 认领` /
+///   `## 心跳` comment. On an issue waiting for acceptance that is the
+///   acceptor, and on one sent back it is the acceptor who just rejected
+///   it. Reading it as the implementer sends the fix to the agent that
+///   reviewed the work (seen on #22: CodeBuddy implemented, Codex
+///   accepted and claimed while accepting).
+/// - *Who implemented it* is the first claim of the current lease chain:
+///   the agent that took the issue and kept it until someone reclaimed
+///   it. A reclaim ends the chain, so the next agent to claim is the one
+///   that took the work over and is its implementer from then on.
+///
+/// With no claim comment at all, the earliest `Agent:` signature answers:
+/// the implementer reports before any reviewer or acceptor shows up.
+pub(super) fn implementer(comments: &[(DateTime<Utc>, String)]) -> Option<String> {
+    let mut held: Option<String> = None;
+    for (_, body) in comments {
         match lease_comment(body) {
-            // A reclaim ends the lease: the issue has no agent until
-            // someone claims it again.
-            Some(Lease::Reclaimed) => return None,
-            Some(Lease::Held(agent)) => return Some(agent),
-            None => {}
+            Some(Lease::Held(agent)) if held.is_none() => held = Some(agent),
+            Some(Lease::Reclaimed) => held = None,
+            _ => {}
         }
     }
-    comments.iter().find_map(|(_, body)| agent_signature(body))
+    held.or_else(|| comments.iter().find_map(|(_, body)| agent_signature(body)))
 }
 
 enum Lease {
