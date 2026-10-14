@@ -1,4 +1,4 @@
-<!-- reviewed-through: b36c8e3 (2026-10-14 16:45 +0800) -->
+<!-- reviewed-through: cf5c789 (2026-10-14 16:53 +0800) -->
 # 已合并工作的教训
 
 本项目的代码由 agent 编写、审查、合并和发布。每天夜里有一个复盘 agent 检查当天的 commit：哪些改动后来又被返工、哪些不该合并、哪些验证得太薄。学到的东西记在这里。改代码之前先读这份文件。
@@ -183,7 +183,7 @@
 **判断 main 红不红只看 Test 工作流；被设计拒绝的 Release run 不算 main 红。**
 - `eaf63f6`：版本升到 0.1.0-rc.2；tag/release [v0.1.0-rc.2](https://github.com/zbtzbtzbt/theFlash/releases/tag/v0.1.0-rc.2) 已出（两台 macOS + install.sh）。
 - Done right on 10-14: `3b1cc18`（#5）——Release gate 拒绝未跑完的 Test 时，不带 `--workflow` 的 `gh run list` 会把拒绝显示成 main 红，误导 work-tick。
-- Done right on 10-14: `b36c8e3`（#168）——攒批升到 0.1.0-rc.3，正文写明等该 commit 的 Test 绿再打 tag；hygiene 核对时 tag 尚未存在、Test [38537231602](https://github.com/zbtzbtzbt/theFlash/actions/runs/38537231602) 仍 in_progress（正确）。
+- Done right on 10-14: `b36c8e3`（#168）——攒批升到 0.1.0-rc.3；Test [38537231602](https://github.com/zbtzbtzbt/theFlash/actions/runs/38537231602) success 之后才打 [v0.1.0-rc.3](https://github.com/zbtzbtzbt/theFlash/releases/tag/v0.1.0-rc.3)（tag→`b36c8e3`，约晚 27s）。合入本身仍绕闸（#159）。
 - Seen 2× (2026-10-14)。
 
 **main 红着不要往上叠新功能。**
