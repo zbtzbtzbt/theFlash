@@ -16,6 +16,13 @@
 //! text, not code: what they still miss is listed in
 //! docs/decisions/0003-tests-cannot-reach-damai.md.
 //!
+//! What counts as a credential or personal data is not read here. It is
+//! read by `theflash::inspect::redact`, which `theflash inspect record`
+//! runs over every response before it writes it, so what may be recorded
+//! and what may be committed cannot drift apart (#71). The forms each rule
+//! covers are tested next to that code; this file tests the walk over the
+//! repository, the damai hosts and the allowlist.
+//!
 //! The sample values below are built from pieces so that this file does not
 //! contain what it looks for. Findings name the file, line and rule, never
 //! the value.
@@ -24,30 +31,29 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use theflash::inspect::redact;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Rule {
-    Cookie,
-    Header,
-    IdCard,
-    Phone,
+    /// One of the owner's rules about credentials and personal data. They
+    /// are read in one place, `theflash::inspect::redact`, which is what
+    /// `theflash inspect record` cleans a response with before it saves
+    /// it; the forms each rule covers are tested there (#71).
+    Data(redact::Rule),
+    /// A damai host CI does not block, which is this file's own rule.
     Domain,
 }
 
 impl Rule {
     fn name(self) -> &'static str {
         match self {
-            Rule::Cookie => "cookie",
-            Rule::Header => "header",
-            Rule::IdCard => "id-card",
-            Rule::Phone => "phone",
+            Rule::Data(rule) => rule.id(),
             Rule::Domain => "domain",
         }
     }
 
     fn from_name(name: &str) -> Option<Rule> {
-        [Rule::Cookie, Rule::Header, Rule::IdCard, Rule::Phone]
-            .into_iter()
-            .find(|r| r.name() == name)
+        redact::Rule::from_id(name).map(Rule::Data)
     }
 }
 
@@ -75,288 +81,17 @@ impl std::fmt::Display for Finding {
 
 // ---- what counts as a credential or personal data ----
 
-/// Cookie names of Taobao and damai.cn logins. Longer names first.
-const COOKIE_NAMES: [&str; 7] = [
-    "_m_h5_tk_enc",
-    "_m_h5_tk",
-    "cookie2",
-    "munb",
-    "unb",
-    "sgcookie",
-    "_tb_token_",
-];
-
-const HEADER_NAMES: [&str; 3] = ["set-cookie", "cookie", "authorization"];
-
-/// First two digits of an ID card number: the provinces, and Hong Kong,
-/// Macao, Taiwan and abroad.
-const REGIONS: [u32; 36] = [
-    11, 12, 13, 14, 15, 21, 22, 23, 31, 32, 33, 34, 35, 36, 37, 41, 42, 43, 44, 45, 46, 50, 51, 52,
-    53, 54, 61, 62, 63, 64, 65, 71, 81, 82, 83, 91,
-];
-
-fn is_name_byte(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'_'
-}
-
-/// A cookie value as it is written in a header or a JSON dump. Excludes
-/// placeholders such as `<redacted>`, `***`, `${TOKEN}` and prose.
-fn is_value_byte(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || matches!(b, b'%' | b'-' | b'_' | b'.' | b'+' | b'/' | b'~')
-}
-
-fn is_quote(b: u8) -> bool {
-    matches!(b, b'"' | b'\'')
-}
-
-/// The first byte from `i` on that is not a space, a tab or a line break:
-/// a name, its separator and its value may sit on different lines (#21).
-fn skip_space(b: &[u8], mut i: usize) -> usize {
-    while b.get(i).is_some_and(u8::is_ascii_whitespace) {
-        i += 1;
-    }
-    i
-}
-
-/// Whether a value, quoted or not, starts at `i`.
-fn value_at(b: &[u8], mut i: usize) -> bool {
-    if b.get(i).copied().is_some_and(is_quote) {
-        i += 1;
-    }
-    b.get(i).copied().is_some_and(is_value_byte)
-}
-
-/// Whether a string literal starting at `i` holds a value rather than
-/// another name. After a comma a name is the next item of a list, as in
-/// `["unb", "munb"]` or `["cookie", "set-cookie"]`; a value has a digit or
-/// a sign in it, as in `"Bearer abc"`, `"a=b"` or `"2200000000000"`.
-fn literal_value_at(b: &[u8], i: usize) -> bool {
-    let Some(&quote) = b.get(i).filter(|q| is_quote(**q)) else {
-        return false;
-    };
-    let rest = &b[i + 1..];
-    let len = rest
-        .iter()
-        .position(|c| *c == quote || *c == b'\n')
-        .unwrap_or(rest.len());
-    let literal = &rest[..len];
-    let is_name = |n: &&str| literal.eq_ignore_ascii_case(n.as_bytes());
-    literal.first().copied().is_some_and(is_value_byte)
-        && literal
-            .iter()
-            .any(|c| !(c.is_ascii_alphabetic() || matches!(c, b'_' | b'-')))
-        && !COOKIE_NAMES.iter().chain(&HEADER_NAMES).any(is_name)
-}
-
-/// Whether the quoted name at `at..at + len` is the value of a `name` key
-/// in an object whose `value` key holds a quoted value:
-/// `{"name": "unb", "value": "…"}`, the way HAR files, Playwright's
-/// storageState, Puppeteer and browser extensions save cookies and
-/// headers. `b` is the text in lowercase.
-fn named_in_object(b: &[u8], at: usize, len: usize) -> bool {
-    let end = at + len;
-    if at == 0 || !is_quote(b[at - 1]) || b.get(end) != Some(&b[at - 1]) {
-        return false;
-    }
-    // Back from the opening quote: a `:`, then the key `name`, maybe quoted.
-    let back = |mut k: usize| {
-        while k > 0 && b[k - 1].is_ascii_whitespace() {
-            k -= 1;
-        }
-        k
-    };
-    let mut k = back(at - 1);
-    if k == 0 || b[k - 1] != b':' {
-        return false;
-    }
-    k = back(k - 1);
-    if k > 0 && is_quote(b[k - 1]) {
-        k -= 1;
-    }
-    if k < 4 || &b[k - 4..k] != b"name" || (k > 4 && is_name_byte(b[k - 5])) {
-        return false;
-    }
-    // The object runs from the `{` before the name to the `}` after it.
-    let (Some(lo), Some(hi)) = (
-        b[..at].iter().rposition(|c| *c == b'{'),
-        b[end..].iter().position(|c| *c == b'}').map(|p| end + p),
-    ) else {
-        return false;
-    };
-    let object = &b[lo..hi];
-    (1..object.len()).any(|i| {
-        if !object[i..].starts_with(b"value") || is_name_byte(object[i - 1]) {
-            return false;
-        }
-        let mut j = i + "value".len();
-        if object.get(j).copied().is_some_and(is_quote) {
-            j += 1;
-        }
-        j = skip_space(object, j);
-        if object.get(j) != Some(&b':') {
-            return false;
-        }
-        j = skip_space(object, j + 1);
-        object.get(j).copied().is_some_and(is_quote) && value_at(object, j)
-    })
-}
-
-/// Where login cookies are written with a value, and their names. Spaces
-/// and line breaks may sit between the parts:
-/// - `name=value`, as in a Cookie header or `document.cookie`;
-/// - `"name": "value"`, a JSON key or a JS or Python dict entry;
-/// - `"name", "value"`, adjacent arguments or a pair, as in
-///   `Cookie::new("unb", "…")`, when the second is not just another name;
-/// - `{"name": "unb", …, "value": "…"}` (see `named_in_object`).
-fn cookies_with_values(text: &str) -> Vec<(usize, &'static str)> {
-    let b = text.as_bytes();
-    let lower = text.to_ascii_lowercase();
-    let mut found = Vec::new();
-    for name in COOKIE_NAMES {
-        for (at, _) in text.match_indices(name) {
-            if at > 0 && is_name_byte(b[at - 1]) {
-                continue;
-            }
-            let mut i = at + name.len();
-            let quoted = b.get(i).copied().is_some_and(is_quote);
-            if quoted {
-                i += 1;
-            }
-            i = skip_space(b, i);
-            let with_value = match b.get(i) {
-                Some(b'=') => value_at(b, skip_space(b, i + 1)),
-                Some(b':') if quoted => value_at(b, skip_space(b, i + 1)),
-                Some(b',') if quoted => literal_value_at(b, skip_space(b, i + 1)),
-                _ => false,
-            };
-            if with_value || named_in_object(lower.as_bytes(), at, name.len()) {
-                found.push((at, name));
-            }
-        }
-    }
-    found
-}
-
-/// Where `Cookie`, `Set-Cookie` and `Authorization` are written as a
-/// header, and their names:
-/// - `Cookie:`, also as a JSON key;
-/// - `"Authorization", "Bearer …"`, the name and a literal value as
-///   adjacent arguments, as in `.header("Authorization", "Bearer …")`;
-/// - `{"name": "cookie", "value": "…"}` in a HAR file.
-fn headers(text: &str) -> Vec<(usize, &'static str)> {
-    let lower = text.to_ascii_lowercase();
-    let b = lower.as_bytes();
-    let mut found = Vec::new();
-    for name in HEADER_NAMES {
-        for (at, _) in lower.match_indices(name) {
-            if at > 0 && (b[at - 1].is_ascii_alphanumeric() || b[at - 1] == b'-') {
-                continue;
-            }
-            let mut i = at + name.len();
-            if b.get(i).copied().is_some_and(is_quote) {
-                i += 1;
-            }
-            i = skip_space(b, i);
-            let as_header = match b.get(i) {
-                Some(b':') => true,
-                Some(b',') => literal_value_at(b, skip_space(b, i + 1)),
-                _ => false,
-            };
-            if as_header || named_in_object(b, at, name.len()) {
-                found.push((at, name));
-            }
-        }
-    }
-    found
-}
-
-/// The login cookie on a cookies.txt line, the Netscape format `curl -c`
-/// and browser extensions write: seven tab-separated fields, the name in
-/// the sixth and the value in the seventh.
-fn cookies_txt_name(line: &str) -> Option<&'static str> {
-    let fields: Vec<&str> = line.split('\t').collect();
-    let [_, _, _, _, _, name, value] = fields[..] else {
-        return None;
-    };
-    if !value.bytes().next().is_some_and(is_value_byte) {
-        return None;
-    }
-    COOKIE_NAMES.into_iter().find(|n| *n == name)
-}
-
-fn is_mobile(t: &str) -> bool {
-    let b = t.as_bytes();
-    b.len() == 11
-        && b.iter().all(u8::is_ascii_digit)
-        && b[0] == b'1'
-        && (b'3'..=b'9').contains(&b[1])
-}
-
-/// 18 characters with a real region, a real birth date and the right check
-/// character, so an 18-digit order or item number rarely qualifies.
-fn is_id_card(t: &str) -> bool {
-    let b = t.as_bytes();
-    if b.len() != 18
-        || !b[..17].iter().all(u8::is_ascii_digit)
-        || !(b[17].is_ascii_digit() || b[17] == b'X' || b[17] == b'x')
-    {
-        return false;
-    }
-    let num = |r: std::ops::Range<usize>| t[r].parse::<u32>().unwrap();
-    let (year, month, day) = (num(6..10), num(10..12), num(12..14));
-    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
-    let days = match month {
-        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
-        4 | 6 | 9 | 11 => 30,
-        2 if leap => 29,
-        2 => 28,
-        _ => return false,
-    };
-    if !REGIONS.contains(&num(0..2)) || !(1900..=2100).contains(&year) || !(1..=days).contains(&day)
-    {
-        return false;
-    }
-    const WEIGHTS: [u32; 17] = [7, 9, 10, 5, 8, 4, 2, 1, 6, 3, 7, 9, 10, 5, 8, 4, 2];
-    let sum: u32 = b[..17]
-        .iter()
-        .zip(WEIGHTS)
-        .map(|(d, w)| u32::from(d - b'0') * w)
-        .sum();
-    b"10X98765432"[(sum % 11) as usize] == b[17].to_ascii_uppercase()
-}
-
 /// What in a text file is a credential or personal data, by line number.
-/// A cookie or header split across lines is reported on the line of its
-/// name.
-fn sensitive_in_text(text: &str) -> BTreeSet<(usize, Rule, String)> {
-    let starts: Vec<usize> = std::iter::once(0)
-        .chain(text.match_indices('\n').map(|(i, _)| i + 1))
-        .collect();
-    let line_of = |at: usize| starts.partition_point(|s| *s <= at);
-    let cookie = |name: &str| format!("cookie {name} with a value");
-    let mut out = BTreeSet::new();
-    for (at, name) in cookies_with_values(text) {
-        out.insert((line_of(at), Rule::Cookie, cookie(name)));
-    }
-    for (at, name) in headers(text) {
-        out.insert((line_of(at), Rule::Header, format!("{name} header")));
-    }
-    for (i, line) in text.lines().enumerate() {
-        if let Some(name) = cookies_txt_name(line) {
-            out.insert((i + 1, Rule::Cookie, cookie(name)));
-        }
-        let tokens = || {
-            line.split(|c: char| !c.is_ascii_alphanumeric())
-                .filter(|t| !t.is_empty())
-        };
-        if tokens().any(is_id_card) {
-            out.insert((i + 1, Rule::IdCard, "an 18-digit ID card number".into()));
-        }
-        if tokens().any(is_mobile) {
-            out.insert((i + 1, Rule::Phone, "an 11-digit mobile number".into()));
-        }
-    }
-    out
+/// The rules are read by `theflash::inspect::redact`, which is also what
+/// `theflash inspect record` runs over a response before it writes it:
+/// one reading of the owner's rules, so a fixture that passes there
+/// cannot fail here (#71). A cookie or header split across lines is
+/// reported on the line of its name.
+fn sensitive_in_text(text: &str) -> Vec<(usize, Rule, String)> {
+    redact::sensitive(text)
+        .into_iter()
+        .map(|hit| (hit.line, Rule::Data(hit.rule), hit.what))
+        .collect()
 }
 
 // ---- damai hosts named in the repository ----
@@ -794,13 +529,6 @@ fn no_file_in_the_repository_keeps_a_merge_conflict_marker() {
 
 // ---- the scanner itself ----
 
-fn found(text: &str) -> Vec<Rule> {
-    sensitive_in_text(text)
-        .into_iter()
-        .map(|(_, r, _)| r)
-        .collect()
-}
-
 #[test]
 fn a_test_that_starts_a_binary_itself_fails_even_where_it_also_uses_the_helper() {
     // #21: the guard asked only whether a file named both the binary and
@@ -881,155 +609,11 @@ fn sample_mobile() -> String {
 }
 
 #[test]
-fn login_cookies_with_values_are_found_in_every_form() {
-    for name in COOKIE_NAMES {
-        for line in [
-            format!("{name}=abc123"),
-            format!("Cookie: a=b; {name}=abc123; c=d"),
-            format!("  \"{name}\": \"abc123\","),
-            format!("{name} = 'abc123'"),
-            format!("x_m_h5_tk=1; {name}=abc%20123"),
-        ] {
-            assert!(found(&line).contains(&Rule::Cookie), "{line}");
-        }
-    }
-}
-
-#[test]
-fn cookie_names_without_values_and_other_names_are_left_alone() {
-    for line in [
-        "the _m_h5_tk cookie signs mtop requests",
-        "let unb: string = x;",
-        "if unb == other {}",
-        "cookie2=值",
-        "unb=<redacted>",
-        "unb=***",
-        "unb=${UNB}",
-        "unb=",
-        "munbx=1",
-        "tounb=1",
-        "\"unb\", \"munb\"",
-    ] {
-        assert!(!found(line).contains(&Rule::Cookie), "{line}");
-    }
-}
-
-#[test]
-fn cookie_and_authorization_headers_are_found() {
-    for line in [
-        "Cookie: a=b",
-        "cookie : a=b",
-        "Set-Cookie: sid=1; Path=/",
-        "authorization: Bearer abc",
-        "Authorization:Bearer abc",
-        "  \"Cookie\": \"a=b\"",
-        ".header(\"Authorization: x\")",
-    ] {
-        assert!(found(line).contains(&Rule::Header), "{line}");
-    }
-    for line in [
-        "the Cookie header holds the login",
-        "cookies: none",
-        "authorized: yes",
-        "Authorization failed",
-        "set-cookie headers are dropped",
-    ] {
-        assert!(!found(line).contains(&Rule::Header), "{line}");
-    }
-}
-
-#[test]
-fn headers_and_cookies_passed_as_arguments_are_found() {
-    // #21: a name and its literal value as adjacent arguments or as a pair,
-    // with no `:` or `=` between them.
-    for text in [
-        ".header(\"Authorization\", \"Bearer abc.def\")",
-        "headers.append('Cookie', 'a=b; c=d')",
-        ".header(header::AUTHORIZATION, \"Basic dXNlcjpwYXNz\")",
-        "new Headers([[\"set-cookie\", \"sid=1; Path=/\"]])",
-        ".header(\n    \"Authorization\",\n    \"Bearer abc\",\n)",
-    ] {
-        assert!(found(text).contains(&Rule::Header), "{text}");
-    }
-    for name in COOKIE_NAMES {
-        for text in [
-            format!("Cookie::new(\"{name}\", \"abc123\")"),
-            format!("[(\"{name}\", \"2200000000000\")]"),
-            format!("cookies.set('{name}', 'abc_123')"),
-        ] {
-            assert!(found(&text).contains(&Rule::Cookie), "{text}");
-        }
-    }
-}
-
-#[test]
-fn lists_of_names_and_values_that_are_not_literals_are_left_alone() {
-    for text in [
-        "[\"unb\", \"munb\"]",
-        "const KEEP: [&str; 5] = [\"_m_h5_tk\", \"_m_h5_tk_enc\", \"cookie2\", \"unb\", \"t\"];",
-        "strip: [\"cookie\", \"set-cookie\", \"authorization\", \"x-forwarded-for\"]",
-        ".header(\"Authorization\", token)",
-        ".header(\"Cookie\", \"\")",
-        "cookies.set(\"unb\", \"REDACTED\")",
-    ] {
-        assert!(found(text).is_empty(), "{text}: {:?}", found(text));
-    }
-}
-
-#[test]
-fn cookies_saved_as_name_and_value_objects_are_found() {
-    // How HAR files, Playwright's storageState, Puppeteer and browser
-    // extensions save a cookie: the name and the value are two entries.
-    for name in COOKIE_NAMES {
-        for text in [
-            format!("{{\"name\": \"{name}\", \"value\": \"abc123\", \"domain\": \".damai.cn\"}}"),
-            format!(
-                "{{\n  \"domain\": \".damai.cn\",\n  \"name\": \"{name}\",\n  \"path\": \"/\",\n  \"value\": \"abc123\"\n}}"
-            ),
-            format!("{{ name: '{name}', value: 'abc123' }}"),
-        ] {
-            assert!(found(&text).contains(&Rule::Cookie), "{text}");
-        }
-    }
-    let har_header = "{\"name\": \"Authorization\", \"value\": \"Bearer abc\"}";
-    assert!(found(har_header).contains(&Rule::Header), "{har_header}");
-    for text in [
-        "{\"name\": \"unb\", \"value\": \"\"}",
-        "{\"name\": \"unb\", \"value\": \"<redacted>\"}",
-        "{\"name\": \"unb\"}",
-        "{\"name\": \"unb\"}, {\"value\": \"abc123\"}",
-        "json!({\"name\": \"unb\", \"value\": token})",
-        "{\"name\": \"cookie\", \"value\": \"\"}",
-    ] {
-        assert!(found(text).is_empty(), "{text}: {:?}", found(text));
-    }
-}
-
-#[test]
-fn a_cookies_txt_line_is_found() {
-    // The Netscape format that `curl -c` and browser extensions write:
-    // tab-separated, the name in the sixth field and the value in the last.
-    for name in COOKIE_NAMES {
-        for text in [
-            format!(".damai.cn\tTRUE\t/\tFALSE\t1760000000\t{name}\tabc123"),
-            format!("#HttpOnly_.damai.cn\tTRUE\t/\tTRUE\t0\t{name}\tabc123"),
-        ] {
-            assert!(found(&text).contains(&Rule::Cookie), "{text}");
-        }
-    }
-    for text in [
-        "# Netscape HTTP Cookie File",
-        ".damai.cn\tTRUE\t/\tFALSE\t0\tunb\t",
-        ".damai.cn\tTRUE\t/\tFALSE\t0\tcna\tabc123",
-    ] {
-        assert!(found(text).is_empty(), "{text}: {:?}", found(text));
-    }
-}
-
-#[test]
-fn a_credential_split_across_lines_fails_and_names_the_line_of_the_name() {
+fn a_credential_in_any_of_its_forms_fails_and_names_the_line_of_the_name() {
     // #21: the scan went line by line, so a value on the line after its
-    // name was never seen.
+    // name was never seen. #71: the files below are what `theflash inspect
+    // record` writes, so the walk over the repository has to read every
+    // form that command cleans — the two now read the same rules.
     let (root, files) = temp_repo(
         "multiline",
         &[
@@ -1045,6 +629,24 @@ fn a_credential_split_across_lines_fails_and_names_the_line_of_the_name() {
                 "backend/testdata/damai/c.json",
                 "{\"Cookie\"\n  : \"a=b\"}\n".to_string(),
             ),
+            (
+                "backend/testdata/damai/d_export.json",
+                format!(
+                    "[\n  {{\"domain\": \".damai.cn\",\n   \"name\": \"{}\",\n   \"value\": \"abc123\"}}\n]\n",
+                    "unb"
+                ),
+            ),
+            (
+                "backend/testdata/damai/e_cookies.txt",
+                format!(
+                    ".damai.cn\tTRUE\t/\tFALSE\t1760000000\t{}\tabc123\n",
+                    "munb"
+                ),
+            ),
+            (
+                "backend/testdata/damai/f_args.js",
+                format!("jar.set('{}', 'abc_123');\n", "sgcookie"),
+            ),
         ],
     );
     let problems = check_files(&root, &files, &[]);
@@ -1055,60 +657,11 @@ fn a_credential_split_across_lines_fails_and_names_the_line_of_the_name() {
             "backend/testdata/damai/a7_multiline.json:2: [cookie] cookie _m_h5_tk with a value",
             "backend/testdata/damai/b.txt:2: [cookie] cookie unb with a value",
             "backend/testdata/damai/c.json:1: [header] cookie header",
+            "backend/testdata/damai/d_export.json:3: [cookie] cookie unb with a value",
+            "backend/testdata/damai/e_cookies.txt:1: [cookie] cookie munb with a value",
+            "backend/testdata/damai/f_args.js:1: [cookie] cookie sgcookie with a value",
         ]
     );
-}
-
-#[test]
-fn id_card_numbers_are_found_only_when_well_formed() {
-    let id = sample_id();
-    assert!(found(&format!("id: {id}")).contains(&Rule::IdCard));
-    assert!(found(&format!("\"idNo\":\"{}\"", id.to_lowercase())).contains(&Rule::IdCard));
-    assert!(found(&format!("观演人身份证{id}。")).contains(&Rule::IdCard));
-
-    let wrong_check = join(&["110105194912", "310021"]);
-    let month_13 = join(&["110105194913", "310021"]);
-    let feb_30 = join(&["110105194902", "300026"]);
-    let no_such_region = join(&["990105194912", "310029"]);
-    let eighteen_digits = join(&["123456789", "012345678"]);
-    for not_id in [
-        wrong_check,
-        month_13,
-        feb_30,
-        no_such_region,
-        eighteen_digits,
-    ] {
-        assert!(
-            !found(&format!("id {not_id}")).contains(&Rule::IdCard),
-            "{not_id}"
-        );
-    }
-    // Longer or shorter runs are not an ID card, e.g. a 19-digit order number.
-    assert!(!found(&format!("order {id}7")).contains(&Rule::IdCard));
-    assert!(!found(&format!("order a{id}")).contains(&Rule::IdCard));
-}
-
-#[test]
-fn mobile_numbers_are_found_only_as_a_whole_eleven_digit_number() {
-    let phone = sample_mobile();
-    assert!(found(&format!("tel {phone}")).contains(&Rule::Phone));
-    assert!(found(&format!("\"mobile\":\"{phone}\"")).contains(&Rule::Phone));
-    assert!(found(&format!("手机{phone}请")).contains(&Rule::Phone));
-    for not_phone in [
-        join(&["1380013", "800"]),
-        join(&["138", "0013", "80001"]),
-        join(&["2380013", "8000"]),
-        join(&["1280013", "8000"]),
-        join(&["x138", "0013", "8000"]),
-        // Item ids and millisecond timestamps are 12 and 13 digits.
-        "1086791513717".to_string(),
-        "1760000000000".to_string(),
-    ] {
-        assert!(
-            !found(&format!("n {not_phone}")).contains(&Rule::Phone),
-            "{not_phone}"
-        );
-    }
 }
 
 #[test]
