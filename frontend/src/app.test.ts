@@ -95,6 +95,14 @@ function page(fetcher: typeof fetch) {
   };
   return { w, root, submit };
 }
+// The status style a CLI status word asks for, decided from the word alone.
+function statusKind(label: string): string {
+  if (label === "在售" || label === "可售") return "available";
+  if (label === "缺货") return "out-of-stock";
+  if (label === "未开售") return "not-yet-on-sale";
+  if (label === "已售罄") return "sold-out";
+  return "unknown";
+}
 // Read the rendered nodes, never EventView.report or the fields used to render them.
 // The independent `event` process supplies both the text and badge semantics.
 it.each([
@@ -147,13 +155,6 @@ it.each([
     `${lines.join("\n")}\n`,
     "visible DOM must match the independent CLI, including order and omissions",
   ).toBe(report);
-  const kind = (label: string): string => {
-    if (label === "在售" || label === "可售") return "available";
-    if (label === "缺货") return "out-of-stock";
-    if (label === "未开售") return "not-yet-on-sale";
-    if (label === "已售罄") return "sold-out";
-    return "unknown";
-  };
   const cliStatuses = report.split("\n").flatMap((line) => {
     if (line.startsWith("售卖状态：")) return [line.slice("售卖状态：".length)];
     if (line.startsWith("  ") && line.includes(" · ")) return [line.split(" · ").at(-1) ?? ""];
@@ -167,30 +168,74 @@ it.each([
     expect(
       Array.from(badge.classList).filter((value) => value !== "badge"),
       `wrong visible status style for ${label}`,
-    ).toEqual([kind(label)]);
+    ).toEqual([statusKind(label)]);
   }
 });
 
+// Whether a reader can see a color at all. happy-dom reports a value the way
+// the CSS wrote it, and "" for a background no rule sets where a browser says
+// rgba(0, 0, 0, 0), so the ways of writing "transparent" are read here.
+function visible(color: string): boolean {
+  const c = color.trim().toLowerCase();
+  if (["", "none", "transparent", "currentcolor", "inherit", "initial", "unset"].includes(c))
+    return false;
+  const hex = /^#(?:[0-9a-f]{3}([0-9a-f])|[0-9a-f]{6}([0-9a-f]{2}))$/.exec(c);
+  if (hex) return Number.parseInt(hex[1] ?? hex[2] ?? "", 16) > 0;
+  // rgba(), hsl() and the like, with the alpha after a third comma or a slash.
+  const alpha =
+    /^[a-z]+\((?:[^,/]*,){3}\s*([\d.]+)%?\s*\)$|^[a-z]+\([^/]*\/\s*([\d.]+)%?\s*\)$/.exec(c);
+  if (alpha) return Number(alpha[1] ?? alpha[2]) > 0;
+  return true;
+}
+// Color is what tells the statuses apart, so check it on what the user sees:
+// every badge the page renders (the legend, and every status in the six real
+// fixtures) under the real style.css. A badge whose status rule was deleted,
+// or whose class the CSS spells differently, looks like a plain badge in the
+// same spot, so each must differ from that in color and in background (#48).
+// Statuses are told apart by their word, as in the CLI; no two share a color.
 it("the five status styles have distinct foreground and background colors", () => {
+  if (views.length === 0) throw new Error("missing real fixtures");
   const w = new Window();
   windows.push(w);
   const style = w.document.createElement("style");
   style.textContent = readFileSync(new URL("../public/style.css", import.meta.url), "utf8");
   w.document.head.append(style);
-  const foregrounds: string[] = [];
-  const backgrounds: string[] = [];
-  for (const kind of ["available", "out-of-stock", "not-yet-on-sale", "sold-out", "unknown"]) {
-    const badge = w.document.createElement("span");
-    badge.className = `badge ${kind}`;
-    w.document.body.append(badge);
-    const computed = w.getComputedStyle(badge);
-    foregrounds.push(computed.color);
-    backgrounds.push(computed.backgroundColor);
-    expect(computed.color, kind).not.toBe("");
-    expect(computed.backgroundColor, kind).not.toBe("rgba(0, 0, 0, 0)");
+  const root = w.document.createElement("main");
+  w.document.body.append(root);
+  mount(root as unknown as HTMLElement, vi.fn());
+  for (const view of views) {
+    const results = w.document.createElement("section");
+    root.append(results);
+    renderEvent(results as unknown as HTMLElement, view);
   }
-  expect(new Set(foregrounds).size).toBe(5);
-  expect(new Set(backgrounds).size).toBe(5);
+  const looks = new Map<string, { color: string; background: string }>();
+  for (const badge of root.querySelectorAll(".badge")) {
+    const label = badge.textContent ?? "";
+    const own = w.getComputedStyle(badge);
+    const look = { color: own.color, background: own.backgroundColor };
+    const bare = w.document.createElement("span");
+    bare.className = "badge";
+    badge.after(bare);
+    const plain = w.getComputedStyle(bare);
+    expect(look.color, `“${label}”没有自己的文字颜色`).not.toBe(plain.color);
+    expect(look.background, `“${label}”没有自己的背景`).not.toBe(plain.backgroundColor);
+    bare.remove();
+    expect(visible(look.color), `“${label}”的文字颜色 ${look.color}`).toBe(true);
+    expect(visible(look.background), `“${label}”的背景 ${look.background}`).toBe(true);
+    const kind = statusKind(label);
+    expect(look, `“${label}”和别的 ${kind} 徽标颜色不一样`).toEqual(looks.get(kind) ?? look);
+    looks.set(kind, look);
+  }
+  expect([...looks.keys()].sort()).toEqual([
+    "available",
+    "not-yet-on-sale",
+    "out-of-stock",
+    "sold-out",
+    "unknown",
+  ]);
+  const all = [...looks.values()];
+  expect(new Set(all.map((look) => look.color)).size, "有两种状态文字颜色相同").toBe(5);
+  expect(new Set(all.map((look) => look.background)).size, "有两种状态背景相同").toBe(5);
 });
 it("keeps loading visible and sends only one request on repeated submits", async () => {
   let finish: (response: Response) => void = () => {};

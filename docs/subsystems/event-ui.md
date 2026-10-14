@@ -37,7 +37,7 @@
 ## 验证
 
 - `make check` 包含 TypeScript 构建、Vitest DOM 行为测试和本地 HTTP/真实 fixture 回放测试；后端先构建，因此前端集成测试可以调用同一 worktree 的 binary。
-- [app.test.ts](../../frontend/src/app.test.ts)：在售、未开售、售罄、18 场日历、电脑版不支持、缺 `skuList` 六种真实响应回放。分别运行 `event-json` 和独立的 `event`，从 `renderEvent` 后的 DOM 读取演出名、城市、场馆、状态、开售时间、全部场次和票档，再逐字对照 CLI；逐个徽标的样式语义从 CLI 状态文字推导，不与 view 自己比较。加载正式 CSS 检查五种状态的前景色和背景色彼此不同。还覆盖加载和重复提交、错误、风控停止（`risk-control` 和 `risk-stopped` 都写出解除办法）、过期结果清理、文本注入边界。
+- [app.test.ts](../../frontend/src/app.test.ts)：在售、未开售、售罄、18 场日历、电脑版不支持、缺 `skuList` 六种真实响应回放。分别运行 `event-json` 和独立的 `event`，从 `renderEvent` 后的 DOM 读取演出名、城市、场馆、状态、开售时间、全部场次和票档，再逐字对照 CLI；逐个徽标的样式语义从 CLI 状态文字推导，不与 view 自己比较。颜色检查加载正式的 style.css，看页面自己画出来的每个徽标（图例和六份回放里的每个状态）：文字颜色和背景都要和同一位置上不带状态类的 `badge` 不同，也不能是透明的；按状态文字分成五种，五种的文字颜色、背景两两不同。删掉一条状态规则、CSS 和页面的类名对不上、只删颜色或背景、背景改成透明，它都会失败（#48）。happy-dom 对没设的背景给空串，不是浏览器的 `rgba(0, 0, 0, 0)`，所以不能拿后者判断“没有背景”。还覆盖加载和重复提交、错误、风控停止（`risk-control` 和 `risk-stopped` 都写出解除办法）、过期结果清理、文本注入边界。
 - [server.test.ts](../../frontend/src/server.test.ts)：`report` 的 JSON/CLI 文本契约、本机绑定、Host/Origin 防护（DNS rebinding 请求的 Host 与 Origin 都是同一个外部域名，包含当前端口及省略端口两种形状）、断网、风控无重试（含重启服务后仍然停止、熔断状态读不出来时停止）、跨标签页并发及服务发出取消信号。
 - [query.test.ts](../../frontend/src/query.test.ts)：直接 abort `loadEvent` 和通过真实 HTTP 客户端断开两条路径都启动真实 Rust 子进程。fixture 暂停首个票档响应，在响应仍被暂停时等待操作系统确认子进程退出，再解除暂停并确认没有后续票档请求；仅 Promise 拒绝或假 query 收到 AbortSignal 不算取消成功。失败路径也清理测试自己启动的进程。
 - 运行 `theflash` 的前端测试都用 [test-support.ts](../../frontend/src/test-support.ts) 的 `tempHome()`，不读写真实用户的状态目录（[大麦访问层](damai-access.md)的熔断状态就在那里）。漏掉的文件由 `backend/tests/repo_guard.rs` 的 `frontend_tests_run_theflash_only_under_a_temporary_home` 点名。
