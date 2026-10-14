@@ -1,5 +1,7 @@
 # 发布
 
+> 推 tag 发布 macOS 和 Linux 的程序
+
 推一个 `v*` tag，[Release 工作流](../../.github/workflows/release.yml)就为 macOS（Apple 芯片、Intel）和 Linux（x86_64）构建 `theflash` 命令行程序，发布到 GitHub Release。为什么这样设计见 [0006](../decisions/0006-release-cli-binaries.md)；发版要满足的规则和产物清单见 [code-standards 的“发版”](../code-standards.md#发版)。界面现在不发布（#26）。
 
 ## 职责和事实来源

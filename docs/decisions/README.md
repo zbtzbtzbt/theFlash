@@ -39,16 +39,22 @@ theFlash 没有人类架构师，架构由 agent 决定。每个会影响后续�
 
 - 在实现这个决定的同一个改动里写记录。
 - 推翻一条决定时，新记录写清楚旧记录当时不知道的证据，并把旧记录的状态改成“被 NNNN 取代”。旧记录不删。
+- 写完记录跑 `make docs-index` 把下面的索引表重新生成，和记录放在同一个 commit 里。
 - 记录写“为什么”，不复制实现细节；实现细节放在代码和 [subsystems](../subsystems/README.md) 文档里。
 
 ## 记录
 
+下面这张表由 [`scripts/docs_index.py`](../../scripts/docs_index.py) 从本目录的 `NNNN-*.md` 生成，不要手改：写完记录跑 `make docs-index`，`make check` 会验证表和目录一致（[0015](0015-generated-docs-indexes.md)）。标题取自记录的一级标题，状态取自它的 `- 状态：` 那一行。
+
+<!-- docs-index:begin -->
 | 编号 | 标题 | 状态 |
 | --- | --- | --- |
 | [0001](0001-damai-event-data-source.md) | 演出信息从大麦电脑版详情页和它的票档接口获取 | 采用 |
 | [0002](0002-watch-timing-and-polling.md) | 盯票：按大麦时钟定时开售提醒，克制地轮询回流 | 采用 |
 | [0003](0003-tests-cannot-reach-damai.md) | 测试连不上真实大麦，仓库里出现凭据或个人信息时检查失败 | 采用 |
-| [0004](0004-local-event-ui.md) | 本机 TypeScript 服务复用 Rust 查询的浏览器界面 | 采用 |
+| [0004](0004-local-event-ui.md) | 浏览器界面通过本机 TypeScript 服务复用 Rust 查询 | 采用 |
 | [0006](0006-release-cli-binaries.md) | 推 tag 发布三个平台的 theflash 命令行程序，CI 没跑完或不绿就不发 | 采用 |
 | [0009](0009-launchd-validation.md) | Mac 验证由 launchd 托管，结果持久化后评论 issue | 采用 |
-| [0012](0012-phone-push.md) | 可替换的盯票手机推送，先支持 ntfy | 采用 |
+| [0012](0012-phone-push.md) | 盯票提醒通过可替换渠道推送，先支持 ntfy | 采用 |
+| [0015](0015-generated-docs-indexes.md) | docs 的两张索引表由脚本从目录生成，并发 PR 不再碰同一行 | 采用 |
+<!-- docs-index:end -->

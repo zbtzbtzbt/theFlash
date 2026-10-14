@@ -1,5 +1,7 @@
 # launchd 验证任务
 
+> Mac 上独立于终端的定时验证及 issue 摘要
+
 [`scripts/validation.py`](../../scripts/validation.py) 管理 Mac 上一次性验证命令，由用户 LaunchAgent 托管。运行前需 Python 3、已登录的 `gh` 和图形登录会话；Linux 仅支持离线测试。架构和睡眠限制见 [0009](../decisions/0009-launchd-validation.md)。
 
 ## 操作
