@@ -75,9 +75,11 @@ pub fn issue_merged_comment(
     record_url: &str,
     labelled: bool,
 ) -> String {
-    let commits = match merged_sha.filter(|m| !m.is_empty() && *m != reviewed_sha) {
+    let commits = match merged_sha.filter(|m| !m.is_empty()) {
         Some(merged) => format!("合入的提交 `{merged}`，被审查的提交 `{reviewed_sha}`"),
-        None => format!("合入/被审查的提交 `{reviewed_sha}`"),
+        None => format!(
+            "被审查的提交 `{reviewed_sha}`（合入 main 的提交未取到，请用 `gh pr view {pr} --repo {repo} --json mergeCommit` 补查）"
+        ),
     };
     if labelled {
         format!(

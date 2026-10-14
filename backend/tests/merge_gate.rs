@@ -755,4 +755,41 @@ fn label_failure_after_merge_keeps_exit_zero_and_prints_the_manual_command() {
         !calls.contains("已加上 `待验收`") && calls.contains("自动加 `待验收` 标签失败"),
         "加标签失败时 issue 评论不应谎称已加上标签：{calls}"
     );
+    assert!(
+        said.contains("取 PR #19 的合入提交失败")
+            && !calls.contains("合入/被审查的提交")
+            && calls.contains("合入 main 的提交未取到"),
+        "取不到 merge_commit_sha 时必须报错且不把被审查 head 宣称为合入提交：{said}\n{calls}"
+    );
+
+    // Also when GitHub returns `{"merge_commit_sha": null}`, stderr and the
+    // issue comment must report that the merged commit was not obtained.
+    let case_null = Case::ready("handoff-null-sha");
+    let log_null = case_null.state().join("gh.log");
+    support::stub(
+        &case_null.state(),
+        "gh",
+        &format!(
+            "printf '%s\\n' \"$*\" >> '{}'\n\
+             if [ \"$1\" = \"api\" ]; then\n\
+               printf '{{\"merge_commit_sha\":null}}\\n'\n\
+             fi\n",
+            log_null.display()
+        ),
+    );
+    let out_null = support::merge_gate(&case_null.state())
+        .env("PATH", case_null.state().join("bin"))
+        .args(["merge", "--pr", "19", "--replay"])
+        .arg(&case_null.dir)
+        .output()
+        .unwrap();
+    let said_null = self::said(&out_null);
+    let calls_null = std::fs::read_to_string(&log_null).unwrap_or_default();
+    assert_eq!(out_null.status.code(), Some(0), "{said_null}");
+    assert!(
+        said_null.contains("取 PR #19 的合入提交失败")
+            && !calls_null.contains("合入/被审查的提交")
+            && calls_null.contains("合入 main 的提交未取到"),
+        "merge_commit_sha 为 null 时不能把被审查 head 宣称为合入提交：{said_null}\n{calls_null}"
+    );
 }

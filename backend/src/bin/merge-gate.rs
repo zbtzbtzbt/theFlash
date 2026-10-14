@@ -236,7 +236,15 @@ fn hand_off_issues(repo: &str, pr: u64, title: &str, sha: &str, reviewer: &str, 
     if issues.is_empty() {
         return;
     }
-    let merged_sha = snapshot::merged_commit_sha(repo, pr);
+    let merged_sha = match snapshot::merged_commit_sha(repo, pr) {
+        Ok(s) => Some(s),
+        Err(e) => {
+            eprintln!(
+                "取 PR #{pr} 的合入提交失败：{e}；请用 `gh pr view {pr} --repo {repo} --json mergeCommit` 补查"
+            );
+            None
+        }
+    };
     for issue in issues {
         let labelled = match snapshot::hand_off_issue_labels(
             repo,

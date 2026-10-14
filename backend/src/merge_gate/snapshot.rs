@@ -474,14 +474,20 @@ pub fn hand_off_issue_labels(
 
 /// Reads the squash commit SHA GitHub recorded on pull request `number`
 /// after `gh pr merge` completed (#102).
-pub fn merged_commit_sha(repo: &str, number: u64) -> Option<String> {
+pub fn merged_commit_sha(repo: &str, number: u64) -> Result<String, Error> {
     #[derive(Deserialize)]
     struct MergedPull {
         merge_commit_sha: Option<String>,
     }
-    let text = gh_api(&format!("repos/{repo}/pulls/{number}")).ok()?;
-    let p: MergedPull = serde_json::from_str(&text).ok()?;
-    p.merge_commit_sha.filter(|s| !s.trim().is_empty())
+    let text = gh_api(&format!("repos/{repo}/pulls/{number}"))?;
+    let p: MergedPull = from_json("PR 合入提交", &text)?;
+    p.merge_commit_sha
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| Error::Json {
+            what: format!("PR #{number} 的 merge_commit_sha"),
+            why: "为空或 null".to_string(),
+        })
 }
 
 /// Posts `body` as a comment on `issue` after its pull request merges (#102).
