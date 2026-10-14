@@ -348,6 +348,49 @@ class WorkerAcceptance(unittest.TestCase):
         self.assertEqual(len(fake.starts), 1)
         self.assertEqual(len(fake.posts), 1)
 
+    def assert_pending_result_survives_next_run(self, fake, status, reason, exit_code):
+        fake.fail_posts = True
+        v.run_task(self.job, fake)
+        original = v.load(self.job)
+        self.assertEqual(original['status'], status)
+        self.assertEqual(original['reason'], reason)
+        self.assertEqual(original['exit_code'], exit_code)
+        self.assertEqual(original['delivery'], 'pending')
+        self.assertTrue(original['key_output'])
+        summary = (self.job / 'summary.md').read_text()
+        log = (self.job / 'output.log').read_bytes()
+
+        # Simulate the next launchd invocation after GitHub recovers, using
+        # persisted backoff and a fresh runner rather than wall-clock waits.
+        retry = Fake(now=original['next_delivery'])
+        v.run_task(self.job, retry)
+        delivered = v.load(self.job)
+        for field in ['status', 'reason', 'started', 'ended', 'exit_code', 'key_output']:
+            with self.subTest(field=field):
+                self.assertEqual(delivered[field], original[field],
+                                 '补发不得改写已经结束的任务结果')
+        self.assertEqual(delivered['delivery'], 'posted')
+        self.assertEqual(retry.posts, [(original['issue'], summary)])
+        self.assertEqual((self.job / 'output.log').read_bytes(), log)
+        self.assertEqual(retry.starts, [])
+        self.assertEqual(retry.signals, [])
+        self.assertIsNone(retry.inhibitor)
+        self.assertEqual(retry.sleeps, 0)
+
+        # Later minute ticks must neither alter the result nor post it twice.
+        v.run_task(self.job, retry)
+        self.assertEqual(v.load(self.job), delivered)
+        self.assertEqual(retry.posts, [(original['issue'], summary)])
+
+    def test_finished_pending_result_is_preserved_when_launchd_runs_again(self):
+        fake = Fake(now=400, child=Child(b'watch ready\nall normal\n', code=7))
+        self.assert_pending_result_survives_next_run(fake, 'finished', '程序自行退出', 7)
+
+    def test_cancelled_pending_result_is_preserved_when_launchd_runs_again(self):
+        fake = Fake(now=400)
+        fake.on_sleep = lambda: (self.job / 'cancel').touch()
+        self.assert_pending_result_survives_next_run(fake, 'cancelled', '取消', 0)
+
     def test_interrupted_runner_is_reported_without_replaying_real_command(self):
         task = v.load(self.job)
         task['status'] = 'running'
