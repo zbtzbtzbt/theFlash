@@ -82,6 +82,13 @@ theflash watch "https://detail.damai.cn/item.htm?id=1086791513717" --session 10-
 
 手机提醒可用 ntfy；topic 和可选 token 只放在权限 0600 的用户配置文件中。配置步骤见 [手机提醒](docs/subsystems/phone-push.md)，不配置时盯票行为保持原样。
 
+```sh
+./target/release/theflash risk                # 看有没有风控熔断
+./target/release/theflash risk resume --yes   # owner 看过之后解除
+```
+
+所有访问大麦的请求都经过同一层：同一个进程里的请求至少隔 300 毫秒；任何一个 theFlash 进程（命令行或浏览器界面）收到滑块验证页，熔断就记在用户状态目录里，其他进程的下一个请求也不会发出。熔断不会自己过期，只能在确认 owner 看过这次风控之后显式解除。细节见 [docs/subsystems/damai-access.md](docs/subsystems/damai-access.md)。
+
 ## 在浏览器里查询演出
 
 安装根目录指定版本的 Node.js 和 Rust 后，在仓库根目录运行：
@@ -90,7 +97,7 @@ theflash watch "https://detail.damai.cn/item.htm?id=1086791513717" --session 10-
 make serve
 ```
 
-终端会打印一个 `http://127.0.0.1:<端口>` 地址，用 Chrome 或 Safari 打开。粘贴大麦演出链接或 ID，即可查看演出信息、所有场次及票档。只允许本机访问，只查询、不登录、不下单；查询中会显示加载状态，遇到风控就停止，不自动重试。按 Ctrl+C 停止服务。
+终端会打印一个 `http://127.0.0.1:<端口>` 地址，用 Chrome 或 Safari 打开。粘贴大麦演出链接或 ID，即可查看演出信息、所有场次及票档。只允许本机访问，只查询、不登录、不下单；查询中会显示加载状态，遇到风控就停止，不自动重试，并和命令行共用同一个熔断（见上）。按 Ctrl+C 停止服务。
 
 命令行查询照常使用：`cd backend && cargo run -- event "<链接或ID>"`。界面和 CLI 共用 Rust 查询及显示规则，详见 [本地界面设计](docs/subsystems/event-ui.md)。
 

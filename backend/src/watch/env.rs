@@ -11,8 +11,9 @@ use super::push::PhonePush;
 use super::target::session_matches;
 use crate::damai::{Client, Error, Event};
 
+/// Readings whose round trips fall at different points of damai.cn's
+/// second; the access gate's rate limit spaces them (0002, 0005).
 const CLOCK_READINGS: usize = 5;
-const CLOCK_READING_GAP: Duration = Duration::from_millis(250);
 
 pub(crate) trait Env {
     /// ms on a monotonic clock: what every schedule is computed on.
@@ -129,10 +130,7 @@ impl Env for RealEnv<'_> {
 
     async fn clock_samples(&mut self) -> Result<Vec<Sample>, Error> {
         let mut samples = Vec::with_capacity(CLOCK_READINGS);
-        for i in 0..CLOCK_READINGS {
-            if i > 0 {
-                tokio::time::sleep(CLOCK_READING_GAP).await;
-            }
+        for _ in 0..CLOCK_READINGS {
             let r = self.client.clock_reading(self.item_id).await?;
             samples.push(Sample {
                 sent: self.mono(r.sent),

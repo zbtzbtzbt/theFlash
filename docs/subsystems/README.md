@@ -8,6 +8,7 @@
 | 子系统 | 参考 |
 | --- | --- |
 | 谁在做哪个 issue、改哪些模块、认领什么时候过期 | [认领租约](claim-lease.md) |
+| 所有大麦请求的频率上限和跨进程风控熔断 | [大麦访问层：频率上限和跨进程风控熔断](damai-access.md) |
 | 从大麦读演出的场次、票档和售卖状态 | [大麦演出信息查询](damai-event.md) |
 | 大麦改了程序依赖的字段或状态码时，巡检第一时间报出来并开 issue | [大麦改版巡检](damai-inspect.md) |
 | 按大麦时钟提醒开售、轮询回流 | [盯票：开售提醒和回流提醒](damai-watch.md) |
@@ -19,6 +20,12 @@
 <!-- docs-index:end -->
 | 发现大麦改了页面或接口的结构 | [大麦改版巡检](damai-inspect.md) |
 | 谁在做哪个 issue、改哪些模块、认领什么时候过期 | [认领租约](claim-lease.md) |
+| 按大麦时钟提醒开售、轮询回流 | [盯票](damai-watch.md) |
+| 浏览器中的本机演出查询 | [本地演出查询界面](event-ui.md) |
+| 所有大麦请求的频率上限和跨进程风控熔断 | [大麦访问层](damai-access.md) |
+| 推 tag 发布 macOS 和 Linux 的程序 | [发布](release.md) |
+| Mac 上独立于终端的定时验证及 issue 摘要 | [验证任务](validation.md) |
+| 把盯票提醒推到手机 | [手机提醒（ntfy）](phone-push.md) |
 
 ## 维护参考文档
 

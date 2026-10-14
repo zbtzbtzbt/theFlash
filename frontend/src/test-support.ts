@@ -1,7 +1,9 @@
 // Local replay of the original bytes captured for #1. No live damai requests.
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const dir = new URL("../../backend/testdata/damai/", import.meta.url);
 const routes: Record<string, string> = {
@@ -51,6 +53,29 @@ export function replay(
 }
 export function address(server: Server): string {
   return `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+}
+// A HOME of this test's own, because the Rust query keeps the risk-control
+// breaker in the user's state directory (backend/src/damai/access.rs). A
+// test that tripped it in the real HOME would stop the owner's own
+// theflash. Returns the state directory and how to clean up.
+export function tempHome(): { home: string; stateDir: string; remove: () => void } {
+  const home = mkdtempSync(join(tmpdir(), "theflash-ui-home-"));
+  const previous = { HOME: process.env.HOME, XDG_STATE_HOME: process.env.XDG_STATE_HOME };
+  process.env.HOME = home;
+  delete process.env.XDG_STATE_HOME;
+  return {
+    home,
+    stateDir:
+      process.platform === "darwin"
+        ? join(home, "Library/Application Support/theFlash")
+        : join(home, ".local/state/theflash"),
+    remove: () => {
+      process.env.HOME = previous.HOME;
+      if (previous.XDG_STATE_HOME !== undefined)
+        process.env.XDG_STATE_HOME = previous.XDG_STATE_HOME;
+      rmSync(home, { recursive: true, force: true });
+    },
+  };
 }
 export async function close(server: Server): Promise<void> {
   server.closeAllConnections();

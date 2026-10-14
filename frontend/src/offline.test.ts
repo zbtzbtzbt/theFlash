@@ -3,13 +3,11 @@
 // called offline(): vitest.config.ts puts every run behind the tripwire
 // (the frontend side of decision 0003, #34).
 import { execFile } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
 import { get } from "node:https";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, it } from "vitest";
 import { loadEvent } from "./query.js";
+import { tempHome } from "./test-support.js";
 
 const probing = process.env.THEFLASH_OFFLINE_PROBE === "1";
 
@@ -37,6 +35,7 @@ it.skipIf(probing)(
   async () => {
     // Only the probe run's own setup may catch it, not this run's tripwire
     // or the dead proxy of make check.
+    const home = tempHome();
     const env: NodeJS.ProcessEnv = { ...process.env, THEFLASH_OFFLINE_PROBE: "1" };
     for (const key of [
       "HTTP_PROXY",
@@ -50,11 +49,6 @@ it.skipIf(probing)(
       "NODE_USE_ENV_PROXY",
     ])
       delete env[key];
-    // A HOME of its own, so nothing the probe run starts reads or writes
-    // the real one.
-    const home = mkdtempSync(join(tmpdir(), "theflash-offline-probe-"));
-    env.HOME = home;
-    delete env.XDG_STATE_HOME;
     const vitest = fileURLToPath(new URL("../node_modules/vitest/vitest.mjs", import.meta.url));
     const run = await new Promise<{ code: number; output: string }>((resolve) => {
       execFile(
@@ -67,7 +61,7 @@ it.skipIf(probing)(
             output: `${stdout}${stderr}`,
           }),
       );
-    }).finally(() => rmSync(home, { recursive: true, force: true }));
+    }).finally(home.remove);
     expect(run.code, `忘了 fixture 服务器的测试没有让运行失败：\n${run.output}`).toBe(1);
     expect(run.output).toContain("测试试图访问真实大麦");
     // What the tripwire saw from theflash, fetch and node:https.

@@ -1,9 +1,10 @@
-use std::sync::Mutex;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::DateTime;
 
 use super::Error;
+use super::access::{Gate, risk_control_marker};
 use super::event::{Event, Session, Tier, sale_state, tier_status};
 use super::page::parse_item_page;
 use super::sku::{parse_sku_jsonp, session_mismatch, tier_url};
@@ -17,11 +18,6 @@ pub const DEFAULT_HOME_URL: &str = "https://www.damai.cn";
 
 const USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36";
 
-/// Between two tier requests. A calendar event has a session a day (18 on
-/// 1084537866279), and damai.cn's search answered its first request with a
-/// slider challenge, so a query paces itself.
-const TIER_REQUEST_GAP: Duration = Duration::from_millis(300);
-
 #[derive(Debug, Clone, Copy)]
 pub struct ClockReading {
     pub sent: Instant,
@@ -30,26 +26,25 @@ pub struct ClockReading {
     pub date_ms: i64,
 }
 
-/// Reads events from damai.cn without signing in. Requests go one at a time:
-/// a query has no reason to burst at damai.cn.
+/// Reads events from damai.cn without signing in. Requests go one at a time
+/// and through `gate`, which is the only way out: a query has no reason to
+/// burst at damai.cn, and risk control stops every theFlash process.
 pub struct Client {
     http: reqwest::Client,
     base: String,
-    request_gap: Duration,
-    next_request: Mutex<Option<Instant>>,
     home: String,
+    gate: Arc<Gate>,
 }
 
 impl Client {
-    /// `base` is DEFAULT_BASE_URL outside tests.
+    /// `base` is DEFAULT_BASE_URL outside tests. Fails when this user's
+    /// state directory, which holds the risk-control breaker, cannot be
+    /// used: theFlash does not request damai.cn without it.
     pub fn new(base: impl Into<String>) -> Result<Self, Error> {
-        // Opt-in conservative pacing for unattended validation (#17).
-        // The default and cross-process policy remain owned by #4.
-        let request_gap = match std::env::var("THEFLASH_REQUEST_GAP_MS") {
-            Ok(value) => validation_gap(&value)?,
-            Err(std::env::VarError::NotPresent) => Duration::ZERO,
-            Err(_) => return Err(Error::InvalidInput("THEFLASH_REQUEST_GAP_MS 无效".into())),
-        };
+        Client::with_gate(base, Arc::new(Gate::for_user()?))
+    }
+
+    pub fn with_gate(base: impl Into<String>, gate: Arc<Gate>) -> Result<Self, Error> {
         let http = reqwest::Client::builder()
             .user_agent(USER_AGENT)
             .connect_timeout(Duration::from_secs(10))
@@ -59,9 +54,8 @@ impl Client {
         Ok(Client {
             http,
             base: base.into().trim_end_matches('/').to_string(),
-            request_gap,
-            next_request: Mutex::new(None),
             home: DEFAULT_HOME_URL.to_string(),
+            gate,
         })
     }
 
@@ -124,10 +118,7 @@ impl Client {
             .filter(|p| keep(p.name.as_deref()))
             .collect();
         let mut sessions = Vec::with_capacity(kept.len());
-        for (i, perform) in kept.into_iter().enumerate() {
-            if i > 0 {
-                tokio::time::sleep(TIER_REQUEST_GAP).await;
-            }
+        for perform in kept {
             let url = tier_url(&self.base, item_id, perform.id);
             let tiers = match self.get(&url, Some(&page_url)).await {
                 Ok(body) => match parse_sku_jsonp(&body) {
@@ -151,7 +142,10 @@ impl Client {
                     },
                     Err(reason) => Err(format!("看不懂票档数据：{reason}")),
                 },
-                Err(e @ Error::RiskControl(_)) => return Err(e),
+                // Risk control, or not knowing whether it is in effect,
+                // stops the whole query instead of being reported as this
+                // one session's failure.
+                Err(e) if e.stops_damai_access() => return Err(e),
                 Err(e) => Err(e.to_string()),
             };
             sessions.push(Session {
@@ -181,12 +175,14 @@ impl Client {
             url: url.clone(),
             reason: chain(&e),
         };
-        self.pace().await;
+        self.gate.enter().await?;
         let sent = Instant::now();
         let resp = self.http.head(&url).send().await.map_err(network)?;
         let received = Instant::now();
-        if is_risk_control(resp.url().as_str()) {
-            return Err(Error::RiskControl(url));
+        // A slider challenge answers a HEAD with a redirect to its own URL,
+        // so the marker is in the URL rather than a body.
+        if let Some(marker) = risk_control_marker(resp.url().as_str()) {
+            return Err(self.gate.trip(&url, marker));
         }
         if !resp.status().is_success() {
             return Err(Error::Http {
@@ -216,7 +212,6 @@ impl Client {
     }
 
     async fn get(&self, url: &str, referer: Option<&str>) -> Result<String, Error> {
-        self.pace().await;
         let mut req = self.http.get(url);
         if let Some(r) = referer {
             req = req.header(reqwest::header::REFERER, r);
@@ -225,11 +220,12 @@ impl Client {
             url: url.to_string(),
             reason: chain(&e),
         };
+        self.gate.enter().await?;
         let resp = req.send().await.map_err(network)?;
         let status = resp.status();
         let body = resp.text().await.map_err(network)?;
-        if is_risk_control(&body) {
-            return Err(Error::RiskControl(url.to_string()));
+        if let Some(marker) = risk_control_marker(&body) {
+            return Err(self.gate.trip(url, marker));
         }
         if !status.is_success() {
             return Err(Error::Http {
@@ -239,42 +235,6 @@ impl Client {
         }
         Ok(body)
     }
-
-    async fn pace(&self) {
-        if self.request_gap.is_zero() {
-            return;
-        }
-        let delay = reserve_request(
-            &mut self.next_request.lock().unwrap_or_else(|p| p.into_inner()),
-            Instant::now(),
-            self.request_gap,
-        );
-        tokio::time::sleep(delay).await;
-    }
-}
-
-fn reserve_request(next: &mut Option<Instant>, now: Instant, gap: Duration) -> Duration {
-    let target = next.unwrap_or(now).max(now);
-    *next = target.checked_add(gap);
-    target.duration_since(now)
-}
-
-fn validation_gap(value: &str) -> Result<Duration, Error> {
-    // Reject unrepresentable/accidentally enormous deadlines instead of
-    // overflowing the reservation and silently losing the requested pacing.
-    value
-        .parse::<u64>()
-        .ok()
-        .filter(|ms| *ms <= 86_400_000)
-        .map(Duration::from_millis)
-        .ok_or_else(|| {
-            Error::InvalidInput("THEFLASH_REQUEST_GAP_MS 必须是 0 到 86400000 毫秒".into())
-        })
-}
-
-/// damai.cn's slider challenge, served in place of the page asked for.
-fn is_risk_control(body: &str) -> bool {
-    body.contains("_____tmd_____") || body.contains("x5secdata")
 }
 
 /// The error with every cause under it, which is where reqwest says what
@@ -354,33 +314,6 @@ pub fn parse_item_id(input: &str) -> Result<u64, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn validation_requests_reserve_two_second_slots_with_injected_time() {
-        let now = Instant::now();
-        let gap = Duration::from_secs(2);
-        let mut next = None;
-        assert_eq!(reserve_request(&mut next, now, gap), Duration::ZERO);
-        assert_eq!(reserve_request(&mut next, now, gap), gap);
-        assert_eq!(reserve_request(&mut next, now, gap), gap * 2);
-        assert_eq!(
-            reserve_request(&mut next, now + gap * 10, gap),
-            Duration::ZERO
-        );
-    }
-
-    #[test]
-    fn validation_gap_rejects_invalid_and_overflowing_deadlines() {
-        assert_eq!(validation_gap("0").unwrap(), Duration::ZERO);
-        assert_eq!(validation_gap("2000").unwrap(), Duration::from_secs(2));
-        assert_eq!(
-            validation_gap("86400000").unwrap(),
-            Duration::from_secs(86400)
-        );
-        for value in ["-1", "bad", "86400001", "18446744073709551615"] {
-            assert!(validation_gap(value).is_err());
-        }
-    }
 
     #[test]
     fn item_id_from_links_and_bare_ids() {
@@ -470,23 +403,6 @@ mod tests {
                 matches!(parse_item_id(input), Err(Error::InvalidInput(_))),
                 "{input}"
             );
-        }
-    }
-
-    #[test]
-    fn slider_challenge_is_recognised_and_normal_pages_are_not() {
-        let dir = format!("{}/testdata/damai", env!("CARGO_MANIFEST_DIR"));
-        let read = |n: &str| std::fs::read_to_string(format!("{dir}/{n}")).unwrap();
-        assert!(is_risk_control(&read("risk_control.html")));
-        for name in [
-            "item_on_sale.html",
-            "item_not_yet_on_sale.html",
-            "item_sold_out.html",
-            "item_pc_unsupported.html",
-            "item_not_found.html",
-            "sku_on_sale_286937790.jsonp",
-        ] {
-            assert!(!is_risk_control(&read(name)), "{name}");
         }
     }
 }

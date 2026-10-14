@@ -1,24 +1,29 @@
 import { execFile } from "node:child_process";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { request as rawRequest, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
+import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { EventError } from "./protocol.js";
 import { loadEvent } from "./query.js";
 import { startServer } from "./server.js";
-import { address, close, offline, replay } from "./test-support.js";
+import { address, close, offline, replay, tempHome } from "./test-support.js";
 
 const servers: Server[] = [];
 let guard: Awaited<ReturnType<typeof offline>>;
 let mock: Awaited<ReturnType<typeof replay>>;
+let home: ReturnType<typeof tempHome>;
 beforeEach(async () => {
   guard = await offline();
   mock = await replay();
+  home = tempHome();
   process.env.THEFLASH_DAMAI_BASE_URL = mock.base;
   servers.push(mock.server, guard.server);
 });
 afterEach(async () => {
   for (const s of servers.splice(0)) await close(s);
+  home.remove();
   expect(guard.hits, "测试试图访问真实大麦：fixture 上游未设置").toHaveLength(0);
 });
 async function ui(query?: Parameters<typeof startServer>[0]) {
@@ -115,7 +120,10 @@ it("reports network failure instead of crashing", async () => {
   expect(response.status).toBe(502);
   expect((await response.json()).error.message).toContain("网络请求失败");
 });
-it("a risk fixture stops the whole service, including future tabs, with no retry", async () => {
+// The breaker belongs to the machine, not to this service: a restarted
+// service, another tab and `theflash watch` all stop until the owner has
+// seen the risk control and cleared it (#4).
+it("a risk fixture stops every later query, in this service and a restarted one, with no retry", async () => {
   const risk = await replay(true);
   servers.push(risk.server);
   process.env.THEFLASH_DAMAI_BASE_URL = risk.base;
@@ -123,10 +131,33 @@ it("a risk fixture stops the whole service, including future tabs, with no retry
   const first = await request(base);
   expect(first.status).toBe(403);
   expect((await first.json()).error.code).toBe("risk-control");
+  expect(existsSync(join(home.stateDir, "risk-stop.json"))).toBe(true);
+
   const second = await request(base);
   expect(second.status).toBe(403);
-  expect((await second.json()).error.message).toContain("没有重试");
+  const stopped = await second.json();
+  expect(stopped.error.code).toBe("risk-stopped");
+  expect(stopped.error.message).toContain("theflash risk resume --yes");
+
+  // A new service, standing in for a restart: the stop is not in its memory.
+  process.env.THEFLASH_DAMAI_BASE_URL = mock.base;
+  const restarted = await ui();
+  const third = await request(restarted.base);
+  expect(third.status).toBe(403);
+  expect((await third.json()).error.code).toBe("risk-stopped");
   expect(risk.hits).toHaveLength(1);
+  expect(mock.hits).toHaveLength(0);
+});
+it("a breaker the backend cannot read stops queries instead of being ignored", async () => {
+  mkdirSync(home.stateDir, { recursive: true });
+  writeFileSync(join(home.stateDir, "risk-stop.json"), "{");
+  const { base } = await ui();
+  const response = await request(base);
+  expect(response.status).toBe(500);
+  const { error } = await response.json();
+  expect(error.code).toBe("risk-state");
+  expect(error.message).toContain("已停止");
+  expect(mock.hits).toHaveLength(0);
 });
 it("a second tab cannot overlap a query, and disconnect cancels its query", async () => {
   let started: () => void = () => {};

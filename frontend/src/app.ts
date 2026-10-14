@@ -50,7 +50,10 @@ export function mount(root: HTMLElement, fetcher: typeof fetch = fetch): void {
       });
       const data: EventView | { error: QueryError } = await response.json();
       if ("error" in data) {
-        stopped = data.error.code === "risk-control";
+        // risk-control: this query ran into it. risk-stopped: an earlier
+        // one did, in any theFlash process, and the breaker in the user's
+        // state directory is still in effect. Either way nothing retries.
+        stopped = data.error.code === "risk-control" || data.error.code === "risk-stopped";
         showError(data.error.message, stopped);
       } else if (!response.ok) {
         showError("查询服务暂时不可用，请稍后手动查询。", false);
@@ -79,7 +82,9 @@ export function mount(root: HTMLElement, fetcher: typeof fetch = fetch): void {
     error.append(title, detail);
     if (risk) {
       const note = doc.createElement("p");
-      note.textContent = "没有重试。请向项目 owner 报告，由 owner 决定下一步。";
+      note.textContent =
+        "没有重试。所有 theFlash 进程都已停止请求大麦，包括命令行的盯票。请向项目 owner 报告，由 owner 决定下一步；" +
+        "owner 看过之后，在终端运行 theflash risk resume --yes 解除，再刷新这个页面。";
       error.append(note);
     }
   }

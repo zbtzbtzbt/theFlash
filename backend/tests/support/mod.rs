@@ -5,6 +5,7 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -91,6 +92,15 @@ impl MockDamai {
     pub fn gaps(&self) -> Vec<std::time::Duration> {
         let hits = self.hits.lock().unwrap();
         hits.windows(2).map(|w| w[1].1 - w[0].1).collect()
+    }
+
+    /// ms between the arrivals of each two requests in a row, for checking
+    /// that the caller paced itself.
+    pub fn arrival_gaps_ms(&self) -> Vec<i64> {
+        self.timed_hits()
+            .windows(2)
+            .map(|w| w[1].1.saturating_duration_since(w[0].1).as_millis() as i64)
+            .collect()
     }
 }
 
@@ -203,20 +213,89 @@ pub fn output_within(mut cmd: Command, secs: u64) -> std::process::Output {
     }
 }
 
-/// The theflash binary with its damai.cn requests sent to `base_url`, and
-/// every request that is not for this machine caught by `offline`.
+/// The theflash binary with its damai.cn requests sent to `base_url`,
+/// every request that is not for this machine caught by `offline`, and a
+/// HOME of this test binary's own, so nothing reads or writes the real
+/// user's state directory.
 pub fn theflash(base_url: &str) -> Command {
+    at_home(base_url, shared_home())
+}
+
+fn at_home(base_url: &str, home: &Path) -> Command {
     let mut c = Command::new(env!("CARGO_BIN_EXE_theflash"));
     c.env("THEFLASH_DAMAI_BASE_URL", base_url);
     offline(&mut c);
+    // offline() already points HOME at the shared test directory; this
+    // test wants one of its own.
+    c.env("HOME", home);
     c
 }
 
-/// Makes `cmd` unable to reach the real damai.cn: its proxies become a
-/// tripwire, and only this machine's addresses skip the proxy. A test that
-/// forgets THEFLASH_DAMAI_BASE_URL sends its request to the tripwire, which
-/// ends the test process with a message saying so. Every test that starts
-/// the binary goes through here (tests/repo_guard.rs checks that).
+/// One directory for every test in this binary that does not touch the
+/// risk-control breaker. Emptied when the binary first uses it.
+fn shared_home() -> &'static Path {
+    static DIR: OnceLock<PathBuf> = OnceLock::new();
+    DIR.get_or_init(|| {
+        let dir = std::env::temp_dir().join(format!("theflash-test-home-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    })
+}
+
+/// A HOME of one test's own, removed when the test ends. A test that trips
+/// the risk-control breaker needs one: the breaker stops every process
+/// that shares a HOME, which would stop other tests' queries too.
+pub struct Home(PathBuf);
+
+impl Home {
+    pub fn new(name: &str) -> Home {
+        let dir =
+            std::env::temp_dir().join(format!("theflash-test-home-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        Home(dir)
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.0
+    }
+
+    /// `support::theflash`, with this directory as HOME.
+    pub fn theflash(&self, base_url: &str) -> Command {
+        at_home(base_url, &self.0)
+    }
+
+    /// Where theFlash keeps its state on this platform, spelled out here so
+    /// a test fails if the directory moves. macOS and Linux differ.
+    pub fn state_dir(&self) -> PathBuf {
+        if cfg!(target_os = "macos") {
+            self.0.join("Library/Application Support/theFlash")
+        } else {
+            self.0.join(".local/state/theflash")
+        }
+    }
+
+    pub fn risk_stop_file(&self) -> PathBuf {
+        self.state_dir().join("risk-stop.json")
+    }
+}
+
+impl Drop for Home {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Makes `cmd` unable to reach the real damai.cn or the real user's files:
+/// its proxies become a tripwire, and only this machine's addresses skip
+/// the proxy. A test that forgets THEFLASH_DAMAI_BASE_URL sends its request
+/// to the tripwire, which ends the test process with a message saying so.
+/// HOME points at a test directory, because theflash keeps the
+/// risk-control breaker under HOME (under XDG_STATE_HOME on Linux when it
+/// is set) and a test must not read or write the user's own. Every test
+/// that starts the binary goes through here (tests/repo_guard.rs checks
+/// that), so both guarantees hold for all of them.
 pub fn offline(cmd: &mut Command) {
     let proxy = tripwire();
     for v in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"] {
@@ -225,6 +304,8 @@ pub fn offline(cmd: &mut Command) {
     }
     cmd.env("NO_PROXY", "127.0.0.1,localhost,::1");
     cmd.env("no_proxy", "127.0.0.1,localhost,::1");
+    cmd.env("HOME", shared_home());
+    cmd.env_remove("XDG_STATE_HOME");
 }
 
 /// The merge-gate binary with nothing to reach GitHub with: `gh` is gone

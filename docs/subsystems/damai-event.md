@@ -14,8 +14,9 @@
 
 1. [`parse_item_id`](../../backend/src/damai/client.rs)：从输入里取演出 ID。支持 HTTP/HTTPS 的 `detail.damai.cn/item.htm?id=`、`m.damai.cn/damai/detail/item.html?itemId=`，以及纯数字。链接先校验协议、主机、详情页路径，拒绝带用户信息、非默认端口或重复 ID 参数的链接；参数按 URL 规则解码。无效输入退出码为 2，不发任何请求。
 2. [`Client::event`](../../backend/src/damai/client.rs)：请求 `https://detail.damai.cn/item.htm?id=<ID>`，交给 [`parse_item_page`](../../backend/src/damai/page.rs) 解析。
-3. 对每个场次，按时间顺序依次请求票档接口 [`tier_url`](../../backend/src/damai/sku.rs)，相邻两次请求之间间隔 300 毫秒（`TIER_REQUEST_GAP`），再由 [`parse_sku_jsonp`](../../backend/src/damai/sku.rs) 解析。
-4. [`report::render`](../../backend/src/report.rs) 输出文本。大麦没给的值显示“未知”。
+3. 对每个场次，按时间顺序依次请求票档接口 [`tier_url`](../../backend/src/damai/sku.rs)，再由 [`parse_sku_jsonp`](../../backend/src/damai/sku.rs) 解析。
+4. 每个请求（包括第 2 步的详情页）发出前都经过 [大麦访问层](damai-access.md)：排队等到本进程的下一个时隙（最小间隔 300 毫秒），并检查跨进程的风控熔断。
+5. [`report::render`](../../backend/src/report.rs) 输出文本。大麦没给的值显示“未知”。
 
 ## 数据从哪里来
 
@@ -76,7 +77,9 @@
 | 其他原因建不起 HTTP 客户端 | 没法创建 HTTP 客户端、没有发出任何请求，附上底层原因 | 1 |
 | 演出不存在（页面 200，但没有 `dataDefault`） | 演出不存在或已下架 | 1 |
 | 网络失败 | 网络请求失败，附上底层原因 | 1 |
-| 任一响应是滑块验证页（含 `_____tmd_____` 或 `x5secdata`） | 触发风控，已停止，没有重试 | 1 |
+| 任一响应是滑块验证页（含 `_____tmd_____` 或 `x5secdata`） | 触发风控，已停止，没有重试；熔断写进用户状态目录，其他进程也停（[大麦访问层](damai-access.md)） | 1 |
+| 本机已有风控熔断 | 请求不发出，提示熔断生效和怎么解除 | 1 |
+| 熔断状态文件损坏，或状态目录不可写 | 请求不发出，提示读不到熔断状态、已停止，并给出路径 | 1 |
 | 某个场次的票档请求失败或看不懂 | 这一场显示“票档：获取失败（原因）”，其他场次照常 | 0 |
 | 详情页的 JSON 坏了 | 看不懂大麦返回的演出详情页 | 1 |
 

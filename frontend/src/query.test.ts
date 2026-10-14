@@ -1,13 +1,10 @@
 import { type ChildProcess, execFile } from "node:child_process";
 import { once } from "node:events";
-import { mkdtempSync, rmSync } from "node:fs";
 import type { Server } from "node:http";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { expect, it, vi } from "vitest";
 import { loadEvent } from "./query.js";
 import { startServer } from "./server.js";
-import { address, close, offline, replay } from "./test-support.js";
+import { address, close, offline, replay, tempHome } from "./test-support.js";
 
 // Observe real execFile results. No fake child, cancellation or query function.
 vi.mock("node:child_process", async (importOriginal) => {
@@ -19,9 +16,7 @@ it.each(["loadEvent abort", "browser disconnect"])(
   "%s exits the real Rust child and leaves no further fixture requests",
   async (path) => {
     const savedEnv = { ...process.env };
-    const home = mkdtempSync(join(tmpdir(), "theflash-query-test-"));
-    process.env.HOME = home;
-    process.env.XDG_STATE_HOME = join(home, "state");
+    const home = tempHome();
     const servers: Server[] = [];
     const controller = new AbortController();
     let child: ChildProcess | undefined;
@@ -102,7 +97,7 @@ it.each(["loadEvent abort", "browser disconnect"])(
         if (!(key in savedEnv)) delete process.env[key];
       }
       Object.assign(process.env, savedEnv);
-      rmSync(home, { recursive: true, force: true });
+      home.remove();
     }
   },
   15000,

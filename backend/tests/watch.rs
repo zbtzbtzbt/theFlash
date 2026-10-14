@@ -190,10 +190,13 @@ fn a_filter_matching_nothing_lists_what_there_is() {
 
 #[test]
 fn risk_control_stops_the_watch_with_an_alert() {
+    // Its own HOME: the breaker this trips would stop the other tests'
+    // queries. tests/access.rs checks that it does stop other processes.
+    let home = support::Home::new("watch-risk");
     let damai = MockDamai::start(&[("/item.htm?id=1086791513717", "risk_control.html")]);
     let out = support::output_within(
         {
-            let mut c = support::theflash(&damai.base_url());
+            let mut c = home.theflash(&damai.base_url());
             c.args(["watch", "1086791513717", "--no-system-notify"]);
             c
         },
