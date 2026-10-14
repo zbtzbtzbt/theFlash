@@ -64,6 +64,7 @@ theFlash 所有访问大麦的请求都从这一层出去：先排队等到本�
 | 状态文件内容不是它该有的样子（空、截断、缺字段） | 请求不发出，报告读不到熔断状态、已停止，并给出文件路径 |
 | 风控发生但熔断写不进去 | 本进程照样停止，并明确说“别的 theFlash 进程不会自动停下，请手动停掉并报告 owner” |
 | `HOME` 没设置 | 停下并说明，不猜测状态目录 |
+| `THEFLASH_REQUEST_GAP_MS` 无效（不是整数、超出范围或非 UTF-8） | `Gate::for_user` 返回 `InvalidConfig`，退出码 1，不发请求；`event`、`event-json`、`watch`、`risk`（含两个 `resume` 用法）的提示相同 |
 
 ## 频率上限的范围
 
@@ -71,9 +72,12 @@ theFlash 所有访问大麦的请求都从这一层出去：先排队等到本�
 - **跨进程不共用**：两个进程各自按自己的上限发请求，合起来会更多。这是 [0005](../decisions/0005-damai-access-gate.md) 权衡后的选择（热路径上不做文件锁，不引入“持锁进程崩溃卡住所有查询”的故障），跨进程的安全网是熔断。改这一点要写新的决定记录。
 - **`THEFLASH_REQUEST_GAP_MS` 把这个间隔调大**：无人值守验证（[0009](../decisions/0009-launchd-validation.md)、[验证](validation.md)）用它要一个更保守的间隔，单位毫秒，范围 0–86400000，不是这个范围里的整数就直接失败。它设置的就是这一层的间隔，所以覆盖每一个请求。取的是它和 300 毫秒里较大的那个：只能让请求更慢，设成 0 也不会比共用的上限更快。
 
+未设置时沿用默认间隔，合法范围含 0 和 86400000 两端。配置错误统一提示“环境变量 THEFLASH_REQUEST_GAP_MS 的值无效：必须是 0 到 86400000 毫秒的整数（含两端）”，不回显无效值，不当作演出链接错误。格式、范围和非 UTF-8 的校验都在本访问层的 `request_gap` / `gap_from` 完成。
+
 ## 验证
 
 - `make check`。
+- `cd backend && cargo test --test cli invalid_request_gap_configuration`：四个入口覆盖错误类型、提示、退出码和零请求，`risk` 同时覆盖查看、`resume`、`resume --yes`；`event-json` 的错误码见[查询失败契约](damai-event.md#失败时的行为)。
 - [`backend/src/damai/access.rs`](../../backend/src/damai/access.rs) 的单元测试：两个平台的状态目录位置（包括 `XDG_STATE_HOME` 不是绝对路径时忽略）、用注入的虚拟时钟检查并发调用方共用一个频率上限、`THEFLASH_REQUEST_GAP_MS` 只能把间隔调大且无效值被拒、一个客户端写的熔断挡住另一个客户端、损坏的状态文件不被当成“没有熔断”、状态目录建不了时停下、风控标记识别（只用 `testdata/damai/risk_control.html` 回放）。
 - [`backend/tests/access.rs`](../../backend/tests/access.rs)：两个独立的 `theflash` 进程共用一个临时 HOME，一个收到回放的风控页后，另一个（以及 `watch` 和界面用的 `event-json`）的下一次请求不发出；`theflash risk` / `resume` / `resume --yes` 的行为；状态文件损坏和目录不可写时停止并说明原因；一次查询的 4 个请求确实被频率上限隔开。
 - [`frontend/src/server.test.ts`](../../frontend/src/server.test.ts)：界面在熔断生效时返回 `risk-stopped`，重启服务也一样；状态文件损坏时返回 `risk-state`。测试都在临时 HOME 下跑，不碰真实状态目录，也不访问真实大麦。

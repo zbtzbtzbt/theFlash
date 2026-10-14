@@ -537,3 +537,76 @@ fn without_ca_certificates_every_command_says_to_install_them_and_sends_nothing(
 
     assert!(damai.hits().is_empty(), "requests: {:?}", damai.hits());
 }
+
+// #51: configuration failures must not masquerade as a bad event link.
+// Exercise the actual environment bytes and all four command entry points.
+fn assert_invalid_request_gap_configuration(args: &[&str]) {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let command = args[0];
+    let damai = MockDamai::start(&[]);
+    let values = ["bad", "86400001", "-1", "18446744073709551616", "", "1.5"]
+        .map(OsString::from)
+        .into_iter()
+        .chain([OsString::from_vec(vec![0xff])]);
+    for value in values {
+        let mut cmd = support::theflash(&damai.base_url());
+        cmd.args(args).env("THEFLASH_REQUEST_GAP_MS", &value);
+        if command == "watch" {
+            cmd.arg("--no-system-notify");
+        }
+        let out = support::output_within(cmd, 10);
+        assert_eq!(out.status.code(), Some(1), "{command}: {out:?}");
+        assert!(damai.hits().is_empty(), "requests: {:?}", damai.hits());
+        let message = if command == "event-json" {
+            assert!(out.stderr.is_empty(), "{}", stderr(&out));
+            let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+            assert_eq!(json["error"]["code"], "invalid-config", "{json}");
+            json["error"]["message"].as_str().unwrap().to_string()
+        } else {
+            assert!(out.stdout.is_empty(), "{}", stdout(&out));
+            stderr(&out)
+        };
+        for required in [
+            "THEFLASH_REQUEST_GAP_MS",
+            "无效",
+            "0 到 86400000",
+            "整数",
+            "毫秒",
+        ] {
+            assert!(
+                message.contains(required),
+                "{command}: 缺少 {required}：{message}"
+            );
+        }
+        assert!(!message.contains("演出 ID"), "{command}: {message}");
+        assert!(!message.contains("bad"), "{command}: {message}");
+    }
+}
+
+#[test]
+fn event_reports_invalid_request_gap_configuration() {
+    assert_invalid_request_gap_configuration(&["event", "1077137031347"]);
+}
+
+#[test]
+fn event_json_reports_invalid_request_gap_configuration() {
+    assert_invalid_request_gap_configuration(&["event-json", "1077137031347"]);
+}
+
+#[test]
+fn watch_reports_invalid_request_gap_configuration() {
+    assert_invalid_request_gap_configuration(&["watch", "1077137031347"]);
+}
+
+#[test]
+fn risk_reports_invalid_request_gap_configuration() {
+    for args in [
+        &["risk"][..],
+        &["risk", "resume"][..],
+        &["risk", "resume", "--yes"][..],
+    ] {
+        assert_invalid_request_gap_configuration(args);
+    }
+}

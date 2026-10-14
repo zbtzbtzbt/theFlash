@@ -28,6 +28,11 @@ pub enum Error {
         "从“{0}”里找不到演出 ID：请给有效的大麦演出详情页链接（detail.damai.cn/item.htm?id=数字 或 m.damai.cn/damai/detail/item.html?itemId=数字）或纯数字 ID"
     )]
     InvalidInput(String),
+    #[error("环境变量 {name} 的值无效：{expected}")]
+    InvalidConfig {
+        name: &'static str,
+        expected: &'static str,
+    },
     #[error("演出 {0} 不存在或已下架")]
     NotFound(u64),
     #[error("大麦触发了风控（{0} 返回了滑块验证页），已停止查询，没有重试")]

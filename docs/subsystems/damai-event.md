@@ -73,6 +73,7 @@
 | 情况 | 输出 | 退出码 |
 | --- | --- | --- |
 | 输入无效或没有演出 ID | 找不到演出 ID 的提示，不发请求 | 2 |
+| `THEFLASH_REQUEST_GAP_MS` 无效（不是整数、超出范围或非 UTF-8） | 说明这个环境变量的值无效，必须是 0 到 86400000 毫秒的整数，不发请求 | 1 |
 | 本机没有 CA 证书（Linux 没装 `ca-certificates`，例如精简的容器镜像） | 说明本机没有 CA 证书、没有发出任何请求，以及 Debian/Ubuntu 上安装 `ca-certificates` 的命令 | 1 |
 | 其他原因建不起 HTTP 客户端 | 没法创建 HTTP 客户端、没有发出任何请求，附上底层原因 | 1 |
 | 演出不存在（页面 200，但没有 `dataDefault`） | 演出不存在或已下架 | 1 |
@@ -85,9 +86,12 @@
 
 CA 证书和 HTTP 客户端这两种失败发生在 [`Client::new`](../../backend/src/damai/client.rs) 建客户端的时候，早于任何请求：Linux 上 rustls 在这一步读系统的 CA 证书，一张都没有就建不起来（macOS 用钥匙串，不会这样）。`watch` 和界面用的 `event-json` 走同一个 `Client::new`，提示相同；`event-json` 的 `code` 是 `setup`。
 
+`THEFLASH_REQUEST_GAP_MS` 由[大麦访问层](damai-access.md#频率上限的范围)在建客户端之前校验。`event-json` 对这类错误返回 `error.code: "invalid-config"`；`invalid-input` 只用于演出链接或 ID 无效，两者分别退出 1 和 2。界面服务对 `invalid-config` 沿用默认的 HTTP 502 并显示消息，不把它归为链接输入错误（400）。
+
 ## 验证
 
 - `make check`。
+- `cd backend && cargo test --test cli invalid_request_gap_configuration`：`event`、`event-json`、`watch`、`risk` 四个入口分别覆盖格式错误、范围外、整数溢出、空值、小数和非 UTF-8，断言提示、JSON code、退出码和零请求；范围两端及 300 毫秒下限由访问层的 `an_asked_for_gap_only_slows_requests_down` 守护。
 - [`backend/tests/cli.rs`](../../backend/tests/cli.rs) 用本地假服务器回放 [`backend/testdata/damai/`](../../backend/testdata/damai/) 里的真实响应，运行编译出的程序；不访问真实大麦。`THEFLASH_DAMAI_BASE_URL` 只给测试用，用来把请求指向假服务器。
 - 大麦有没有改版由 [`theflash inspect`](damai-inspect.md) 定期检查：它拿真实响应对照程序依赖的字段路径和状态码映射，变了就报出来并开 issue。**程序开始读一个新的大麦字段时，在同一个改动里把它加进 [`inspect/shape.rs`](../../backend/src/inspect/shape.rs)**，否则巡检不会守它。改版之后用 `theflash inspect record` 重新录 fixture，再用浏览器打开同一场演出核对场次和票档的显示。
 
