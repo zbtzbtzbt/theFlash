@@ -971,6 +971,11 @@ pub async fn record(
     // fails rather than printing the ones that did land and exiting 0
     // (#77, #78).
     let mut lost: Vec<String> = Vec::new();
+    // What this run leaves whoever replays the fixtures to know, which is
+    // not a response that went missing: a page `theflash event` cannot
+    // read has sessions whose tiers were never asked for (#73). It is
+    // said and the command still succeeds, unlike `lost`.
+    let mut notes: Vec<String> = Vec::new();
     let mut event = EventReport {
         item_id: 0,
         name: None,
@@ -991,7 +996,7 @@ pub async fn record(
                 lost.push(why.why().to_string());
             }
             written.append(&mut event.candidates);
-            return finish(written, lost);
+            return finish(written, lost, notes);
         }
         Target::Item(id) => id,
     };
@@ -1029,7 +1034,7 @@ pub async fn record(
         }
     }
     written.append(&mut event.candidates);
-    finish(written, lost)
+    finish(written, lost, notes)
 }
 
 /// What `record` has to say, and whether it did what it was asked. A
@@ -1037,7 +1042,16 @@ pub async fn record(
 /// the fixture it was run for is not there, and saying so on stderr while
 /// exiting 0 left whoever called it believing it was (#77, #78). What did
 /// get written is named too, so a half-finished run can be cleaned up.
-fn finish(written: Vec<PathBuf>, lost: Vec<String>) -> Result<Vec<PathBuf>, Error> {
+/// `notes` are the other kind of thing to say — what this run did not
+/// record and why (#73) — and they do not make the command fail.
+fn finish(
+    written: Vec<PathBuf>,
+    lost: Vec<String>,
+    notes: Vec<String>,
+) -> Result<Vec<PathBuf>, Error> {
+    for note in &notes {
+        eprintln!("{note}");
+    }
     if lost.is_empty() {
         return Ok(written);
     }
