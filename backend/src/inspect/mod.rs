@@ -320,6 +320,13 @@ impl Pacer {
         }
         self.last = Some(Instant::now());
     }
+
+    async fn pace<T>(&mut self, req: impl std::future::Future<Output = T>) -> T {
+        self.wait().await;
+        let out = req.await;
+        self.last = Some(Instant::now());
+        out
+    }
 }
 
 /// What a run says when damai.cn's home page gives it nothing, which is
@@ -850,9 +857,8 @@ async fn read_page(
     requests: &mut usize,
     item_id: u64,
 ) -> Result<Fetched, Error> {
-    pacer.wait().await;
     *requests += 1;
-    let html = match client.item_page(item_id).await {
+    let html = match pacer.pace(client.item_page(item_id)).await {
         Ok(html) => html,
         // Risk control, the breaker another theFlash process wrote, a
         // breaker that could not be written and a breaker that cannot be
@@ -886,9 +892,8 @@ async fn read_tiers(
     item_id: u64,
     perform_id: u64,
 ) -> Result<Fetched, Error> {
-    pacer.wait().await;
     *requests += 1;
-    let body = match client.tier_page(item_id, perform_id).await {
+    let body = match pacer.pace(client.tier_page(item_id, perform_id)).await {
         Ok(body) => body,
         Err(e) if e.stops_damai_access() => return Err(e),
         Err(e) => {
@@ -910,9 +915,8 @@ async fn read_home(
     pacer: &mut Pacer,
     requests: &mut usize,
 ) -> Result<Result<Vec<u64>, String>, Error> {
-    pacer.wait().await;
     *requests += 1;
-    match client.home_page().await {
+    match pacer.pace(client.home_page()).await {
         Ok(html) => Ok(Ok(samples::item_ids_on_home(&html))),
         Err(e) if e.stops_damai_access() => Err(e),
         Err(e) => Ok(Err(e.to_string())),
@@ -1117,8 +1121,7 @@ pub async fn record(
     };
     let item_id = match target {
         Target::Home => {
-            pacer.wait().await;
-            let html = client.home_page().await?;
+            let html = pacer.pace(client.home_page()).await?;
             if let Err(why) = write_candidate(dir, &format!("{name}.html"), &html, &mut event) {
                 lost.push(why.why().to_string());
             }
@@ -1127,17 +1130,24 @@ pub async fn record(
         }
         Target::Item(id) => id,
     };
-    pacer.wait().await;
-    let html = client.item_page(item_id).await?;
+    let html = pacer.pace(client.item_page(item_id)).await?;
     if let Err(why) = write_candidate(dir, &format!("item_{name}.html"), &html, &mut event) {
         lost.push(why.why().to_string());
     }
-    let json = item_page_json(&html)
+    let json = match item_page_json(&html)
         .map_err(|reason| Error::Parse {
             what: "演出详情页",
             reason,
-        })?
-        .ok_or(Error::NotFound(item_id))?;
+        })
+        .and_then(|opt| opt.ok_or(Error::NotFound(item_id)))
+    {
+        Ok(json) => json,
+        Err(e) => {
+            lost.push(e.to_string());
+            written.append(&mut event.candidates);
+            return finish(written, lost, notes);
+        }
+    };
     // A page a query cannot be answered from is exactly the page worth
     // recording, so the fixture is kept; saying so is what stops the
     // sessions it left out from looking like all there were (#73).
@@ -1149,19 +1159,57 @@ pub async fn record(
     let mut performs = perform_ids(&json);
     performs.truncate(sessions);
     for perform_id in performs {
-        pacer.wait().await;
-        let body = client.tier_page(item_id, perform_id).await?;
-        if let Err(why) = write_candidate(
-            dir,
-            &format!("sku_{name}_{perform_id}.jsonp"),
-            &body,
-            &mut event,
-        ) {
-            lost.push(why.why().to_string());
+        match pacer.pace(client.tier_page(item_id, perform_id)).await {
+            Ok(body) => {
+                if let Err(why) = write_candidate(
+                    dir,
+                    &format!("sku_{name}_{perform_id}.jsonp"),
+                    &body,
+                    &mut event,
+                ) {
+                    lost.push(why.why().to_string());
+                }
+            }
+            Err(e) if e.stops_damai_access() => {
+                written.append(&mut event.candidates);
+                report_partial(&written, &lost, &notes);
+                return Err(e);
+            }
+            Err(e) => {
+                lost.push(format!("场次 {perform_id} 的票档没取到：{e}"));
+            }
         }
     }
     written.append(&mut event.candidates);
     finish(written, lost, notes)
+}
+
+fn kept_summary(written: &[PathBuf]) -> String {
+    match written {
+        [] => "这次一个文件都没写下来".to_string(),
+        paths => format!(
+            "写下来的是 {}",
+            paths
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join("、")
+        ),
+    }
+}
+
+fn report_partial(written: &[PathBuf], lost: &[String], notes: &[String]) {
+    for note in notes {
+        eprintln!("{note}");
+    }
+    if !lost.is_empty() || !written.is_empty() {
+        let kept = kept_summary(written);
+        if lost.is_empty() {
+            eprintln!("{kept}");
+        } else {
+            eprintln!("{}。{kept}", lost.join("；"));
+        }
+    }
 }
 
 /// What `record` has to say, and whether it did what it was asked. A
@@ -1182,17 +1230,7 @@ fn finish(
     if lost.is_empty() {
         return Ok(written);
     }
-    let kept = match written.as_slice() {
-        [] => "这次一个文件都没写下来".to_string(),
-        paths => format!(
-            "写下来的是 {}",
-            paths
-                .iter()
-                .map(|p| p.display().to_string())
-                .collect::<Vec<_>>()
-                .join("、")
-        ),
-    };
+    let kept = kept_summary(&written);
     Err(Error::NotWritten(format!("{}。{kept}", lost.join("；"))))
 }
 

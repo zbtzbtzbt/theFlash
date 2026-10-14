@@ -2677,3 +2677,141 @@ fn record_takes_out_every_form_of_login_cookie_the_repository_guard_reads() {
     let left = theflash::inspect::redact::sensitive(&recorded);
     assert!(left.is_empty(), "脱敏之后仍然命中规则：{left:?}");
 }
+
+#[test]
+fn review124_record_reports_refusal_even_if_a_later_session_fails() {
+    let home = Home::new("review124-refused-then-http");
+    let dir = home.path().join("testdata");
+    std::fs::create_dir_all(&dir).unwrap();
+    let header = ["Set-", "Cookie", ":"].concat();
+    let routes = changed(unchanged_routes(), "dataId=286937788", |body| {
+        format!("{header} sid=1\n{body}")
+    });
+    // The real page contains 3 sessions; only the first is served here.
+    // The next request therefore gets a deterministic local HTTP 404.
+    let damai = support::MockDamai::start_bodies(routes);
+    let mut cmd = home.theflash(&damai.base_url());
+    cmd.args([
+        "inspect",
+        "record",
+        "1086791513717",
+        "--as",
+        "probe",
+        "--dir",
+        dir.to_str().unwrap(),
+        "--sessions",
+        "2",
+        "--gap",
+        "0",
+    ]);
+    let out = support::output_within(cmd, 60);
+    let said = format!("{}{}", stdout(&out), String::from_utf8_lossy(&out.stderr));
+    assert_eq!(out.status.code(), Some(1), "{said}");
+    assert_eq!(damai.hits().len(), 3, "{:?}", damai.hits());
+    let kept = dir.join("item_probe.html");
+    let refused = dir.join("sku_probe_286937788.jsonp");
+    assert!(kept.is_file());
+    assert!(!refused.exists());
+    assert!(said.contains("404"), "later error was lost: {said}");
+    assert!(
+        said.contains(&refused.display().to_string())
+            && said.contains("没有保存")
+            && said.contains("Cookie")
+            && said.contains(&kept.display().to_string()),
+        "fetched-but-refused fixture and saved file disappeared from diagnostics: {said}"
+    );
+}
+
+#[test]
+fn review124_record_reports_write_failure_even_if_a_later_session_fails() {
+    let home = Home::new("review124-write-then-http");
+    let dir = home.path().join("testdata");
+    std::fs::create_dir_all(&dir).unwrap();
+    let blocked = dir.join("sku_probe_286937788.jsonp");
+    std::fs::create_dir_all(&blocked).unwrap();
+    let damai = support::MockDamai::start_bodies(unchanged_routes());
+    let mut cmd = home.theflash(&damai.base_url());
+    cmd.args([
+        "inspect",
+        "record",
+        "1086791513717",
+        "--as",
+        "probe",
+        "--dir",
+        dir.to_str().unwrap(),
+        "--sessions",
+        "2",
+        "--gap",
+        "0",
+    ]);
+    let out = support::output_within(cmd, 60);
+    let said = format!("{}{}", stdout(&out), String::from_utf8_lossy(&out.stderr));
+    assert_eq!(out.status.code(), Some(1), "{said}");
+    assert_eq!(damai.hits().len(), 3, "{:?}", damai.hits());
+    let kept = dir.join("item_probe.html");
+    assert!(kept.is_file());
+    assert!(blocked.is_dir());
+    assert!(said.contains("404"), "later error was lost: {said}");
+    assert!(
+        said.contains(&blocked.display().to_string())
+            && said.contains("写不进去")
+            && said.contains(&kept.display().to_string()),
+        "fetched-but-unwritten fixture and saved file disappeared from diagnostics: {said}"
+    );
+}
+
+#[test]
+fn review124_record_stops_on_risk_control_without_losing_earlier_diagnostics() {
+    let home = Home::new("review124-refused-then-risk");
+    let dir = home.path().join("testdata");
+    std::fs::create_dir_all(&dir).unwrap();
+    let header = ["Set-", "Cookie", ":"].concat();
+    let routes = changed(unchanged_routes(), "dataId=286937788", |body| {
+        format!("{header} sid=1\n{body}")
+    });
+    let routes = with_route(
+        routes,
+        (
+            "dataId=286937790".to_string(),
+            support::fixture("risk_control.html"),
+        ),
+    );
+    let damai = support::MockDamai::start_bodies(routes);
+    let mut cmd = home.theflash(&damai.base_url());
+    cmd.args([
+        "inspect",
+        "record",
+        "1086791513717",
+        "--as",
+        "probe",
+        "--dir",
+        dir.to_str().unwrap(),
+        "--sessions",
+        "3",
+        "--gap",
+        "0",
+    ]);
+    let out = support::output_within(cmd, 60);
+    let said = format!("{}{}", stdout(&out), String::from_utf8_lossy(&out.stderr));
+    assert_eq!(out.status.code(), Some(1), "{said}");
+    // 3 sessions were requested, but session 2 hit risk control, so session 3
+    // (286937789) must not be requested.
+    assert_eq!(
+        damai.hits().len(),
+        3,
+        "风控后不应继续请求第 3 个场次：{:?}",
+        damai.hits()
+    );
+    let kept = dir.join("item_probe.html");
+    let refused = dir.join("sku_probe_286937788.jsonp");
+    assert!(kept.is_file());
+    assert!(!refused.exists());
+    assert!(said.contains("风控"), "risk-control error was lost: {said}");
+    assert!(
+        said.contains(&refused.display().to_string())
+            && said.contains("没有保存")
+            && said.contains("Cookie")
+            && said.contains(&kept.display().to_string()),
+        "fetched-but-refused fixture and saved file disappeared when risk control stopped later session: {said}"
+    );
+}
