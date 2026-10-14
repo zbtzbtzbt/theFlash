@@ -26,6 +26,35 @@ pub struct MockDamai {
     thread: Option<JoinHandle<()>>,
 }
 
+/// One response the stand-in sends: the status line, the Location damai.cn
+/// sends a browser to when it redirects, and the body.
+#[derive(Clone)]
+pub struct Reply {
+    pub status: &'static str,
+    pub location: Option<String>,
+    pub body: String,
+}
+
+impl Reply {
+    pub fn ok(body: impl Into<String>) -> Reply {
+        Reply {
+            status: "200 OK",
+            location: None,
+            body: body.into(),
+        }
+    }
+
+    /// What damai.cn answers with when it sends the browser somewhere
+    /// else, including to its slider challenge.
+    pub fn redirect(location: impl Into<String>) -> Reply {
+        Reply {
+            status: "302 Found",
+            location: Some(location.into()),
+            body: String::new(),
+        }
+    }
+}
+
 impl MockDamai {
     pub fn start(routes: &[(&'static str, &'static str)]) -> Self {
         Self::serve(fixtures(routes), None)
@@ -33,6 +62,15 @@ impl MockDamai {
 
     /// Routes to bodies given in full, such as a fixture with one field changed.
     pub fn start_bodies(routes: Vec<(String, String)>) -> Self {
+        Self::serve(
+            routes.into_iter().map(|(t, b)| (t, Reply::ok(b))).collect(),
+            None,
+        )
+    }
+
+    /// Routes to responses given in full, for the redirects damai.cn
+    /// answers with.
+    pub fn start_replies(routes: Vec<(String, Reply)>) -> Self {
         Self::serve(routes, None)
     }
 
@@ -41,7 +79,7 @@ impl MockDamai {
         Self::serve(fixtures(routes), Some((Instant::now(), damai_ms)))
     }
 
-    fn serve(routes: Vec<(String, String)>, clock: Option<(Instant, i64)>) -> Self {
+    fn serve(routes: Vec<(String, Reply)>, clock: Option<(Instant, i64)>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let hits = Arc::new(Mutex::new(Vec::new()));
@@ -116,7 +154,7 @@ impl Drop for MockDamai {
 
 fn answer(
     mut stream: TcpStream,
-    routes: &[(String, String)],
+    routes: &[(String, Reply)],
     hits: &Mutex<Vec<(String, Instant)>>,
     clock: Option<(Instant, i64)>,
 ) {
@@ -140,10 +178,21 @@ fn answer(
     hits.lock()
         .unwrap()
         .push((format!("{method} {target}"), Instant::now()));
-    let (status, body) = match routes.iter().find(|(m, _)| target.contains(m.as_str())) {
-        Some((_, body)) => ("200 OK", body.as_str()),
-        None => ("404 Not Found", "not found"),
+    let not_found = Reply {
+        status: "404 Not Found",
+        location: None,
+        body: "not found".to_string(),
     };
+    let reply = match routes.iter().find(|(m, _)| target.contains(m.as_str())) {
+        Some((_, reply)) => reply,
+        None => &not_found,
+    };
+    let (status, body) = (reply.status, reply.body.as_str());
+    let location = reply
+        .location
+        .as_ref()
+        .map(|l| format!("Location: {l}\r\n"))
+        .unwrap_or_default();
     let date = clock
         .map(|(started, ms)| {
             let now = ms + started.elapsed().as_millis() as i64;
@@ -154,15 +203,15 @@ fn answer(
     let body = if method == "HEAD" { "" } else { body };
     let _ = write!(
         stream,
-        "HTTP/1.1 {status}\r\n{date}Content-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        "HTTP/1.1 {status}\r\n{date}{location}Content-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     );
 }
 
-fn fixtures(routes: &[(&'static str, &'static str)]) -> Vec<(String, String)> {
+fn fixtures(routes: &[(&'static str, &'static str)]) -> Vec<(String, Reply)> {
     routes
         .iter()
-        .map(|(m, f)| (m.to_string(), fixture(f)))
+        .map(|(m, f)| (m.to_string(), Reply::ok(fixture(f))))
         .collect()
 }
 

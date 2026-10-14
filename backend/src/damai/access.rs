@@ -130,13 +130,26 @@ impl std::fmt::Debug for Gate {
 impl Gate {
     /// The gate every command uses: this user's state directory, this
     /// machine's clock, and the rate limit this run asks for.
-    pub fn for_user() -> Result<Gate, Error> {
-        Gate::new(
+    ///
+    /// One per process, however many callers ask for it: a second gate
+    /// would come with a request budget of its own, and two default
+    /// `Client`s would then leave at twice the rate the user asked for
+    /// (#74). Built on the first call, so a process that never requests
+    /// damai.cn still never touches the state directory.
+    pub fn for_user() -> Result<Arc<Gate>, Error> {
+        static SHARED: Mutex<Option<Arc<Gate>>> = Mutex::new(None);
+        let mut shared = SHARED.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(gate) = shared.as_ref() {
+            return Ok(gate.clone());
+        }
+        let gate = Arc::new(Gate::new(
             state_dir()?,
             request_gap()?,
             Arc::new(SystemClock::default()),
             running_command(),
-        )
+        )?);
+        *shared = Some(gate.clone());
+        Ok(gate)
     }
 
     /// Fails now rather than at the first request: a state directory this
@@ -149,8 +162,14 @@ impl Gate {
         by: String,
     ) -> Result<Gate, Error> {
         fs::create_dir_all(&dir).map_err(|e| state_error(&dir, "建不了状态目录", &e))?;
-        // Opening the lock file also proves the directory is writable.
         lock_file(&dir)?;
+        // Opening the lock file is not enough: a lock file left there by an
+        // earlier run opens for writing even when the directory itself has
+        // become read-only, and the breaker is written as a *new* file next
+        // to it (#74). So write one now, before any request goes out,
+        // rather than finding out when risk control arrives and the breaker
+        // cannot be recorded.
+        write_probe(&dir)?;
         Ok(Gate {
             dir,
             gap_ms: gap.as_millis() as i64,
@@ -162,18 +181,33 @@ impl Gate {
 
     /// Waits for this process's next slot, then refuses to let the request
     /// out if any theFlash process has run into risk control.
+    ///
+    /// The slot is taken when the caller actually gets it, not when it
+    /// starts waiting: callers that queued for 300 ms and 600 ms but were
+    /// woken a second late (a loaded machine, a busy executor) would
+    /// otherwise both leave at once, which is the burst the gap exists to
+    /// prevent (#74). So the wait is recomputed after every sleep and the
+    /// gap is counted from the request that really went out.
     pub async fn enter(&self) -> Result<(), Error> {
-        let wait = {
-            let mut next = self
-                .next_slot_ms
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let now = self.clock.now_ms();
-            let at = (*next).max(now);
-            *next = at + self.gap_ms;
-            at - now
-        };
-        self.clock.sleep_ms(wait).await;
+        loop {
+            let wait = {
+                let mut next = self
+                    .next_slot_ms
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let now = self.clock.now_ms();
+                if now >= *next {
+                    *next = now + self.gap_ms;
+                    0
+                } else {
+                    *next - now
+                }
+            };
+            if wait <= 0 {
+                break;
+            }
+            self.clock.sleep_ms(wait).await;
+        }
         // Checked after the wait, so a breaker another process tripped
         // while this request was queued still stops it.
         match self.stop()? {
@@ -270,6 +304,16 @@ fn lock_file(dir: &Path) -> Result<File, Error> {
         .write(true)
         .open(&path)
         .map_err(|e| state_error(&path, "打不开熔断状态的锁文件", &e))
+}
+
+/// Proves this user can still create files in the state directory, which
+/// is what recording a breaker needs. Named after the breaker's own
+/// temporary file and removed again, so nothing is left behind.
+fn write_probe(dir: &Path) -> Result<(), Error> {
+    let path = dir.join(format!("{STOP_FILE}.{}.probe", std::process::id()));
+    fs::write(&path, b"").map_err(|e| state_error(dir, "状态目录写不进东西", &e))?;
+    let _ = fs::remove_file(&path);
+    Ok(())
 }
 
 fn lock_error(dir: &Path, e: &std::io::Error) -> Error {
@@ -525,6 +569,83 @@ mod tests {
                 want,
                 "虚拟时钟 {now} 毫秒时发出的请求数"
             );
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A slot reserved for 300 ms is worth nothing if the task only gets
+    /// back to it at 1000 ms: both queued callers would leave together,
+    /// which is the burst the gap exists to prevent (#74). The slot is
+    /// taken when a caller really gets it, so the gap counts from the
+    /// request that went out. The delay is the injected clock jumping, so
+    /// this never depends on how loaded the machine is.
+    #[tokio::test]
+    async fn callers_woken_up_late_still_leave_one_gap_apart() {
+        let dir = temp_dir("late-wake-up");
+        let clock = TestClock::new();
+        let gate = Arc::new(gate(&dir, clock.clone()));
+        let sent = Arc::new(AtomicUsize::new(0));
+        // The first request leaves at 0 ms and takes the slot after it.
+        gate.enter().await.unwrap();
+        sent.fetch_add(1, Ordering::SeqCst);
+        for _ in 0..2 {
+            let (gate, sent) = (gate.clone(), sent.clone());
+            tokio::spawn(async move {
+                gate.enter().await.unwrap();
+                sent.fetch_add(1, Ordering::SeqCst);
+            });
+        }
+        // Both ask while the clock still says 0 ms, so both queue behind
+        // the first request...
+        for _ in 0..50 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(sent.load(Ordering::SeqCst), 1, "0 毫秒就放行了排队的请求");
+        // ...and nothing runs them again until long after their turn.
+        let gap = MIN_REQUEST_GAP.as_millis() as i64;
+        for (now, want) in [(1_000, 2), (1_000 + gap - 1, 2), (1_000 + gap, 3)] {
+            clock.set(now);
+            for _ in 0..50 {
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(
+                sent.load(Ordering::SeqCst),
+                want,
+                "虚拟时钟 {now} 毫秒时发出的请求数：晚醒来的请求被一起放了出去"
+            );
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A lock file an earlier run left behind opens for writing even in a
+    /// directory that has since become read-only, and the breaker is
+    /// written as a new file next to it. Without really writing one,
+    /// theFlash would send its requests and only find out when risk
+    /// control arrives and cannot be recorded (#74).
+    #[test]
+    fn a_lock_file_does_not_prove_the_breaker_can_be_written() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp_dir("read-only-with-lock");
+        fs::create_dir_all(&dir).unwrap();
+        File::create(dir.join(LOCK_FILE)).unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o555)).unwrap();
+        // root writes a read-only directory anyway, so there would be
+        // nothing to see; say so instead of passing quietly.
+        let writable_anyway = fs::write(dir.join("by-root"), b"").is_ok();
+        let made = Gate::new(
+            dir.clone(),
+            MIN_REQUEST_GAP,
+            Arc::new(SystemClock::default()),
+            "theflash test".into(),
+        );
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+        if writable_anyway {
+            eprintln!("跳过：这个用户（root？）连只读目录也能写，看不出区别");
+        } else {
+            let e = made.expect_err("只读的状态目录被当成可以用");
+            assert!(matches!(e, Error::RiskState { .. }), "{e}");
+            assert!(e.to_string().contains("已停止"), "{e}");
+            assert!(e.to_string().contains(&dir.display().to_string()), "{e}");
         }
         let _ = fs::remove_dir_all(&dir);
     }
