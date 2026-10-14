@@ -791,25 +791,49 @@ fn the_base_fixture_is_the_pull_request_it_claims_to_be() {
     assert!(record.contains(REVIEWED_MAIN), "{record}");
 }
 
+/// The squash commit GitHub reports after `gh pr merge` finished.
+const MERGED_SHA: &str = "ffffffffffffffffffffffffffffffffffffffff";
+
+/// A `gh` that records every call and answers the two questions the
+/// handoff asks after a merge: whether a declared number is an issue or a
+/// pull request (`repos/<仓库>/issues/<号>`), and which commit the squash
+/// landed as (`repos/<仓库>/pulls/<号>`). Numbers in `pulls` answer the
+/// way GitHub answers for a pull request: with a `pull_request` field.
+fn gh_that_answers(log: &std::path::Path, pulls: &[u64]) -> String {
+    let mut kinds = String::new();
+    for n in pulls {
+        kinds.push_str(&format!(
+            "  'api repos/'*'/issues/{n}') printf '{{\"number\":{n},\"pull_request\":\
+             {{\"url\":\"https://api.github.com/repos/zbtzbtzbt/theFlash/pulls/{n}\"}}}}\\n' ;;\n"
+        ));
+    }
+    format!(
+        "printf '%s\\n' \"$*\" >> '{log}'\n\
+         case \"$*\" in\n\
+         {kinds}\
+           'api repos/'*'/issues/'*) printf '{{\"number\":1}}\\n' ;;\n\
+           'api repos/'*'/pulls/'*) printf '{{\"merge_commit_sha\":\"{MERGED_SHA}\"}}\\n' ;;\n\
+         esac\n",
+        log = log.display()
+    )
+}
+
+/// Adds a `实现: …` declaration to the fixture's body, where an agent
+/// writes it: just above the `Agent:` trailer.
+fn declaring(body: &str, line: &str) -> String {
+    body.replace("Agent: Codex", &format!("{line}\n\nAgent: Codex"))
+}
+
 #[test]
 fn merging_marks_linked_issues_for_acceptance_and_posts_the_review_record() {
     let case = Case::ready("handoff-issues");
     case.edit("pull.json", |v| {
         v["title"] = json!("damai: 访问层的 5 处缺陷一起修（#74，#70） (#19)");
+        v["body"] = json!(declaring(v["body"].as_str().unwrap(), "实现: #74、#70"));
     });
     let log = case.state().join("gh.log");
-    let merged_sha = "ffffffffffffffffffffffffffffffffffffffff";
-    support::stub(
-        &case.state(),
-        "gh",
-        &format!(
-            "printf '%s\\n' \"$*\" >> '{}'\n\
-             if [ \"$1\" = \"api\" ]; then\n\
-               printf '{{\"merge_commit_sha\":\"{merged_sha}\"}}\\n'\n\
-             fi\n",
-            log.display()
-        ),
-    );
+    let merged_sha = MERGED_SHA;
+    support::stub(&case.state(), "gh", &gh_that_answers(&log, &[]));
     let out = support::merge_gate(&case.state())
         .env("PATH", case.state().join("bin"))
         .args(["merge", "--pr", "19", "--replay"])
@@ -915,12 +939,18 @@ fn merging_marks_linked_issues_for_acceptance_and_posts_the_review_record() {
 #[test]
 fn label_failure_after_merge_keeps_exit_zero_and_prints_the_manual_command() {
     let case = Case::ready("handoff-label-failure");
+    case.edit("pull.json", |v| {
+        v["body"] = json!(declaring(v["body"].as_str().unwrap(), "实现: #3"));
+    });
     let log = case.state().join("gh.log");
     support::stub(
         &case.state(),
         "gh",
         &format!(
             "printf '%s\\n' \"$*\" >> '{}'\n\
+             case \"$*\" in\n\
+               'api repos/'*'/issues/'*) printf '{{\"number\":3}}\\n' ;;\n\
+             esac\n\
              if [ \"$1\" = \"issue\" ] && [ \"$2\" = \"edit\" ]; then\n\
                echo 'HTTP 502: Bad Gateway' >&2\n\
                exit 1\n\
@@ -962,15 +992,19 @@ fn label_failure_after_merge_keeps_exit_zero_and_prints_the_manual_command() {
     // Also when GitHub returns `{"merge_commit_sha": null}`, stderr and the
     // issue comment must report that the merged commit was not obtained.
     let case_null = Case::ready("handoff-null-sha");
+    case_null.edit("pull.json", |v| {
+        v["body"] = json!(declaring(v["body"].as_str().unwrap(), "实现: #3"));
+    });
     let log_null = case_null.state().join("gh.log");
     support::stub(
         &case_null.state(),
         "gh",
         &format!(
             "printf '%s\\n' \"$*\" >> '{}'\n\
-             if [ \"$1\" = \"api\" ]; then\n\
-               printf '{{\"merge_commit_sha\":null}}\\n'\n\
-             fi\n",
+             case \"$*\" in\n\
+               'api repos/'*'/issues/'*) printf '{{\"number\":3}}\\n' ;;\n\
+               'api repos/'*'/pulls/'*) printf '{{\"merge_commit_sha\":null}}\\n' ;;\n\
+             esac\n",
             log_null.display()
         ),
     );
@@ -988,5 +1022,238 @@ fn label_failure_after_merge_keeps_exit_zero_and_prints_the_manual_command() {
             && !calls_null.contains("合入/被审查的提交")
             && calls_null.contains("合入 main 的提交未取到"),
         "merge_commit_sha 为 null 时不能把被审查 head 宣称为合入提交：{said_null}\n{calls_null}"
+    );
+}
+
+/// Merges the replayed pull request #19 and returns what the gate asked
+/// `gh` to do, and what it printed.
+fn merged(case: &Case, log: &std::path::Path) -> (String, String) {
+    let out = support::merge_gate(&case.state())
+        .env("PATH", case.state().join("bin"))
+        .args(["merge", "--pr", "19", "--replay"])
+        .arg(&case.dir)
+        .output()
+        .unwrap();
+    let said = said(&out);
+    assert_eq!(out.status.code(), Some(0), "合并成功就该退出 0：{said}");
+    assert!(said.contains("已合并 PR #19"), "{said}");
+    (std::fs::read_to_string(log).unwrap_or_default(), said)
+}
+
+/// One pull request as it reached the gate on 10-14: its title, what its
+/// body declared, the issues that must end up `待验收`, and the numbers
+/// whose labels must not have been touched.
+struct Merged {
+    name: &'static str,
+    title: &'static str,
+    declares: Option<&'static str>,
+    handed: &'static [u64],
+    untouched: &'static [u64],
+}
+
+#[test]
+fn only_the_issues_the_pull_request_declares_are_handed_off_to_acceptance() {
+    // These titles are the real ones from 10-14 (#102 的验收结论). Taking
+    // every `#数字` in a title as an issue this pull request implemented
+    // marked other agents' pull requests `待验收`, pointed acceptance at a
+    // commit that only touched LESSONS.md, and — the one that loses work —
+    // cleared `验收未通过` from issues nobody had fixed yet, which makes
+    // `dispatch` schedule another acceptance round instead of the rework.
+    let cases = [
+        Merged {
+            name: "lessons-mentions-pulls",
+            title: "lessons: 水位线到 c6d20ab（#156/#163，绕闸续发）",
+            declares: None,
+            handed: &[],
+            untouched: &[156, 163],
+        },
+        Merged {
+            name: "lessons-mentions-rejected-issue",
+            title: "lessons: 水位线到 abc1234（#17 验收未通过，等返工）",
+            declares: None,
+            handed: &[],
+            untouched: &[17],
+        },
+        Merged {
+            name: "fix-names-the-pull-request-it-fixes",
+            title: "fix: 修 PR #12 引入的回归（#3） (#19)",
+            declares: Some("实现: #3"),
+            handed: &[3],
+            untouched: &[12, 19],
+        },
+        Merged {
+            name: "two-issues-in-one-fix",
+            title: "damai: 访问层的 5 处缺陷一起修（#74，#70） (#19)",
+            declares: Some("实现: #74、#70"),
+            handed: &[74, 70],
+            untouched: &[19],
+        },
+        Merged {
+            name: "another-repo-and-a-padded-number",
+            title: "lessons: 水位线（other/repo#5、#012）",
+            declares: Some("实现: other/repo#5、#012"),
+            handed: &[],
+            untouched: &[5, 12],
+        },
+    ];
+    for Merged {
+        name,
+        title,
+        declares,
+        handed,
+        untouched,
+    } in cases
+    {
+        let case = Case::ready(name);
+        case.edit("pull.json", |v| {
+            v["title"] = json!(title);
+            if let Some(line) = declares {
+                v["body"] = json!(declaring(v["body"].as_str().unwrap(), line));
+            }
+        });
+        let log = case.state().join("gh.log");
+        support::stub(&case.state(), "gh", &gh_that_answers(&log, &[]));
+        let (calls, said) = merged(&case, &log);
+        for n in handed {
+            assert!(
+                calls.contains(&format!(
+                    "issue edit {n} --repo zbtzbtzbt/theFlash --add-label 待验收 --remove-label 验收未通过"
+                )),
+                "`{title}` 声明实现了 #{n}，合并后没把它交给验收：{calls}\n{said}"
+            );
+            assert!(
+                calls.contains(&format!(
+                    "issue comment {n} --repo zbtzbtzbt/theFlash --body"
+                )),
+                "`{title}` 声明实现了 #{n}，合并后没在它上面评论：{calls}"
+            );
+        }
+        for n in untouched {
+            assert!(
+                !calls.contains(&format!("issue edit {n} ")),
+                "`{title}` 没有声明实现 #{n}，不该动它的标签：{calls}\n{said}"
+            );
+            assert!(
+                !calls.contains(&format!("issue comment {n} ")),
+                "`{title}` 没有声明实现 #{n}，不该在它上面交接验收：{calls}"
+            );
+        }
+        if handed.is_empty() {
+            assert!(
+                !calls.contains("issue edit ") && !calls.contains("issue comment "),
+                "认不出实现了哪个 issue 时不该改任何标签：{calls}"
+            );
+            assert!(
+                said.contains("实现:"),
+                "认不出实现了哪个 issue 时要说明正文该写 `实现: #<号>`：{said}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_declared_number_that_is_a_pull_request_is_not_handed_off() {
+    // PR #164 named #156 and #163 in its title; both are pull requests, and
+    // both got `待验收` plus a comment asking for an independent acceptance
+    // of a pull request (#102 的验收结论). A declaration is not proof
+    // either, so the gate asks GitHub what the number is before it labels.
+    let case = Case::ready("handoff-pull-request-number");
+    case.edit("pull.json", |v| {
+        v["body"] = json!(declaring(v["body"].as_str().unwrap(), "实现: #163、#3"));
+    });
+    let log = case.state().join("gh.log");
+    support::stub(&case.state(), "gh", &gh_that_answers(&log, &[163]));
+    let (calls, said) = merged(&case, &log);
+    assert!(
+        !calls.contains("issue edit 163 ") && !calls.contains("issue comment 163 "),
+        "#163 是一个 PR，不该被交给验收：{calls}"
+    );
+    assert!(
+        said.contains("#163"),
+        "跳过一个号要说清是哪个和为什么：{said}"
+    );
+    assert!(
+        calls.contains("issue edit 3 --repo zbtzbtzbt/theFlash --add-label 待验收")
+            && calls.contains("issue comment 3 --repo zbtzbtzbt/theFlash --body"),
+        "跳过 PR 不应影响同一条声明里真正的 issue：{calls}\n{said}"
+    );
+}
+
+#[test]
+fn a_number_the_gate_cannot_check_keeps_its_labels_and_prints_the_command() {
+    // Asking GitHub what the number is can fail (502, offline). An
+    // unverified number is exactly the case where removing `验收未通过`
+    // throws away a rework, so the gate changes nothing and prints what to
+    // run once the agent knows (#102 的验收结论：拿不准的号不要去掉).
+    let case = Case::ready("handoff-unknown-kind");
+    case.edit("pull.json", |v| {
+        v["body"] = json!(declaring(v["body"].as_str().unwrap(), "实现: #3"));
+    });
+    let log = case.state().join("gh.log");
+    support::stub(
+        &case.state(),
+        "gh",
+        &format!(
+            "printf '%s\\n' \"$*\" >> '{}'\n\
+             case \"$*\" in\n\
+               'api repos/'*'/issues/'*) echo 'HTTP 502: Bad Gateway' >&2; exit 1 ;;\n\
+             esac\n",
+            log.display()
+        ),
+    );
+    let (calls, said) = merged(&case, &log);
+    assert!(
+        !calls.contains("issue edit 3 ") && !calls.contains("issue comment 3 "),
+        "查不到 #3 是 issue 还是 PR 时不该改它的标签：{calls}"
+    );
+    assert!(
+        said.contains("gh issue edit 3 --repo zbtzbtzbt/theFlash --add-label 待验收"),
+        "查不到时要打印手动交接的命令：{said}"
+    );
+}
+
+#[test]
+fn a_label_failure_on_one_issue_still_hands_off_the_others() {
+    // `hand_off_issues` returning on the first label failure would leave
+    // every issue after it with no handoff at all, and nothing in this file
+    // failed when it did (#102 的验收结论：建议修问题 2 时顺手补上).
+    let case = Case::ready("handoff-label-failure-middle");
+    case.edit("pull.json", |v| {
+        v["title"] = json!("claims: 租约能主动交还（#87、#88、#90） (#19)");
+        v["body"] = json!(declaring(
+            v["body"].as_str().unwrap(),
+            "实现: #87、#88、#90"
+        ));
+    });
+    let log = case.state().join("gh.log");
+    support::stub(
+        &case.state(),
+        "gh",
+        &format!(
+            "printf '%s\\n' \"$*\" >> '{}'\n\
+             case \"$*\" in\n\
+               'api repos/'*'/issues/'*) printf '{{\"number\":1}}\\n' ;;\n\
+               'api repos/'*'/pulls/'*) printf '{{\"merge_commit_sha\":\"{MERGED_SHA}\"}}\\n' ;;\n\
+               'issue edit 88 '*) echo 'HTTP 502: Bad Gateway' >&2; exit 1 ;;\n\
+             esac\n",
+            log.display()
+        ),
+    );
+    let (calls, said) = merged(&case, &log);
+    for n in [87, 90] {
+        assert!(
+            calls.contains(&format!(
+                "issue edit {n} --repo zbtzbtzbt/theFlash --add-label 待验收 --remove-label 验收未通过"
+            )) && calls.contains(&format!("issue comment {n} --repo zbtzbtzbt/theFlash --body")),
+            "#88 加标签失败后，#{n} 仍要照常交接：{calls}\n{said}"
+        );
+    }
+    assert!(
+        said.contains("gh issue edit 88 --repo zbtzbtzbt/theFlash --add-label 待验收"),
+        "加标签失败的那个 issue 要打印补标签的命令：{said}"
+    );
+    assert!(
+        calls.contains("issue comment 88 --repo zbtzbtzbt/theFlash --body"),
+        "加标签失败也要在 issue 上留下合并结果：{calls}"
     );
 }

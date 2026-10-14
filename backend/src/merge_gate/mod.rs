@@ -34,20 +34,125 @@ pub const ACCEPT_LABEL: &str = "待验收";
 /// acceptance round instead of another `fix-issue` session (#102).
 pub const REJECTED_LABEL: &str = "验收未通过";
 
+/// Which issues a merged pull request hands over to acceptance (#102).
+///
+/// A title mentions numbers for all sorts of reasons — the pull request it
+/// fixes, the issues a nightly review read, another repository's issue —
+/// so the title alone cannot say which issues this pull request
+/// implemented. Only the pull request itself can, in its body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HandOff {
+    /// The body declared these issues (`实现: #102`), in the order written.
+    Declared(Vec<u64>),
+    /// The body declared that this pull request implements no issue
+    /// (`实现: 无`), the way a lessons or docs pull request does.
+    Nothing,
+    /// The body declared nothing. The numbers are the ones its title
+    /// mentions, which the gate only prints: changing labels on a number
+    /// nobody declared is what marked pull requests `待验收` and cleared
+    /// `验收未通过` from issues nobody had fixed (#102 的验收结论).
+    Undeclared(Vec<u64>),
+}
+
+/// The issues a pull request's body declares it implemented, read from the
+/// `实现: #<号>` trailer (#102). `实现: 无` means it implements none; no
+/// trailer at all leaves the decision to the agent that merges it.
+pub fn issues_to_hand_off(title: &str, body: &str, pull_number: u64) -> HandOff {
+    let mut declared: Vec<u64> = Vec::new();
+    let mut declared_none = false;
+    for line in body.lines() {
+        let Some(value) = implements_trailer(line) else {
+            continue;
+        };
+        // The line AGENTS.md shows (`实现: #<issue>`) is a placeholder, not
+        // a declaration; a pull request quoting the instructions still has
+        // to declare its own issue.
+        if value.contains('<') {
+            continue;
+        }
+        let refs = issue_refs(value, pull_number);
+        if refs.is_empty() {
+            declared_none |= says_none(value);
+            continue;
+        }
+        for n in refs {
+            if !declared.contains(&n) {
+                declared.push(n);
+            }
+        }
+    }
+    if !declared.is_empty() {
+        HandOff::Declared(declared)
+    } else if declared_none {
+        HandOff::Nothing
+    } else {
+        HandOff::Undeclared(issues_in_title(title, pull_number))
+    }
+}
+
+/// The value of a `实现:` line, however the agent marked it up (`- 实现：`,
+/// `**实现**: `, `实现的 issue:`). Prose that starts with the same two
+/// characters (`实现了 #3 的回流提醒`) is not a declaration.
+fn implements_trailer(line: &str) -> Option<&str> {
+    let line = line
+        .trim()
+        .trim_start_matches(['-', '*', '>', '+', ' ', '\t'])
+        .trim();
+    let rest = line.strip_prefix("实现")?;
+    let rest = rest.trim_start();
+    let rest = rest
+        .strip_prefix("的 issue")
+        .or_else(|| rest.strip_prefix("的issue"))
+        .unwrap_or(rest);
+    let rest = rest.trim_start().trim_start_matches('*').trim_start();
+    let rest = rest.strip_prefix([':', '：'])?;
+    Some(rest.trim())
+}
+
+/// `实现: 无` and the other ways an agent writes "this one implements no
+/// issue".
+fn says_none(value: &str) -> bool {
+    let v = value.trim().trim_matches('`').trim();
+    v.starts_with('无')
+        || v.starts_with("没有")
+        || v.starts_with("不涉及")
+        || v == "-"
+        || v.eq_ignore_ascii_case("none")
+        || v.eq_ignore_ascii_case("n/a")
+}
+
 /// Every issue number named as `#<number>` in a pull request title
 /// (such as `（#15）` or `（#14、#9）`), in the order written, without
-/// duplicates or the pull request's own number (#102).
+/// duplicates or the pull request's own number (#102). Only a hint now:
+/// what gets handed off is what the body declares.
 pub fn issues_in_title(title: &str, pull_number: u64) -> Vec<u64> {
+    issue_refs(title, pull_number)
+}
+
+/// The issue numbers `text` names, in the order written and without
+/// duplicates or the pull request's own number.
+fn issue_refs(text: &str, pull_number: u64) -> Vec<u64> {
     let mut out = Vec::new();
-    let chars: Vec<char> = title.chars().collect();
+    let chars: Vec<char> = text.chars().collect();
     for (i, c) in chars.iter().enumerate() {
         if *c != '#' {
+            continue;
+        }
+        // `other/repo#5` is another repository's issue, and `v1#3` is not
+        // a reference at all: a reference starts a word. `#156/#163` does,
+        // twice, so a `/` before the `#` is fine — a repository name ends
+        // in a letter or a digit.
+        if i > 0 && chars[i - 1].is_alphanumeric() {
             continue;
         }
         let digits: String = chars[i + 1..]
             .iter()
             .take_while(|c| c.is_ascii_digit())
             .collect();
+        // GitHub never pads a number, so `#012` is not a reference to #12.
+        if digits.len() > 1 && digits.starts_with('0') {
+            continue;
+        }
         if let Ok(n) = digits.parse::<u64>()
             && n > 0
             && n != pull_number

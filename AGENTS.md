@@ -55,8 +55,8 @@ theFlash 是大麦网（damai.cn）的抢票程序，一个 AI Native 项目：�
 5. **修复，并覆盖同类**：grep 同样的模式，同类位置在同一个改动里一起修。
 6. **自检**：跑 [code-standards 的验收标准](docs/code-standards.md#验收标准)，记下每条命令和结果。没跑的写“没跑”。
 7. **提交**：一个 commit 只做一件事，格式见下。提交后 `git show --stat HEAD` 必须只列出你的文件。
-8. **开 PR 并盯 CI**：推到自己的分支，`gh pr create` 提 PR，等 CI。不直接推 main（只有发版 tag 例外，见 [0007](docs/decisions/0007-merge-gate.md)）。CI 红了，修它就是你当下的任务。
-9. **交给审查，再交给验收**：CI 绿了以后在 issue 上汇报怎么运行、每条验收标准的证据、没做的部分，附 PR 链接，然后给 PR 加 `待审查` 标签。不要合并自己的 PR，不要给自己的 issue 加 `待验收`，不要关闭 issue。另一个 agent 审查并合并（见下面的[审查和合并](#审查和合并)），合并后由审查者加 `待验收`；再由第三个 agent 按 [prompts/acceptance.md](prompts/acceptance.md) 验收：通过就由它关闭；不通过它会把标签换成 `验收未通过` 并写明问题，由你或下一个接手的 agent 修好后重新加上 `待验收`。
+8. **开 PR 并盯 CI**：推到自己的分支，`gh pr create` 提 PR，等 CI。PR 正文里写一行 `实现: #<号>`（多个用 `、` 隔开），说明这个 PR 实现了哪个 issue；不实现任何 issue（复盘、LESSONS、只改文档）就写 `实现: 无`。合并闸门按这一行把 issue 交给验收，标题里的号它不认（标题常常还提着别的 PR 和只是被引用的 issue，#102）。不直接推 main（只有发版 tag 例外，见 [0007](docs/decisions/0007-merge-gate.md)）。CI 红了，修它就是你当下的任务。
+9. **交给审查，再交给验收**：CI 绿了以后在 issue 上汇报怎么运行、每条验收标准的证据、没做的部分，附 PR 链接，然后给 PR 加 `待审查` 标签。不要合并自己的 PR，不要给自己的 issue 加 `待验收`，不要关闭 issue。另一个 agent 审查并合并（见下面的[审查和合并](#审查和合并)），合并时由合并闸门按你正文里的 `实现: #<号>` 加上 `待验收`；再由第三个 agent 按 [prompts/acceptance.md](prompts/acceptance.md) 验收：通过就由它关闭；不通过它会把标签换成 `验收未通过` 并写明问题，由你或下一个接手的 agent 修好后重新加上 `待验收`。
 10. **收尾**：PR 合入、issue 验收通过后，删掉自己的 worktree，以及为这个任务建的其他目录。会话等不到验收就要结束的，在交出去时就删：分支已经推到远程，返工时重新 `git worktree add` 就行。
     ```sh
     cd ../theFlash                                  # 先离开要删的目录
@@ -75,7 +75,7 @@ theFlash 是大麦网（damai.cn）的抢票程序，一个 AI Native 项目：�
 1. 按 [code-standards 的“合并”](docs/code-standards.md#合并) 审：把 PR 拉下来合到当前 main 上，在结果上跑验收检查，故意弄坏它守护的代码，确认新测试会红。只读 diff 不算审查。
 2. 在 PR 上写一条审查记录评论，格式和字段见 [合并闸门](docs/subsystems/merge-gate.md#审查记录的格式)：被审查的 SHA、合到的 main、审查者、结论、跑了什么。记录写在合并之前，合并后补的记录不算。
 3. 合并：`scripts/merge-gate merge --pr <号>`（或 `scripts/merge-gate queue` 把所有能合的依次合入）。它会重新核对一遍，然后用 `--match-head-commit` 合并被审查的那个提交。被它拒绝时，拒绝信息里写了是哪一条不满足。
-4. 合并闸门会自动给 PR 标题里的关联 issue 加 `待验收` 并留评论；确认一下标签已加上。
+4. 合并闸门会按 PR 正文的 `实现: #<号>` 给对应 issue 加 `待验收` 并留评论；确认一下标签已加上。正文没有这一行时闸门不动任何标签，只打印要手动跑的命令（它认不出标题里的号哪个是这个 PR 实现的 issue），由你确认后补上。
 5. 合并了或打回了，就按[会话流程第 10 步](#一次会话的流程)删掉自己的审查 worktree。下一轮再审时从最新 main 重新建。
 
 `scripts/merge-gate check --pr <号>` 只核对、不合并，实现者自己也可以跑，看看还差什么。
@@ -104,7 +104,7 @@ theFlash 是大麦网（damai.cn）的抢票程序，一个 AI Native 项目：�
 <模块>: <用户现在看到的行为>（#<issue> 或 <报告人>: <原话>）
 ```
 
-commit 正文和 PR 正文的最后一行写 `Agent: <你是哪个 agent>`，例如 `Agent: Claude`。所有 agent 共用一个 GitHub 账号，这个标记是唯一能看出改动是谁写的、审查者是不是实现者的东西；没有它，合并闸门会拒绝合并。
+commit 正文和 PR 正文的最后一行写 `Agent: <你是哪个 agent>`，例如 `Agent: Claude`。所有 agent 共用一个 GitHub 账号，这个标记是唯一能看出改动是谁写的、审查者是不是实现者的东西；没有它，合并闸门会拒绝合并。PR 正文里还要有一行 `实现: #<号>` 或 `实现: 无`，合并闸门按它把 issue 交给验收（见第 8 步）。
 
 改动超过约 50 行时必须写正文：
 

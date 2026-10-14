@@ -472,6 +472,20 @@ pub fn hand_off_issue_labels(
     ])
 }
 
+/// Is `number` a pull request rather than an issue? GitHub numbers both
+/// from the same sequence and answers for both under `issues/<号>`,
+/// telling them apart by a `pull_request` field. A pull request never
+/// needs `待验收`: acceptance is about an issue (#102).
+pub fn is_pull_request(repo: &str, number: u64) -> Result<bool, Error> {
+    #[derive(Deserialize)]
+    struct Item {
+        pull_request: Option<serde_json::Value>,
+    }
+    let text = gh_api(&format!("repos/{repo}/issues/{number}"))?;
+    let item: Item = from_json(&format!("#{number} 是 issue 还是 PR"), &text)?;
+    Ok(item.pull_request.is_some())
+}
+
 /// Reads the squash commit SHA GitHub recorded on pull request `number`
 /// after `gh pr merge` completed (#102).
 pub fn merged_commit_sha(repo: &str, number: u64) -> Result<String, Error> {

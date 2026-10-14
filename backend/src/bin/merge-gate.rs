@@ -85,6 +85,18 @@ fn check(options: &Options) -> ExitCode {
     let decision = merge_gate::decide(&snapshot);
     print_decision(&snapshot, &decision);
     if decision.is_merge() {
+        // Said before the merge, while the implementer can still fix it:
+        // the handoff to acceptance reads the body, not the title (#102).
+        if let merge_gate::HandOff::Undeclared(_) = merge_gate::issues_to_hand_off(
+            &snapshot.pull.title,
+            &snapshot.pull.body,
+            snapshot.pull.number,
+        ) {
+            eprintln!(
+                "注意：PR 正文没有 `实现: #<号>` 这一行，合并后闸门不会自动把 issue 交给验收。\
+                 这个 PR 不实现任何 issue 就写 `实现: 无`"
+            );
+        }
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
@@ -211,7 +223,7 @@ fn merge_locked(options: &Options, pr: u64) -> ExitCode {
             hand_off_issues(
                 options.repo(),
                 pr,
-                &snapshot.pull.title,
+                &snapshot.pull,
                 sha,
                 reviewer,
                 record_url,
@@ -225,17 +237,55 @@ fn merge_locked(options: &Options, pr: u64) -> ExitCode {
     }
 }
 
-/// Hands every issue named in the pull request's title over to
-/// acceptance (`待验收`) and leaves the merged commit and review record
-/// on the issue (#102). A label or comment failure never turns a merged
-/// pull request into a failed command: the commit is already on main, so
-/// the caller gets exit 0 and the exact command to finish the handoff by
-/// hand.
-fn hand_off_issues(repo: &str, pr: u64, title: &str, sha: &str, reviewer: &str, record_url: &str) {
-    let issues = merge_gate::issues_in_title(title, pr);
-    if issues.is_empty() {
-        return;
-    }
+/// Hands the issues a pull request says it implemented over to acceptance
+/// (`待验收`) and leaves the merged commit and review record on each of
+/// them (#102). A label or comment failure never turns a merged pull
+/// request into a failed command: the commit is already on main, so the
+/// caller gets exit 0 and the exact command to finish the handoff by hand.
+///
+/// Numbers nobody declared, numbers that turn out to be pull requests, and
+/// numbers GitHub would not answer for keep their labels: removing
+/// `验收未通过` from an issue this pull request did not fix sends the next
+/// `dispatch` round to acceptance instead of to the rework that is still
+/// owed (#102 的验收结论).
+fn hand_off_issues(
+    repo: &str,
+    pr: u64,
+    pull: &merge_gate::Pull,
+    sha: &str,
+    reviewer: &str,
+    record_url: &str,
+) {
+    let issues = match merge_gate::issues_to_hand_off(&pull.title, &pull.body, pr) {
+        merge_gate::HandOff::Declared(issues) => issues,
+        merge_gate::HandOff::Nothing => {
+            println!("PR #{pr} 正文声明没有实现任何 issue，不交接验收");
+            return;
+        }
+        merge_gate::HandOff::Undeclared(in_title) => {
+            eprint!(
+                "PR #{pr} 的正文没有 `实现: #<号>` 这一行，认不出它实现了哪个 issue，\
+                 所以没有动任何标签（标题里的号可能是别的 PR、别的仓库的号，\
+                 或者只是被提到的 issue）。"
+            );
+            if in_title.is_empty() {
+                eprintln!("标题里也没有 issue 号。");
+            } else {
+                eprintln!(
+                    "标题提到了 {}；确认哪些是这个 PR 实现的之后手动交接：\
+                     gh issue edit <号> --repo {repo} --add-label {} --remove-label {}",
+                    in_title
+                        .iter()
+                        .map(|n| format!("#{n}"))
+                        .collect::<Vec<_>>()
+                        .join("、"),
+                    merge_gate::ACCEPT_LABEL,
+                    merge_gate::REJECTED_LABEL,
+                );
+            }
+            return;
+        }
+    };
     let merged_sha = match snapshot::merged_commit_sha(repo, pr) {
         Ok(s) => Some(s),
         Err(e) => {
@@ -246,6 +296,31 @@ fn hand_off_issues(repo: &str, pr: u64, title: &str, sha: &str, reviewer: &str, 
         }
     };
     for issue in issues {
+        // A declaration is the implementer's word, not a fact: #102's
+        // acceptance found pull request numbers handed off as issues. The
+        // one question GitHub answers cheaply is which of the two a number
+        // is, and an unanswered question is a number the gate leaves alone.
+        match snapshot::is_pull_request(repo, issue) {
+            Ok(false) => {}
+            Ok(true) => {
+                eprintln!(
+                    "#{issue} 是一个 PR，不是 issue，不交接验收：验收的对象是 issue，\
+                     PR 不需要 `{}`。正文的 `实现:` 写错了号就改一下",
+                    merge_gate::ACCEPT_LABEL,
+                );
+                continue;
+            }
+            Err(e) => {
+                eprintln!(
+                    "查 #{issue} 是 issue 还是 PR 失败：{e}；没有动它的标签，\
+                     确认它就是这个 PR 实现的 issue 之后手动交接：\
+                     gh issue edit {issue} --repo {repo} --add-label {} --remove-label {}",
+                    merge_gate::ACCEPT_LABEL,
+                    merge_gate::REJECTED_LABEL,
+                );
+                continue;
+            }
+        }
         let labelled = match snapshot::hand_off_issue_labels(
             repo,
             issue,

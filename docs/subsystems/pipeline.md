@@ -43,8 +43,8 @@ flowchart LR
 | 等裁决 | `等裁决` | 发现需要 owner 决定的 agent | owner 裁决后，owner 或转述裁决的 agent 去掉标签并写明裁决 → 排队 |
 | 排队 | `P0`～`P3`，没有下面几个标签 | 定级 | 认领的 agent（`scripts/claims claim`）→ 认领中 |
 | 被依赖挡着 | 正文里 `依赖：#N`，#N 还开着 | 开 issue 或拆架构的 agent | #N 关闭时自动回到排队 |
-| 认领中 | `认领中` | 认领的 agent | 租约过期被收回 → 排队；PR 合并后由审查者加 `待验收`（还是手动的，#102 让合并闸门自动加） |
-| 待验收 | `待验收` | 合并 PR 的审查者 | 验收者：通过就关闭；不通过换成 `验收未通过` |
+| 认领中 | `认领中` | 认领的 agent | 租约过期被收回 → 排队；PR 合并后[合并闸门](merge-gate.md#交接给验收)按 PR 正文的 `实现: #<号>` 自动加 `待验收` |
+| 待验收 | `待验收` | 合并闸门（审查者调用它合并时）；正文没声明实现了哪个 issue 时，由合并的审查者按闸门打印的命令补 | 验收者：通过就关闭；不通过换成 `验收未通过` |
 | 验收未通过 | `验收未通过` | 验收者 | 实现者（或租约过期后接手的人）修好后重新加 `待验收` |
 | 关闭 | — | 验收者（completed）；owner 或 agent 关掉重复和不做的（not planned，评论写原因） | — |
 
@@ -55,7 +55,7 @@ flowchart LR
 | CI 在跑 | 没有标签 | 实现者开 PR | CI 绿了，实现者加 `待审查` |
 | 待审查 | `待审查` | 实现者 | 审查者：要修改 → `要修改`；通过 → `审查通过` 并合并 |
 | 要修改 | `要修改` | 审查者 | 实现者修好、CI 绿了换回 `待审查` |
-| 审查通过 | `审查通过` | 审查者，写完[审查记录](merge-gate.md#审查记录的格式) | `scripts/merge-gate merge` 合入；合入后审查者给 issue 加 `待验收` |
+| 审查通过 | `审查通过` | 审查者，写完[审查记录](merge-gate.md#审查记录的格式) | `scripts/merge-gate merge` 合入；合入时闸门自己给声明的 issue 加 `待验收`，审查者确认一下 |
 
 ## 每一站进站和出站要什么
 
@@ -65,9 +65,9 @@ flowchart LR
 | 定级 | issue | 一个优先级标签和两个轴的理由；需要时 `等裁决`、`依赖：` | 第一个看到的 agent | [Issue 优先级](issue-priority.md) |
 | 认领 | 定了级、排在队列前面、依赖都关了 | 租约评论：agent、模块、分支 | 实现者 | [认领租约](claim-lease.md) |
 | 实现 | 租约 | 一个只做这件事的 commit：失败测试、修复覆盖同类、Run 和 Not tried | 实现者 | [AGENTS.md](../../AGENTS.md#一次会话的流程)、[code-standards](../code-standards.md#验收标准) |
-| PR + CI | commit 推到自己的分支 | CI 绿的 PR，正文末行 `Agent:`，issue 上的汇报 | 实现者 | [AGENTS.md](../../AGENTS.md#一次会话的流程) |
+| PR + CI | commit 推到自己的分支 | CI 绿的 PR，正文里 `实现: #<号>`（不实现 issue 就写 `实现: 无`）和末行 `Agent:`，issue 上的汇报 | 实现者 | [AGENTS.md](../../AGENTS.md#一次会话的流程) |
 | 审查 | `待审查`，审查者不是实现者的厂商 | 写在合并之前的审查记录：被审查的 SHA、合到的 main、跑了什么、结论 | 审查者 | [code-standards 的合并](../code-standards.md#合并) |
-| 合并 | `审查通过`、CI 绿、审查记录对得上 head | main 上一个 squash 提交，issue 加 `待验收` | 审查者调用合并闸门 | [合并闸门](merge-gate.md) |
+| 合并 | `审查通过`、CI 绿、审查记录对得上 head | main 上一个 squash 提交；PR 正文声明的 issue 加上 `待验收` | 审查者调用合并闸门，闸门做交接 | [合并闸门](merge-gate.md#交接给验收) |
 | 验收 | `待验收`，验收者不是实现者 | issue 上的结论：每条验收标准怎么验的、结果 | 验收者 | [prompts/acceptance.md](../../prompts/acceptance.md) |
 | 收尾 | PR 合入、issue 验收通过（或会话要结束） | 删掉自己的 worktree 和这个任务的目录 | 每个建过 worktree 的会话 | [AGENTS.md 第 10 步](../../AGENTS.md#一次会话的流程) |
 | 复盘 | 水位线之后的 commit、PR、issue | LESSONS.md 的新教训；该升级的进 code-standards；能机械判断的变成守护 | 夜间复盘 | [prompts/nightly-review.md](../../prompts/nightly-review.md) |
