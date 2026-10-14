@@ -478,9 +478,18 @@ fn fetch_last_push(repo: &str, branch: &str) -> Result<Option<Push>, Error> {
     match gh_api_list(&path) {
         Ok(text) => last_push_from_json("分支的推送活动", &text),
         Err(Error::Gh { why, .. }) if why.contains("404") || why.contains("Not Found") => Ok(None),
-        Err(Error::Gh { why, .. }) => Ok(Some(Push::Unreadable(why))),
+        Err(Error::Gh { why, .. }) if is_permission_error(&why) => Ok(Some(Push::Unreadable(why))),
         Err(e) => Err(e),
     }
+}
+
+fn is_permission_error(why: &str) -> bool {
+    let lower = why.to_lowercase();
+    lower.contains("403")
+        || lower.contains("push access")
+        || lower.contains("forbidden")
+        || lower.contains("resource not accessible")
+        || lower.contains("insufficient")
 }
 
 // ---- what the board writes back ----

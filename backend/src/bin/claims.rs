@@ -32,8 +32,10 @@ const USAGE: &str = "用法：
                               认领一个 issue：加 认领中 标签，发一条认领评论。
                               没定级、等裁决、依赖没关、或者队列里有更高优先级
                               的 issue 时拒绝，除非用 --out-of-order 写明理由
-  claims heartbeat --issue <号> --agent <名字> --note <进度> [--dry-run]
+  claims heartbeat --issue <号> --agent <名字> [--claim <认领评论链接>] --note <进度> [--dry-run]
                               在 issue 上报一次进度，刷新租约
+  claims release --issue <号> --agent <名字> [--claim <认领评论链接>] [--note <说明>] [--dry-run]
+                              持有者或调度程序主动交还一条租约：发 ## 交还认领 评论并去掉标签
   claims reclaim --issue <号> --agent <名字> [--dry-run]
                               收回一条已过期的认领：说明情况并去掉标签
   任何子命令都接受 --replay <目录>（用保存的 GitHub 响应判断，测试用）
@@ -61,6 +63,7 @@ fn main() -> ExitCode {
         "triage" => triage(&options),
         "claim" => claim_one(&options),
         "heartbeat" => heartbeat(&options),
+        "release" => release(&options),
         "reclaim" => reclaim(&options),
         _ => usage(),
     }
@@ -81,6 +84,7 @@ struct Options {
     due: Option<String>,
     overlap: Option<String>,
     out_of_order: Option<String>,
+    claim_url: Option<String>,
     note: Option<String>,
     priority: Option<Priority>,
     important: Option<String>,
@@ -105,6 +109,7 @@ impl Options {
                 "--due" => self.due = Some(value()?),
                 "--overlap" => self.overlap = Some(value()?),
                 "--out-of-order" => self.out_of_order = Some(value()?),
+                "--claim" => self.claim_url = Some(value()?),
                 "--note" => self.note = Some(value()?),
                 "--priority" => self.priority = Some(Priority::parse(&value()?).ok_or(())?),
                 "--important" => self.important = Some(value()?),
@@ -765,7 +770,84 @@ fn claim_one(options: &Options) -> ExitCode {
         Ok(()) => {}
         Err(code) => return code,
     }
-    label(options, number, Label::Add(lease::CLAIM_LABEL))
+    if let Err(code) = label(options, number, Label::Add(lease::CLAIM_LABEL)) {
+        return code;
+    }
+    // Issue #90: two agents can also read the same board at the same
+    // moment and claim two *different* issues for the same module without
+    // `--overlap`. After adding the `认领中` label so this claim is visible
+    // on the board, re-read the board and check whether another issue's
+    // claim covering our modules landed earlier.
+    confirm_board_overlap(options, number, &posted, now)
+}
+
+fn confirm_board_overlap(
+    options: &Options,
+    number: u64,
+    posted: &str,
+    now: DateTime<Utc>,
+) -> ExitCode {
+    if options
+        .overlap
+        .as_deref()
+        .is_some_and(|r| !r.trim().is_empty())
+    {
+        return ExitCode::SUCCESS;
+    }
+    let fresh_board = match options.board() {
+        Ok(b) => b,
+        Err(code) => return code,
+    };
+    let my_issue = match options.issue(number) {
+        Ok(i) => i,
+        Err(code) => return code,
+    };
+    let Some(my_comment) = my_issue.comments.iter().find(|c| c.url == posted) else {
+        return ExitCode::SUCCESS;
+    };
+    for other in fresh_board.holding(now) {
+        if other.issue == number {
+            continue;
+        }
+        let shared = lease::overlap(&other.claim.modules, &options.modules);
+        if shared.is_empty() || !other.claim.overlap_note.is_empty() {
+            continue;
+        }
+        let other_id = comment_id_from_url(&other.claim.url);
+        let earlier = (other.claim.posted_at, other_id) < (my_comment.posted_at, my_comment.id)
+            || ((other.claim.posted_at, other_id) == (my_comment.posted_at, my_comment.id)
+                && other.issue < number);
+        if earlier {
+            let body = claim::yield_overlap_comment(
+                options.agent(),
+                posted,
+                other.issue,
+                other.agent(),
+                &other.claim.url,
+                &shared,
+            );
+            println!("要发的让出评论：\n{body}");
+            let _ = comment(options, number, &body);
+            let _ = snapshot::remove_label(options.repo(), number, lease::CLAIM_LABEL);
+            eprintln!(
+                "让出 — #{} 几乎同时被 {} 认领了（{}），同样要改 {}，而且那条认领更早、两边都没写分工。\
+                 我这条已经作废并去掉了 {} 标签；写清分工后再带 --overlap 重新认领",
+                other.issue,
+                other.agent(),
+                other.claim.url,
+                shared.join("、"),
+                lease::CLAIM_LABEL
+            );
+            return ExitCode::FAILURE;
+        }
+    }
+    ExitCode::SUCCESS
+}
+
+fn comment_id_from_url(url: &str) -> u64 {
+    url.rsplit_once("issuecomment-")
+        .and_then(|(_, digits)| digits.parse().ok())
+        .unwrap_or(u64::MAX)
 }
 
 /// Checks that the claim just posted is the one that holds the issue, and
@@ -825,7 +907,24 @@ fn heartbeat(options: &Options) -> ExitCode {
             );
             return ExitCode::FAILURE;
         }
-        Some(held) => (!held.labelled, held.claim.url.clone()),
+        Some(held) => {
+            if let Some(want) = options
+                .claim_url
+                .as_deref()
+                .map(str::trim)
+                .filter(|u| !u.is_empty())
+                && want != held.claim.url
+            {
+                eprintln!(
+                    "拒绝 — #{number} 当前的认领是 {}（{}），不是你传的 {want}：\
+                     你那条旧认领已经被收回或交还，不能续在另一个同厂商会话的租约上",
+                    held.claim.url,
+                    held.agent()
+                );
+                return ExitCode::FAILURE;
+            }
+            (!held.labelled, held.claim.url.clone())
+        }
         None => {
             eprintln!(
                 "#{number} 上没有读得出来的认领，心跳不会刷新任何租约。\
@@ -850,10 +949,109 @@ fn heartbeat(options: &Options) -> ExitCode {
     if let Err(code) = comment(options, number, &body) {
         return code;
     }
-    if relabel {
-        return label(options, number, Label::Add(lease::CLAIM_LABEL));
+    if relabel && let Err(code) = label(options, number, Label::Add(lease::CLAIM_LABEL)) {
+        return code;
     }
     ExitCode::SUCCESS
+}
+
+/// Voluntarily releases a lease held by `agent` (or ended by `dispatcher`)
+/// without waiting 120 minutes for expiry (#87).
+fn release(options: &Options) -> ExitCode {
+    let Some(number) = options.issue else {
+        return usage();
+    };
+    if options.agent().is_empty() {
+        return usage();
+    }
+    let now = match options.now() {
+        Ok(n) => n,
+        Err(code) => return code,
+    };
+    let (board, issue) = match options.board_with(number) {
+        Ok(both) => both,
+        Err(code) => return code,
+    };
+    let verdict = claim::decide_release(
+        &board,
+        number,
+        options.agent(),
+        options.claim_url.as_deref(),
+    );
+    if !verdict.is_ok() {
+        return refused(&verdict);
+    }
+    let (holder, target_url, labelled) = if let Some(held) = board.lease(number) {
+        (
+            held.agent().to_string(),
+            held.claim.url.clone(),
+            held.labelled,
+        )
+    } else {
+        let inc = board
+            .trouble
+            .iter()
+            .find(|t| t.issue == number)
+            .and_then(|t| t.incomplete.as_ref())
+            .expect("decide_release checked lease or incomplete claim exists");
+        let who = if inc.agent.is_empty() {
+            options.agent().to_string()
+        } else {
+            inc.agent.clone()
+        };
+        (
+            who,
+            inc.url.clone(),
+            issue.labels.iter().any(|l| l == lease::CLAIM_LABEL),
+        )
+    };
+    let body = claim::release_comment(
+        &holder,
+        &target_url,
+        options.agent(),
+        options.note.as_deref(),
+        now,
+    );
+    println!("要发的交还评论：\n{body}");
+    if !options.writes() {
+        println!("没有真的发评论、没有去掉标签（--dry-run 或 --replay）");
+        return ExitCode::SUCCESS;
+    }
+    if let Err(code) = comment(options, number, &body) {
+        return code;
+    }
+    match options.issue(number) {
+        Ok(fresh) => match claim::read_lease(&fresh, &board.pushes) {
+            Ok(now_held) => {
+                println!(
+                    "#{number} 上现在有一条新认领（{}，{}），{} 标签留着：\
+                     上面那条交还评论只结束它点名的那条租约",
+                    now_held.claim.url,
+                    now_held.agent(),
+                    lease::CLAIM_LABEL
+                );
+                return ExitCode::SUCCESS;
+            }
+            Err((claim::Problem::Unreadable, why)) => {
+                eprintln!(
+                    "交还评论发出去了，但重新读取 #{number} 时认领读不出来：{why}。\
+                     为免藏起可能的新租约，{} 标签留着，请去 issue 上确认",
+                    lease::CLAIM_LABEL
+                );
+                return ExitCode::from(2);
+            }
+            Err((claim::Problem::HandedBack, _)) => {}
+        },
+        Err(code) => return code,
+    }
+    if !labelled {
+        println!("#{number} 本来就没有 {} 标签，不用去掉", lease::CLAIM_LABEL);
+        return ExitCode::SUCCESS;
+    }
+    match label(options, number, Label::Remove(lease::CLAIM_LABEL)) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(code) => code,
+    }
 }
 
 /// Takes over an expired claim: says what it took over and on what
@@ -869,7 +1067,7 @@ fn reclaim(options: &Options) -> ExitCode {
         Ok(n) => n,
         Err(code) => return code,
     };
-    let (board, _) = match options.board_with(number) {
+    let (board, issue) = match options.board_with(number) {
         Ok(both) => both,
         Err(code) => return code,
     };
@@ -877,9 +1075,25 @@ fn reclaim(options: &Options) -> ExitCode {
     if !verdict.is_ok() {
         return refused(&verdict);
     }
-    let held = board.lease(number).expect("a reclaimable lease exists");
-    let labelled = held.labelled;
-    let body = claim::reclaim_comment(held, options.agent(), now);
+    let (target_url, labelled, body) = if let Some(held) = board.lease(number) {
+        (
+            held.claim.url.clone(),
+            held.labelled,
+            claim::reclaim_comment(held, options.agent(), now),
+        )
+    } else {
+        let inc = board
+            .trouble
+            .iter()
+            .find(|t| t.issue == number)
+            .and_then(|t| t.incomplete.as_ref())
+            .expect("a reclaimable lease or incomplete claim exists");
+        (
+            inc.url.clone(),
+            issue.labels.iter().any(|l| l == lease::CLAIM_LABEL),
+            claim::reclaim_incomplete_comment(inc, options.agent(), now),
+        )
+    };
     println!("要发的收回评论：\n{body}");
     if !options.writes() {
         println!("没有真的发评论、没有去掉标签（--dry-run 或 --replay）");
@@ -889,12 +1103,23 @@ fn reclaim(options: &Options) -> ExitCode {
         return code;
     }
     // The snapshot this decided on may be minutes old, and the holder or
-    // somebody else may have claimed the issue in between. Taking the
-    // label off then would hide a lease that is seconds old, so the
-    // label comes off only if the claim being handed back is still the
-    // one on the issue.
+    // somebody else may have claimed or refreshed the issue in between.
+    // Taking the label off then would hide a lease that is seconds old,
+    // so the label comes off only if the claim being handed back was
+    // actually ended and no lease holds the issue now.
     match options.issue(number) {
         Ok(fresh) => match claim::read_lease(&fresh, &board.pushes) {
+            Ok(now_held) if now_held.claim.url == target_url => {
+                eprintln!(
+                    "拒绝 — 收回评论发出之前，{} 刚刚更新了 #{number} 的租约（{}，最后更新：{}），\
+                     这条租约其实还没过期，这次收回作废；{} 标签留着",
+                    now_held.agent(),
+                    now_held.claim.url,
+                    now_held.last.sign.what(),
+                    lease::CLAIM_LABEL
+                );
+                return ExitCode::FAILURE;
+            }
             Ok(now_held) => {
                 println!(
                     "#{number} 上现在有一条认领（{}，{}），{} 标签留着：\
@@ -921,7 +1146,10 @@ fn reclaim(options: &Options) -> ExitCode {
         println!("#{number} 本来就没有 {} 标签，不用去掉", lease::CLAIM_LABEL);
         return ExitCode::SUCCESS;
     }
-    label(options, number, Label::Remove(lease::CLAIM_LABEL))
+    match label(options, number, Label::Remove(lease::CLAIM_LABEL)) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(code) => code,
+    }
 }
 
 /// The label change a command makes after its comment, if any. A
@@ -947,7 +1175,7 @@ fn comment(options: &Options, number: u64, body: &str) -> Result<String, ExitCod
     }
 }
 
-fn label(options: &Options, number: u64, which: Label) -> ExitCode {
+fn label(options: &Options, number: u64, which: Label) -> Result<(), ExitCode> {
     let (done, result) = match which {
         Label::Add(l) => (
             format!("#{number} 加上了 {l} 标签"),
@@ -961,7 +1189,7 @@ fn label(options: &Options, number: u64, which: Label) -> ExitCode {
     match result {
         Ok(_) => {
             println!("{done}");
-            ExitCode::SUCCESS
+            Ok(())
         }
         Err(e) => {
             eprintln!(
@@ -970,7 +1198,7 @@ fn label(options: &Options, number: u64, which: Label) -> ExitCode {
                  `claims heartbeat --issue {number} --agent {}` 会把标签补上",
                 options.agent()
             );
-            ExitCode::from(2)
+            Err(ExitCode::from(2))
         }
     }
 }
