@@ -1,14 +1,20 @@
-//! The events one inspection looks at: one per situation theFlash has to
-//! handle. Samples go stale — a sale opens, an event ends — so a sample
-//! that no longer shows its situation is replaced with one taken off
-//! damai.cn's home page. The search endpoint is not used: it answered its
-//! first anonymous request with a slider challenge (0001).
+//! The events one inspection looks at: at least one per situation theFlash
+//! has to handle. Samples go stale — a sale opens, an event ends — and
+//! damai.cn has no anonymous listing to take new ones from, so a situation
+//! is covered from, in order: the backups this machine saved, the pool
+//! kept in the repository, and the home page. Nothing left means the
+//! inspection is blind to that situation, which it says out loud rather
+//! than passing quietly (0014).
+//!
+//! The search endpoint is not used: it answered its first anonymous
+//! request with a slider challenge (0001).
 
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::damai::text::integer;
 use crate::damai::{SaleState, sale_state_of_code};
 
 /// The situations the samples have to cover.
@@ -63,25 +69,86 @@ pub struct SampleSet {
     pub samples: Vec<Sample>,
 }
 
-/// The events the responses in `backend/testdata/damai/` were recorded
-/// from, which is where an inspection starts on a machine that has never
-/// run one. Any of them can be replaced from the home page once it stops
-/// showing its situation.
+/// How many events one situation keeps: the one the next run reads, and
+/// the backups it falls back to when that one stops showing the
+/// situation. Backups cost nothing until they are needed — a run reads at
+/// most one event per situation — so this is only about how much of the
+/// sample file is history worth keeping.
+pub const KEEP_PER_CATEGORY: usize = 3;
+
+/// Events seen in each situation, kept in the repository as the floor
+/// under whatever this machine saved: the event
+/// `backend/testdata/damai/` was recorded from comes first, then any
+/// other an agent has seen in that situation.
+///
+/// This list grows by hand. damai.cn has no anonymous listing to grow it
+/// from: its home page, its mobile site and its campaign pages all render
+/// their cards in JavaScript off a signed endpoint, and the search
+/// endpoint answers its first anonymous request with a slider challenge
+/// (0001, 0014). So a run that uses up a situation's candidates reports a
+/// finding asking for a new event here, instead of going quietly blind.
+const POOL: [(Category, &[u64]); 5] = [
+    (Category::OnSale, &[1086791513717]),
+    (Category::NotYetOnSale, &[1092337348536]),
+    (Category::SoldOut, &[1077137031347]),
+    (Category::Calendar, &[1084537866279]),
+    (Category::NotOnPcChannel, &[1080486727522]),
+];
+
+/// The events this repository knows showed `category`, newest knowledge
+/// first.
+pub fn pool(category: Category) -> &'static [u64] {
+    POOL.iter()
+        .find(|(c, _)| *c == category)
+        .map_or(&[], |(_, ids)| *ids)
+}
+
+/// Where an inspection starts on a machine that has never run one: the
+/// first event of every situation's pool.
 pub fn seed() -> Vec<Sample> {
-    [
-        (1086791513717, Category::OnSale),
-        (1092337348536, Category::NotYetOnSale),
-        (1077137031347, Category::SoldOut),
-        (1084537866279, Category::Calendar),
-        (1080486727522, Category::NotOnPcChannel),
-    ]
-    .into_iter()
-    .map(|(item_id, category)| Sample {
-        item_id,
-        category,
-        name: None,
-    })
-    .collect()
+    COVERAGE
+        .into_iter()
+        .filter_map(|category| {
+            pool(category).first().map(|item_id| Sample {
+                item_id: *item_id,
+                category,
+                name: None,
+            })
+        })
+        .collect()
+}
+
+/// The events saved for one situation, the first being the one the next
+/// run reads and the rest its backups.
+pub fn ids_for(samples: &[Sample], category: Category) -> Vec<u64> {
+    samples
+        .iter()
+        .filter(|s| s.category == category)
+        .map(|s| s.item_id)
+        .collect()
+}
+
+/// How long before a sample stops covering its situation a run starts
+/// asking for a replacement. Three days is three daily runs' notice, and
+/// a new event has to be found by hand, so the notice has to be worth
+/// reading rather than frequent.
+pub const NOTICE_BEFORE_EXPIRY_MS: i64 = 3 * 24 * 3600 * 1000;
+
+/// When this page stops showing `category`, where damai.cn says so in
+/// advance: a not-yet-on-sale event is on sale from `sellStartTime` on,
+/// and nothing announces when an event will sell out or end.
+pub fn stops_covering_at(category: Category, page: &Value) -> Option<i64> {
+    if category != Category::NotYetOnSale {
+        return None;
+    }
+    integer(&page["dataDefault"]["sellStartTime"])
+}
+
+/// Whether a sample that stops covering its situation at `at` has to be
+/// replaced now. A time already past counts: the page still shows the
+/// situation, so the sample is at the very end of its life.
+pub fn is_expiring(at: i64, now: i64) -> bool {
+    at - now <= NOTICE_BEFORE_EXPIRY_MS
 }
 
 /// The saved sample set, or the seeds with the reason the file was not
@@ -162,9 +229,10 @@ pub fn classify(page: &Value) -> Option<Category> {
 /// As of 2026-10-14 the anonymous home page carries no detail-page link at
 /// all: the event cards are rendered by JavaScript and the only listing
 /// links go to `search.damai.cn`, which answers its first anonymous
-/// request with a slider challenge (0001). So a run that needs a new
-/// sample says so and asks for one by hand; see the fixture test below and
-/// #39.
+/// request with a slider challenge (0001). So the home page is the last
+/// place a run looks, after the saved backups and the pool, and it is kept
+/// only because it costs one request and would start working again by
+/// itself; see the fixture test below, #39 and 0014.
 pub fn item_ids_on_home(html: &str) -> Vec<u64> {
     const WINDOW: usize = 200;
     let mut ids: Vec<u64> = Vec::new();
@@ -248,6 +316,68 @@ mod tests {
                 category.name()
             );
         }
+    }
+
+    #[test]
+    fn every_situation_has_a_candidate_in_the_repository() {
+        for category in COVERAGE {
+            assert!(
+                !pool(category).is_empty(),
+                "{} 在仓库里没有候选：样本过期之后这一类就补不上了",
+                category.name()
+            );
+        }
+    }
+
+    #[test]
+    fn the_backups_of_a_situation_come_back_in_the_order_they_were_saved() {
+        let samples = vec![
+            Sample {
+                item_id: 1,
+                category: Category::OnSale,
+                name: None,
+            },
+            Sample {
+                item_id: 2,
+                category: Category::SoldOut,
+                name: None,
+            },
+            Sample {
+                item_id: 3,
+                category: Category::OnSale,
+                name: None,
+            },
+        ];
+        assert_eq!(ids_for(&samples, Category::OnSale), [1, 3]);
+        assert_eq!(ids_for(&samples, Category::SoldOut), [2]);
+        assert_eq!(ids_for(&samples, Category::Calendar), Vec::<u64>::new());
+    }
+
+    #[test]
+    fn only_a_not_yet_on_sale_sample_says_when_it_stops_covering_its_situation() {
+        let page = json!({"dataDefault": {"sellStartTime": 1791944280000i64}});
+        assert_eq!(
+            stops_covering_at(Category::NotYetOnSale, &page),
+            Some(1791944280000)
+        );
+        assert_eq!(stops_covering_at(Category::OnSale, &page), None);
+        assert_eq!(
+            stops_covering_at(Category::NotYetOnSale, &json!({"dataDefault": {}})),
+            None,
+            "大麦没写开售时间时不猜"
+        );
+    }
+
+    #[test]
+    fn a_sample_is_due_for_replacement_three_days_before_it_opens() {
+        let now = 1_791_900_000_000;
+        let day = 24 * 3600 * 1000;
+        assert!(!is_expiring(now + 4 * day, now));
+        assert!(is_expiring(now + 2 * day, now));
+        assert!(
+            is_expiring(now - day, now),
+            "开售时间已经过了，这个样本随时会变成已开售"
+        );
     }
 
     #[test]
