@@ -86,7 +86,17 @@
 
 CA 证书和 HTTP 客户端这两种失败发生在 [`Client::new`](../../backend/src/damai/client.rs) 建客户端的时候，早于任何请求：Linux 上 rustls 在这一步读系统的 CA 证书，一张都没有就建不起来（macOS 用钥匙串，不会这样）。`watch` 和界面用的 `event-json` 走同一个 `Client::new`，提示相同；`event-json` 的 `code` 是 `setup`。
 
-`THEFLASH_REQUEST_GAP_MS` 由[大麦访问层](damai-access.md#频率上限的范围)在建客户端之前校验。`event-json` 对这类错误返回 `error.code: "invalid-config"`；`invalid-input` 只用于演出链接或 ID 无效，两者分别退出 1 和 2。界面服务对 `invalid-config` 沿用默认的 HTTP 502 并显示消息，不把它归为链接输入错误（400）。
+`THEFLASH_REQUEST_GAP_MS` 由[大麦访问层](damai-access.md#频率上限的范围)在建客户端之前校验。`event-json` 对这类错误返回 `error.code: "invalid-config"`；`invalid-input` 只用于演出链接或 ID 无效，两者分别退出 1 和 2。
+
+界面服务按 code 定 HTTP 状态码（[`frontend/src/server.ts`](../../frontend/src/server.ts) 的 `statusFor`），页面无论哪一种都照常显示后端的 message：
+
+| code | HTTP | 为什么 |
+| --- | --- | --- |
+| `invalid-input` | 400 | 用户输入的链接或 ID 不对 |
+| `not-found` | 404 | 演出不存在或已下架 |
+| `risk-control`、`risk-stopped` | 403 | 大麦的风控拦住了，或本机熔断生效 |
+| `risk-state`、`invalid-config`、`setup` | 500 | 本机自己的状态、设置或缺少的软件包，一个请求都没发出去（#83） |
+| `network`、`parse`、其他 | 502 | 请求发出去了，大麦没回应或回应看不懂 |
 
 ## 验证
 

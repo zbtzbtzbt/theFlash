@@ -155,6 +155,35 @@ it("a breaker the backend cannot read stops queries instead of being ignored", a
   expect(error.message).toContain("已停止");
   expect(mock.hits).toHaveLength(0);
 });
+// A machine that cannot build an HTTP client at all (no CA certificates)
+// sent no request either, so it is not a failure of the upstream (#83).
+it("a machine that cannot send a request at all is not reported as the upstream failing", async () => {
+  const { base } = await ui(() => {
+    throw new EventError("setup", "这台机器上没有 CA 证书，没有发出任何请求。");
+  });
+  const response = await request(base);
+  expect(response.status).toBe(500);
+  const { error } = await response.json();
+  expect(error.code).toBe("setup");
+  expect(error.message).toContain("没有发出任何请求");
+  expect(mock.hits).toHaveLength(0);
+});
+// `invalid-config` is a setting on this machine (#51), not an unreachable
+// damai: the default 502 read as "网络不可用" (#83).
+it("a mistyped request gap is this machine's configuration, not a network failure", async () => {
+  process.env.THEFLASH_REQUEST_GAP_MS = "bad";
+  try {
+    const { base } = await ui();
+    const response = await request(base);
+    expect(response.status).toBe(500);
+    const { error } = await response.json();
+    expect(error.code).toBe("invalid-config");
+    expect(error.message).toContain("THEFLASH_REQUEST_GAP_MS");
+    expect(mock.hits).toHaveLength(0);
+  } finally {
+    delete process.env.THEFLASH_REQUEST_GAP_MS;
+  }
+});
 it("a second tab cannot overlap a query, and disconnect cancels its query", async () => {
   let started: () => void = () => {};
   const ready = new Promise<void>((resolve) => {
