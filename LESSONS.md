@@ -1,4 +1,4 @@
-<!-- reviewed-through: 1d787d9 (2026-10-14 12:20 +0800) -->
+<!-- reviewed-through: eaf63f6 (2026-10-14 12:28 +0800) -->
 # 已合并工作的教训
 
 本项目的代码由 agent 编写、审查、合并和发布。每天夜里有一个复盘 agent 检查当天的 commit：哪些改动后来又被返工、哪些不该合并、哪些验证得太薄。学到的东西记在这里。改代码之前先读这份文件。
@@ -100,11 +100,12 @@
 - Seen 1× (2026-10-14)。
 
 **判断 main 红不红只看 Test 工作流；被设计拒绝的 Release run 不算 main 红。**
+- `eaf63f6`：版本升到 0.1.0-rc.2，正文写明等本 commit Test 绿再打 tag——与发版门槛一致。
 - Done right on 10-14: `3b1cc18`（#5）——Release gate 拒绝未跑完的 Test 时，不带 `--workflow` 的 `gh run list` 会把拒绝显示成 main 红，误导 work-tick。
 - Seen 1× (2026-10-14)。
 
 **main 红着不要往上叠新功能。**
-- `ddd0c5e` 合入后 [Test 38509196670](https://github.com/zbtzbtzbt/theFlash/actions/runs/38509196670) macOS 红：`test_inhibitor_start_failure…`。Done right on 10-14: `1d787d9`（#101）——假 `sleep` 用 `time.sleep(0.001)` 真正让出，避免忙 runner 上空转到上限；生产代码未改。issue 仍待验收。
+- `ddd0c5e` 合入后 [Test 38509196670](https://github.com/zbtzbtzbt/theFlash/actions/runs/38509196670) macOS 红：`test_inhibitor_start_failure…`。Done right on 10-14: `1d787d9`（#101）——假 `sleep` 用 `time.sleep(0.001)` 真正让出，避免忙 runner 上空转到上限；生产代码未改。其 [Test 38510851009](https://github.com/zbtzbtzbt/theFlash/actions/runs/38510851009) 双平台 success；issue 仍待验收。
 - Done right on 10-14: `f12b84d` 专修 `f56b3c0` 引入后暴露的 Ubuntu 红，不叠功能。合入后仍等该 commit 的 Test 双平台绿再继续发版。
 - Seen 1× (2026-10-14)。
 
