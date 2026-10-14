@@ -28,32 +28,33 @@ it("offers a labelled event query and a loading state before the response", () =
   expect(root.querySelector("button")?.disabled).toBe(true);
 });
 
+import type { Server } from "node:http";
 import { afterAll, beforeAll } from "vitest";
 import { renderEvent } from "./app.js";
 import type { EventView } from "./protocol.js";
-import { loadEvent } from "./query.js";
+import { binary, loadEvent } from "./query.js";
 import { close, offline, replay, tempHome } from "./test-support.js";
 
 const views: EventView[] = [];
 const reports: string[] = [];
 async function cli(id: string): Promise<string> {
-  const { stdout } = await promisify(execFile)(
-    new URL("../../backend/target/debug/theflash", import.meta.url).pathname,
-    ["event", id],
-    { env: process.env },
-  );
+  const { stdout } = await promisify(execFile)(binary, ["event", id], { env: process.env });
   return stdout;
 }
-let guard: Awaited<ReturnType<typeof offline>>;
-let upstream: Awaited<ReturnType<typeof replay>>;
-let missingUpstream: Awaited<ReturnType<typeof replay>>;
-let home: ReturnType<typeof tempHome>;
+// Each server beforeAll starts, as soon as it starts: when beforeAll fails
+// partway, afterAll still closes what it got to and adds no error of its own
+// to the one that stopped it (#49).
+const servers: Server[] = [];
+let guard: Awaited<ReturnType<typeof offline>> | undefined;
+let home: ReturnType<typeof tempHome> | undefined;
 beforeAll(async () => {
   // loadEvent below runs the Rust binary, which reads the risk-control
   // breaker under HOME; a test must not read or write the real one.
   home = tempHome();
   guard = await offline();
-  upstream = await replay();
+  servers.push(guard.server);
+  const upstream = await replay();
+  servers.push(upstream.server);
   process.env.THEFLASH_DAMAI_BASE_URL = upstream.base;
   for (const id of [
     "1086791513717",
@@ -65,18 +66,18 @@ beforeAll(async () => {
     views.push(await loadEvent(id, new AbortController().signal));
     reports.push(await cli(id));
   }
-  missingUpstream = await replay(false, true);
+  const missingUpstream = await replay(false, true);
+  servers.push(missingUpstream.server);
   process.env.THEFLASH_DAMAI_BASE_URL = missingUpstream.base;
   views.push(await loadEvent("1077137031347", new AbortController().signal));
   reports.push(await cli("1077137031347"));
   process.env.THEFLASH_DAMAI_BASE_URL = upstream.base;
 }, 30000);
 afterAll(async () => {
-  await close(upstream.server);
-  await close(missingUpstream.server);
-  await close(guard.server);
-  home.remove();
-  expect(guard.hits, "测试试图访问真实大麦：fixture 上游未设置").toHaveLength(0);
+  // The tripwire last, so it is listening for as long as anything else is.
+  for (const server of servers.splice(0).reverse()) await close(server);
+  home?.remove();
+  expect(guard?.hits ?? [], "测试试图访问真实大麦：fixture 上游未设置").toHaveLength(0);
 });
 
 function page(fetcher: typeof fetch) {

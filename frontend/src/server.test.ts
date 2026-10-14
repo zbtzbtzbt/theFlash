@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { EventError } from "./protocol.js";
-import { loadEvent } from "./query.js";
+import { binary, loadEvent } from "./query.js";
 import { startServer } from "./server.js";
 import { address, close, offline, replay, tempHome } from "./test-support.js";
 
@@ -45,11 +45,7 @@ it.each(["1086791513717", "1092337348536", "1077137031347"])(
     const response = await request(base, id);
     expect(response.status).toBe(200);
     const data = await response.json();
-    const cli = await promisify(execFile)(
-      new URL("../../backend/target/debug/theflash", import.meta.url).pathname,
-      ["event", id],
-      { env: process.env },
-    );
+    const cli = await promisify(execFile)(binary, ["event", id], { env: process.env });
     expect(data.report).toBe(cli.stdout);
     expect(data.name).not.toBe("未知");
     expect(data.sessions.length).toBeGreaterThan(0);
