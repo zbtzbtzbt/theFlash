@@ -67,4 +67,5 @@ theFlash 没有人类架构师，架构由 agent 决定。每个会影响后续�
 | [0015](0015-generated-docs-indexes.md) | docs 的两张索引表由脚本从目录生成，并发 PR 不再碰同一行 | 采用 |
 | [0016](0016-issue-priority.md) | issue 按重要和紧急分成 P0～P3，认领按优先级排队 | 采用 |
 | [0017](0017-agent-pipeline.md) | 协作流水线：标签是状态，各站写在一处，先收尾再开始 | 采用 |
+| [0018](0018-browser-handoff.md) | 盯票确认可售时直接打开大麦订单确认页或选座页交接给浏览器 | 采用 |
 <!-- docs-index:end -->

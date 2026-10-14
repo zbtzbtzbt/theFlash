@@ -41,6 +41,104 @@ pub struct Tier {
     pub name: Option<String>,
     pub price: Option<String>,
     pub status: TierStatus,
+    pub handoff: Option<Handoff>,
+}
+
+/// Everything damai.cn's per-session tier endpoint provides for opening
+/// the pre-selected confirmation or seat-selection page in the user's
+/// browser (#54). The program never submits the order itself (#6).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Handoff {
+    pub sku_id: String,
+    pub perform_id: u64,
+    pub project_id: Option<String>,
+    pub sign_key: Option<String>,
+    pub has_promotion: Option<String>,
+    pub rtc: Option<bool>,
+    pub choose_seat: bool,
+}
+
+impl Handoff {
+    /// Builds the exact order-confirmation (`h5-ultron-buy`) or
+    /// seat-selection (`kylin.html`) URL that damai.cn's PC detail page
+    /// (`perform.js` `doSubmit`) navigates to when the user clicks the buy
+    /// button (#54).
+    pub fn url(&self, item_id: u64, count: u32) -> String {
+        let count = count.max(1);
+        if self.choose_seat {
+            let item = item_id.to_string();
+            let perform = self.perform_id.to_string();
+            let mut pairs: Vec<(&str, &str)> = vec![("itemId", &item)];
+            if let Some(project_id) = &self.project_id {
+                pairs.push(("projectId", project_id));
+            }
+            pairs.extend([
+                ("performId", perform.as_str()),
+                ("skuId", self.sku_id.as_str()),
+                ("userPromotion", self.has_promotion.as_deref().unwrap_or("")),
+                ("toDxOrder", "true"),
+                ("quickBuy", "0"),
+                ("privilegeActId", ""),
+                ("channel", "damai_app"),
+            ]);
+            if let Some(sign_key) = &self.sign_key {
+                pairs.push(("signKey", sign_key));
+            }
+            if let Some(rtc) = self.rtc {
+                pairs.push(("rtc", if rtc { "1" } else { "0" }));
+            }
+            format!(
+                "https://m.damai.cn/app/dmfe/select-seat-biz/kylin.html?{}",
+                encode_query(&pairs)
+            )
+        } else {
+            let mut ex = serde_json::json!({
+                "damai": "1",
+                "channel": "damai_app",
+                "umpChannel": "10002",
+                "atomSplit": "1",
+                "serviceVersion": "1.8.5",
+            });
+            if let Some(sign_key) = &self.sign_key {
+                ex["signKey"] = serde_json::Value::String(sign_key.clone());
+            }
+            let ex_str = ex.to_string();
+            let buy_param = format!("{item_id}_{count}_{}", self.sku_id);
+            let mut pairs: Vec<(&str, &str)> = vec![
+                ("exParams", &ex_str),
+                ("buyParam", &buy_param),
+                ("buyNow", "true"),
+                ("privilegeActId", ""),
+            ];
+            if let Some(rtc) = self.rtc {
+                pairs.push(("rtc", if rtc { "1" } else { "0" }));
+            }
+            format!(
+                "https://m.damai.cn/app/dmfe/h5-ultron-buy/index.html?{}",
+                encode_query(&pairs)
+            )
+        }
+    }
+}
+
+fn encode_query(pairs: &[(&str, &str)]) -> String {
+    pairs
+        .iter()
+        .map(|(k, v)| format!("{}={}", encode_component(k), encode_component(v)))
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
+fn encode_component(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for &b in s.as_bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -100,6 +198,7 @@ pub fn buy_button_code_is_mapped(code: &str) -> bool {
 /// every mapped code reads under.
 pub fn tier_code_is_mapped(code: &str) -> bool {
     let sku = SkuRaw {
+        sku_id: None,
         name: None,
         price: None,
         front_end_status: Some(code.to_string()),
@@ -144,6 +243,7 @@ mod tests {
 
     fn sku(fes: &str, salable: bool) -> SkuRaw {
         SkuRaw {
+            sku_id: None,
             name: None,
             price: None,
             front_end_status: Some(fes.into()),

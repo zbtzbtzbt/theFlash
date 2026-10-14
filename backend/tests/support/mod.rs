@@ -395,6 +395,7 @@ pub fn offline(cmd: &mut Command) {
     }
     cmd.env("NO_PROXY", "127.0.0.1,localhost,::1");
     cmd.env("no_proxy", "127.0.0.1,localhost,::1");
+    cmd.env("THEFLASH_BROWSER", "");
     cmd.env("HOME", shared_home());
     cmd.env_remove("XDG_STATE_HOME");
 }

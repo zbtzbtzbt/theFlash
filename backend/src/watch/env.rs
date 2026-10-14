@@ -6,7 +6,7 @@ use std::io::{IsTerminal, Write};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::clock::Sample;
-use super::notify::system_notification;
+use super::notify::{open_browser, system_notification};
 use super::push::PhonePush;
 use super::target::session_matches;
 use crate::damai::{Client, Error, Event};
@@ -27,6 +27,7 @@ pub(crate) trait Env {
     fn all_sessions(&self) -> Vec<String>;
     async fn clock_samples(&mut self) -> Result<Vec<Sample>, Error>;
     fn alert(&mut self, title: &str, lines: &[String]);
+    fn open_browser(&mut self, url: &str);
     fn say(&mut self, line: &str);
     /// A countdown line, `left_ms` before the sale.
     fn countdown(&mut self, line: &str, left_ms: i64);
@@ -43,6 +44,7 @@ pub(crate) struct RealEnv<'a> {
     start: Instant,
     all_sessions: Vec<String>,
     system_notify: bool,
+    open_browser: bool,
     phone_push: Option<PhonePush>,
     tty: bool,
     /// A countdown line is on screen without its newline (on a terminal).
@@ -56,6 +58,7 @@ impl<'a> RealEnv<'a> {
         item_id: u64,
         session: Option<String>,
         system_notify: bool,
+        open_browser: bool,
     ) -> Self {
         RealEnv {
             client,
@@ -64,6 +67,7 @@ impl<'a> RealEnv<'a> {
             start: Instant::now(),
             all_sessions: Vec::new(),
             system_notify,
+            open_browser,
             phone_push: PhonePush::from_config(),
             tty: std::io::stdout().is_terminal(),
             countdown_open: false,
@@ -155,6 +159,15 @@ impl Env for RealEnv<'_> {
         {
             println!("系统通知发不出去（{e}），之后只在终端提醒");
             self.system_notify = false;
+        }
+    }
+
+    fn open_browser(&mut self, url: &str) {
+        if self.open_browser
+            && let Err(e) = open_browser(url)
+        {
+            println!("浏览器打不开（{e}），请手动打开上面的购买确认页链接");
+            self.open_browser = false;
         }
     }
 
