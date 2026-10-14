@@ -62,6 +62,13 @@ impl Watched {
             None => format!("https://detail.damai.cn/item.htm?id={item_id}"),
         }
     }
+
+    /// Whether this tier opens damai.cn's seat-selection page (`kylin.html`),
+    /// where the user picks seats on the seat map rather than passing a
+    /// pre-selected quantity in the URL (#54).
+    pub fn is_choose_seat(&self) -> bool {
+        self.handoff.as_ref().is_some_and(|h| h.choose_seat)
+    }
 }
 
 /// The event's tiers the filter takes. A session whose tiers couldn't be
