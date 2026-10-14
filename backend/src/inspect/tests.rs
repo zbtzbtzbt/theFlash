@@ -913,3 +913,132 @@ fn removing_any_handoff_field_from_an_on_sale_tier_response_is_a_finding() {
         );
     }
 }
+
+/// #117: `Pacer::wait` used to stamp `self.last` before the request ran.
+/// When request N spent time in `Gate::enter`, TCP connect, or reading the
+/// response body (132ms on a busy macOS runner in CI run 38509574390), the
+/// next `wait()` subtracted that duration from `gap`, so request N+1
+/// arrived at the server only `gap - 132ms = 868ms` after request N. Every
+/// paced entry point (`read_page`, `read_tiers`, `read_home`, `record`)
+/// must measure the gap from when the previous request finished.
+#[tokio::test]
+async fn a_slow_request_does_not_eat_into_the_gap_before_the_next_one() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::Arc;
+
+    let state = std::env::temp_dir().join(format!(
+        "theflash-pacer-117-{}-{}",
+        std::process::id(),
+        now_ms()
+    ));
+    std::fs::create_dir_all(&state).unwrap();
+
+    let gap = Duration::from_millis(300);
+    let slow = Duration::from_millis(180);
+    let min_observed = Duration::from_millis(250);
+
+    // Spawns a two-request local server where the first request is delayed
+    // by `slow` before the server records its arrival timestamp `t1`, and
+    // the second request's arrival `t2` is recorded immediately.
+    let serve_two = |first_body: String, second_body: String| {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = format!("http://{}", listener.local_addr().unwrap());
+        let handle = std::thread::spawn(move || {
+            let mut arrivals = Vec::with_capacity(2);
+            for (i, body) in [first_body, second_body].into_iter().enumerate() {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buf = [0u8; 2048];
+                let _ = stream.read(&mut buf);
+                if i == 0 {
+                    std::thread::sleep(slow);
+                }
+                arrivals.push(Instant::now());
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(resp.as_bytes());
+            }
+            arrivals[1].duration_since(arrivals[0])
+        });
+        (addr, handle)
+    };
+
+    for kind in ["read_home", "read_page", "read_tiers", "record"] {
+        let (first_body, second_body) = if kind == "record" {
+            (
+                fixture("item_on_sale.html"),
+                fixture("sku_on_sale_286937788.jsonp"),
+            )
+        } else {
+            ("<html></html>".to_string(), "<html></html>".to_string())
+        };
+        let (addr, handle) = serve_two(first_body, second_body);
+        let gate = Arc::new(
+            damai::Gate::new(
+                state.clone(),
+                Duration::ZERO,
+                Arc::new(damai::SystemClock::default()),
+                "theflash test".into(),
+            )
+            .unwrap(),
+        );
+        let client = Client::with_gate(addr.clone(), gate)
+            .unwrap()
+            .with_home(addr);
+
+        match kind {
+            "read_home" => {
+                let mut pacer = Pacer { gap, last: None };
+                let mut requests = 0;
+                let _ = read_home(&client, &mut pacer, &mut requests).await.unwrap();
+                let _ = read_home(&client, &mut pacer, &mut requests).await.unwrap();
+            }
+            "read_page" => {
+                let mut pacer = Pacer { gap, last: None };
+                let mut requests = 0;
+                let _ = read_page(&client, &mut pacer, &mut requests, 1)
+                    .await
+                    .unwrap();
+                let _ = read_page(&client, &mut pacer, &mut requests, 2)
+                    .await
+                    .unwrap();
+            }
+            "read_tiers" => {
+                let mut pacer = Pacer { gap, last: None };
+                let mut requests = 0;
+                let _ = read_tiers(&client, &mut pacer, &mut requests, 1, 1)
+                    .await
+                    .unwrap();
+                let _ = read_tiers(&client, &mut pacer, &mut requests, 1, 2)
+                    .await
+                    .unwrap();
+            }
+            "record" => {
+                let out_dir = state.join("record-out");
+                std::fs::create_dir_all(&out_dir).unwrap();
+                let _ = record(
+                    &client,
+                    Target::Item(1086791513717),
+                    &out_dir,
+                    "probe",
+                    1,
+                    gap,
+                )
+                .await
+                .unwrap();
+            }
+            _ => unreachable!(),
+        }
+
+        let observed = handle.join().unwrap();
+        assert!(
+            observed >= min_observed,
+            "{kind}: 前一次请求耗时 {slow:?} 后，下一请求在服务端只隔了 {observed:?}（期望至少 {min_observed:?}，设定 gap={gap:?}）"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&state);
+}
