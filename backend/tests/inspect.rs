@@ -1343,6 +1343,11 @@ fn record_says_when_the_page_it_saved_is_one_a_query_cannot_read() {
     ]);
     let out = support::output_within(cmd, 60);
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "页面和可读场次都写下来时应当退出 0：{stderr}"
+    );
     assert!(
         dir.join("item_broken.html").is_file(),
         "读不了的页面才是要复现的那一份，它没被录下来：{stderr}"
@@ -1350,6 +1355,43 @@ fn record_says_when_the_page_it_saved_is_one_a_query_cannot_read() {
     assert!(
         stderr.contains("theflash event 读不了") && stderr.contains("performId"),
         "没说这一页查询读不了：{stderr}"
+    );
+
+    // Cross-path (#128): when the page has an unreadable performId (#73) AND
+    // the remaining tier fixture cannot be written (#78), stderr must report
+    // both the unreadable-page note and the lost-fixture summary, and exit 1.
+    let occupied = dir.join("sku_broken2_286937790.jsonp");
+    std::fs::create_dir_all(&occupied).unwrap();
+    let mut cmd2 = home.theflash(&damai.base_url());
+    cmd2.args([
+        "inspect",
+        "record",
+        "1086791513717",
+        "--as",
+        "broken2",
+        "--dir",
+        dir.to_str().unwrap(),
+        "--sessions",
+        "1",
+        "--gap",
+        "0",
+    ]);
+    let out2 = support::output_within(cmd2, 60);
+    let stderr2 = String::from_utf8_lossy(&out2.stderr).into_owned();
+    assert_eq!(
+        out2.status.code(),
+        Some(1),
+        "票档没写下来必须退出 1：{stderr2}"
+    );
+    assert!(
+        stderr2.contains("theflash event 读不了") && stderr2.contains("performId"),
+        "丢失 fixture 时不能吞掉页面读不了的诊断：{stderr2}"
+    );
+    assert!(
+        stderr2.contains("sku_broken2_286937790.jsonp")
+            && stderr2.contains("写不进去")
+            && stderr2.contains("item_broken2.html"),
+        "丢失 fixture 汇总不完整：{stderr2}"
     );
 }
 

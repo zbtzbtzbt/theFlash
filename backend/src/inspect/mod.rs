@@ -1010,9 +1010,7 @@ pub async fn record(
     // recording, so the fixture is kept; saying so is what stops the
     // sessions it left out from looking like all there were (#73).
     if let Some(why) = damai::item_page_problem(&json) {
-        notes.push(format!(
-            "这一页 theflash event 读不了（{why}），读不了的场次没有录票档"
-        ));
+        eprintln!("这一页 theflash event 读不了（{why}），读不了的场次没有录票档");
     }
     let mut performs = perform_ids(&json);
     performs.truncate(sessions);
