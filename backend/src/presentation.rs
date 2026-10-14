@@ -64,6 +64,10 @@ pub fn error(e: &Error) -> Value {
         // This machine can't send a request at all; none was sent.
         Error::NoCaCertificates | Error::ClientSetup(_) => "setup",
         Error::Parse { .. } => "parse",
+        // A response `theflash inspect record` fetched and could not
+        // write down (#77). No query reaches it — nothing a user asks for
+        // writes a file — but every error needs a code.
+        Error::NotWritten(_) => "not-written",
     };
     json!({"error": {"code": code, "message": e.to_string()}})
 }

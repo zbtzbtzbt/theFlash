@@ -488,6 +488,91 @@ fn without_a_samples_file_the_run_seeds_one_in_the_state_directory() {
     }
 }
 
+/// Samples paths this machine cannot write, one for each step of saving
+/// that can fail. The first two fail whoever runs them: a parent that is
+/// a regular file stops the directory from being made, and a path that is
+/// already a directory stops the write itself.
+fn unwritable_samples_paths(home: &Path) -> Vec<(&'static str, PathBuf, String)> {
+    let block = home.join("block");
+    std::fs::write(&block, "不是目录").unwrap();
+    let a_directory = home.join("samples.json");
+    std::fs::create_dir_all(&a_directory).unwrap();
+    let mut cases = vec![
+        (
+            "上级是一个普通文件",
+            block.join("samples.json"),
+            block.display().to_string(),
+        ),
+        (
+            "路径本身是一个目录",
+            a_directory.clone(),
+            a_directory.display().to_string(),
+        ),
+    ];
+    // A state directory nobody may write in, which is the other way a
+    // machine loses the sample set. root may write in it whatever its
+    // mode says, so this case is added only where the operating system
+    // can express it; the two above hold either way.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let read_only = home.join("read-only");
+        std::fs::create_dir_all(&read_only).unwrap();
+        std::fs::set_permissions(&read_only, std::fs::Permissions::from_mode(0o500)).unwrap();
+        if std::fs::write(read_only.join("probe"), "x").is_err() {
+            let path = read_only.join("samples.json");
+            let shown = path.display().to_string();
+            cases.push(("目录不可写", path, shown));
+        }
+    }
+    cases
+}
+
+/// A run whose sample set did not reach the disk did not finish its job:
+/// the coverage it worked out is lost, and the next run starts again from
+/// the samples this one was replacing. It used to print 样本没保存下来 and
+/// 结论：没有变化 in the same report and exit 0, so a scheduled run counted
+/// it as a success (#77).
+#[test]
+fn a_run_that_could_not_save_its_samples_fails_and_says_what_to_do() {
+    let home = Home::new("samples-unwritable");
+    let damai = support::MockDamai::start_bodies(unchanged_routes());
+    for (what, samples, shown) in unwritable_samples_paths(home.path()) {
+        let out = run(&home, &damai, &["--samples", samples.to_str().unwrap()]);
+        let text = stdout(&out);
+        assert_eq!(
+            out.status.code(),
+            Some(1),
+            "{what}：样本没保存下来，定时任务却按退出码当成这次成功了：{text}"
+        );
+        assert!(
+            !text.contains("结论：没有变化。"),
+            "{what}：样本没写下去，报告却说这次没有变化：{text}"
+        );
+        assert!(text.contains("样本没保存下来"), "{what}：{text}");
+        assert!(text.contains(&shown), "{what}：没说是哪个路径：{text}");
+        assert!(text.contains("--samples"), "{what}：没说该怎么办：{text}");
+        assert!(
+            !text.contains("大麦很可能改版了"),
+            "{what}：本机的磁盘问题被说成了大麦改版：{text}"
+        );
+        assert!(
+            !samples.is_file(),
+            "{what}：这次复现没走到保存失败那条路，文件写出来了"
+        );
+    }
+
+    // The same run on a path it can write is a success again: a disk that
+    // works is not news.
+    let good = home.path().join("good/inspect-samples.json");
+    let out = run(&home, &damai, &["--samples", good.to_str().unwrap()]);
+    let text = stdout(&out);
+    assert!(text.contains("结论：没有变化。"), "{text}");
+    assert!(!text.contains("样本没保存下来"), "{text}");
+    assert_eq!(out.status.code(), Some(0), "{text}");
+    assert!(good.is_file(), "样本没写出来：{text}");
+}
+
 /// One run has a budget, because every agent shares the owner's one
 /// address and #2's watch is usually running at the same time.
 #[test]
@@ -851,6 +936,119 @@ fn a_response_that_cannot_be_read_is_kept_as_a_candidate() {
     );
 }
 
+/// A candidate response is the only copy of what damai.cn sent: fetching
+/// it again costs another request from the one address every agent
+/// shares. A run that could not write one down says so in the same words
+/// as a sample set it could not write down, and does not call either a
+/// revision (#77).
+#[test]
+fn a_candidate_that_could_not_be_written_is_said_with_the_rest_of_the_report() {
+    let home = Home::new("candidate-unwritable");
+    // A candidates directory that cannot be made: its parent is a file.
+    let block = home.path().join("block");
+    std::fs::write(&block, "不是目录").unwrap();
+    let dir = block.join("candidates");
+    let routes = changed(unchanged_routes(), "dataId=286937788", |body| {
+        body.replace("\"frontEndStatus\":\"2\"", "\"frontEndStatus\":\"777\"")
+    });
+    let damai = support::MockDamai::start_bodies(routes);
+    let out = run(&home, &damai, &["--candidates", dir.to_str().unwrap()]);
+    let text = stdout(&out);
+    assert!(text.contains("没见过的票档状态码：777"), "{text}");
+    assert!(
+        text.contains("候选响应没保存下来") && text.contains(&block.display().to_string()),
+        "没说这次的响应没留下来、也没说是哪个位置：{text}"
+    );
+    assert!(
+        text.contains("inspect record"),
+        "没说怎么重新取一份：{text}"
+    );
+    assert!(
+        text.contains("不是大麦改版"),
+        "写不下来这件事要说成本机的问题：{text}"
+    );
+    assert_eq!(out.status.code(), Some(1), "{text}");
+}
+
+/// A candidate the redaction rule refuses whole is a different thing from
+/// one this machine could not write: the refusal is the owner's rule
+/// working, and the bytes were never meant to stay here, so the report
+/// names the response and the rule rather than telling whoever reads it
+/// to go look at a path or a disk (#78). The run still ends in 1, because
+/// the change that made it keep a candidate is a finding on its own.
+#[test]
+fn a_candidate_the_redaction_rule_refuses_is_reported_as_the_rule_not_as_a_disk() {
+    let home = Home::new("candidate-refused");
+    let dir = home.path().join("candidates");
+    // Built from pieces so this file does not carry what repo_guard looks
+    // for.
+    let header = ["Set-", "Cookie", ":"].concat();
+    let routes = changed(unchanged_routes(), "dataId=286937788", |body| {
+        let changed = body.replace("\"frontEndStatus\":\"2\"", "\"frontEndStatus\":\"777\"");
+        format!("{header} sid=1\n{changed}")
+    });
+    let damai = support::MockDamai::start_bodies(routes);
+    let out = run(&home, &damai, &["--candidates", dir.to_str().unwrap()]);
+    let text = stdout(&out);
+    let refused = dir.join("sku_1086791513717_286937788.jsonp");
+    assert!(
+        text.contains(&refused.display().to_string()) && text.contains("Cookie"),
+        "没说是哪一份响应、按哪条规则丢掉的：{text}"
+    );
+    assert!(!refused.exists(), "带 Set-Cookie 的响应不该被保存：{text}");
+    assert!(
+        !text.contains("不是大麦改版"),
+        "脱敏规则拒绝不是本机的磁盘问题，不该说成结果没落盘：{text}"
+    );
+    assert_eq!(out.status.code(), Some(1), "{text}");
+}
+
+/// `theflash inspect record` is run for the files it writes. One it could
+/// not write is the command failing, however many of the others landed:
+/// it used to say so on stderr and exit 0, so a caller that checks the
+/// exit code believed it had a full set of fixtures (#77).
+#[test]
+fn record_fails_when_a_fixture_it_fetched_could_not_be_written() {
+    let home = Home::new("record-unwritable");
+    let dir = home.path().join("testdata");
+    std::fs::create_dir_all(&dir).unwrap();
+    // The tier fixture's name, taken by a directory: the page is written
+    // and this one cannot be, which is the half-done run.
+    let taken = dir.join("sku_on_sale_286937788.jsonp");
+    std::fs::create_dir_all(&taken).unwrap();
+    let damai = support::MockDamai::start_bodies(unchanged_routes());
+    let mut cmd = home.theflash(&damai.base_url());
+    cmd.args([
+        "inspect",
+        "record",
+        "1086791513717",
+        "--as",
+        "on_sale",
+        "--dir",
+        dir.to_str().unwrap(),
+        "--sessions",
+        "1",
+        "--gap",
+        "0",
+    ]);
+    let out = support::output_within(cmd, 60);
+    let said = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "fixture 没写下来，命令却算成功：{said}{}",
+        stdout(&out)
+    );
+    assert!(
+        said.contains(&taken.display().to_string()) && said.contains("写不进去"),
+        "没说是哪个 fixture 没写下来：{said}"
+    );
+    assert!(
+        said.contains(&dir.join("item_on_sale.html").display().to_string()),
+        "没说这次写下来的是哪些，半成品没法收拾：{said}"
+    );
+}
+
 /// What a run wrote for whoever fixes the change, with a message that says
 /// what is missing rather than only that a file is.
 fn candidate(dir: &Path, name: &str) -> String {
@@ -1047,6 +1245,148 @@ fn record_takes_personal_data_out_and_refuses_what_it_cannot_clean() {
         stderr.contains("Cookie") && stderr.contains("没有保存"),
         "没说清为什么没保存：{stderr}"
     );
+    // The refusal is the rule working, but the fixture the command was
+    // run for is still not there, so the command did not succeed (#78).
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "票档 fixture 被拒绝，命令却算成功：{stderr}"
+    );
+}
+
+/// What one `theflash inspect record` run looks like from outside: what it
+/// was served, what the output directory already had in it, and what the
+/// caller may conclude from the exit code, stderr and the files.
+struct RecordCase {
+    what: &'static str,
+    routes: Vec<(String, String)>,
+    /// Makes the output directory stand in the way of a fixture, the way
+    /// a half-cleaned testdata directory does.
+    occupy: Vec<&'static str>,
+    code: i32,
+    /// Fragments the command has to say about this run, all of them in
+    /// the same message.
+    says: Vec<String>,
+    kept: Vec<&'static str>,
+    missing: Vec<&'static str>,
+}
+
+/// `theflash inspect record` is run for the files it writes down, so a
+/// response it fetched and did not write down is the command failing —
+/// whether the redaction rule refused it whole (the rule working as the
+/// owner decided) or this machine could not write it (a path or a disk).
+/// Either way the caller is told which responses are on disk and which
+/// are missing, instead of a line on stderr under exit 0 (#78): the
+/// fixtures are what the next `make check` replays, and fetching them
+/// again costs another request from the one address every agent shares.
+#[test]
+fn record_says_what_it_kept_and_what_is_missing_whatever_stopped_a_fixture() {
+    // Built from pieces so this file does not carry what repo_guard looks
+    // for.
+    let header = ["Set-", "Cookie", ":"].concat();
+    let plant = |routes: Vec<(String, String)>, target: &str| {
+        let header = header.clone();
+        changed(routes, target, move |body| {
+            format!("{header} sid=1\n{body}")
+        })
+    };
+    let page = "item_probe.html";
+    let tiers = "sku_probe_286937788.jsonp";
+    let cases = vec![
+        RecordCase {
+            what: "两份都写下来了",
+            routes: unchanged_routes(),
+            occupy: Vec::new(),
+            code: 0,
+            says: Vec::new(),
+            kept: vec![page, tiers],
+            missing: Vec::new(),
+        },
+        RecordCase {
+            what: "票档被脱敏规则整份拒绝",
+            routes: plant(unchanged_routes(), "dataId=286937788"),
+            occupy: Vec::new(),
+            code: 1,
+            says: vec![
+                tiers.to_string(),
+                "Cookie".to_string(),
+                "没有保存".to_string(),
+                page.to_string(),
+            ],
+            kept: vec![page],
+            missing: vec![tiers],
+        },
+        RecordCase {
+            what: "票档写不进去",
+            routes: unchanged_routes(),
+            occupy: vec![tiers],
+            code: 1,
+            says: vec![tiers.to_string(), "写不进去".to_string(), page.to_string()],
+            kept: vec![page],
+            missing: Vec::new(),
+        },
+        RecordCase {
+            what: "一份被拒绝、一份写不进去，什么都没留下",
+            routes: plant(unchanged_routes(), "dataId=286937788"),
+            occupy: vec![page],
+            code: 1,
+            says: vec![
+                page.to_string(),
+                "写不进去".to_string(),
+                tiers.to_string(),
+                "Cookie".to_string(),
+                "这次一个文件都没写下来".to_string(),
+            ],
+            kept: Vec::new(),
+            missing: vec![tiers],
+        },
+    ];
+    for case in cases {
+        let home = Home::new("record-outcome");
+        let dir = home.path().join("testdata");
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in &case.occupy {
+            std::fs::create_dir_all(dir.join(name)).unwrap();
+        }
+        let damai = support::MockDamai::start_bodies(case.routes);
+        let mut cmd = home.theflash(&damai.base_url());
+        cmd.args([
+            "inspect",
+            "record",
+            "1086791513717",
+            "--as",
+            "probe",
+            "--dir",
+            dir.to_str().unwrap(),
+            "--sessions",
+            "1",
+            "--gap",
+            "0",
+        ]);
+        let out = support::output_within(cmd, 60);
+        let said = format!("{}{}", stdout(&out), String::from_utf8_lossy(&out.stderr));
+        let what = case.what;
+        assert_eq!(out.status.code(), Some(case.code), "{what}：{said}");
+        for fragment in &case.says {
+            assert!(
+                said.contains(fragment.as_str()),
+                "{what}：没说 {fragment}：{said}"
+            );
+        }
+        for name in &case.kept {
+            assert!(dir.join(name).is_file(), "{what}：{name} 没写下来：{said}");
+            assert!(said.contains(name), "{what}：没说 {name} 留下来了：{said}");
+        }
+        for name in &case.missing {
+            assert!(
+                !dir.join(name).exists(),
+                "{what}：{name} 不该被保存：{said}"
+            );
+        }
+        if case.code == 0 {
+            assert!(!said.contains("没有保存"), "{what}：{said}");
+        }
+    }
 }
 
 /// Everything that stops damai access ends the whole inspection, not just
