@@ -124,14 +124,11 @@ fn tonights_github_sends_every_event_to_the_role_that_handles_it() {
     assert_eq!(code, 0, "{out}");
     // PR #38 and #36 are CodeBuddy's, #35 is Codex's, #33 is Claude's:
     // each review goes to someone else.
-    assert!(
-        !line_for(&out, "review-38-a1").contains("codebuddy"),
-        "{out}"
-    );
-    assert!(!line_for(&out, "review-35-a1").contains("codex"), "{out}");
-    assert!(!line_for(&out, "review-33-a1").contains("claude"), "{out}");
+    assert!(!line_for(&out, "review-38-").contains("codebuddy"), "{out}");
+    assert!(!line_for(&out, "review-35-").contains("codex"), "{out}");
+    assert!(!line_for(&out, "review-33-").contains("claude"), "{out}");
     // PR #24 is Claude's and was sent back for changes, so Claude fixes it.
-    assert!(line_for(&out, "fix-pr-24-a1").contains("claude"), "{out}");
+    assert!(line_for(&out, "fix-pr-24-").contains("claude"), "{out}");
     // #37 has no label and nobody on it: fresh work.
     assert!(line_for(&out, "implement-37-a1").contains("派"), "{out}");
     // #16 and #14 are claimed, #20 is the coordination issue.
@@ -218,7 +215,12 @@ fn a_cancelled_run_is_not_a_red_main_but_a_failed_one_is() {
 
     let red = args("red-main");
     let (_, out) = run(&home, &borrow(&red));
-    assert!(out.contains("fix-ci-a1"), "失败的检查要派修红：{out}");
+    // The task is named after the run that failed, so the next failing run
+    // is a new task instead of one that was already dispatched.
+    assert!(
+        out.contains("fix-ci-38456076570-a1"),
+        "失败的检查要派修红，活的编号带着那个 run：{out}"
+    );
 
     // macos-latest cancelled after never getting a runner, ubuntu green:
     // GitHub capacity, not a failing test, so nothing is dispatched.

@@ -91,6 +91,33 @@ fn running(id: &str, issue: Option<u64>, vendor: &str, started: &str) -> Session
     }
 }
 
+/// A session that ran and ended, with the role it was started as. Tests
+/// about "has this already been dispatched" build it from the id the
+/// dispatcher itself chose, so they describe the behaviour and not the
+/// shape of the id.
+fn ended(
+    id: &str,
+    role: &str,
+    issue: Option<u64>,
+    pull: Option<u64>,
+    started: &str,
+    ended: &str,
+) -> Session {
+    Session {
+        id: id.to_string(),
+        role: role.to_string(),
+        vendor: "codex".to_string(),
+        issue,
+        pull,
+        started_at: at(started),
+        finished_at: Some(at(ended)),
+        outcome: Some(Outcome::Done),
+        pid: None,
+        log: PathBuf::from("/tmp/x.log"),
+        worktree: PathBuf::from("/tmp/x"),
+    }
+}
+
 fn roles(plan: &Plan) -> Vec<(String, String, Option<u64>, Option<u64>)> {
     plan.start
         .iter()
@@ -201,7 +228,7 @@ fn work_whose_implementer_is_unknown_is_left_alone() {
     );
     assert!(plan.start.is_empty(), "{:?}", plan.start);
     assert!(skipped(&plan, "accept-51-a1").contains("不猜"));
-    assert!(skipped(&plan, "review-60-a1").contains("不猜"));
+    assert!(skipped(&plan, "review-60-91f0f06-a1").contains("不猜"));
 }
 
 #[test]
@@ -237,7 +264,7 @@ fn one_issue_never_has_two_sessions() {
         "同一个 issue 不该再派：{:?}",
         plan.start
     );
-    assert!(skipped(&plan, "review-60-a1").contains("accept-51-a1"));
+    assert!(skipped(&plan, "review-60-91f0f06-a1").contains("accept-51-a1"));
 }
 
 #[test]
@@ -320,6 +347,194 @@ fn a_session_that_timed_out_is_tried_once_more_and_then_left_alone() {
     );
     assert!(plan.start.is_empty(), "第三次不再派：{:?}", plan.start);
     assert!(skipped(&plan, "accept-51-a3").contains("重试次数用完"));
+}
+
+#[test]
+fn a_new_head_on_a_pull_request_gets_another_review() {
+    // 审查过 head A 不等于审查过 head B：实现者按审查意见改完重新推一次，
+    // 就要再审一轮。
+    let config = config();
+    let now = at("2026-10-14T04:00:00+08:00");
+    let mut first = pull(60, &["待审查"], Some("codebuddy"), None);
+    first.head_sha = "91f0f06c82463f1669541bd3ef38f57ccccd6a5e".to_string();
+    let snapshot = Snapshot {
+        pulls: vec![first.clone()],
+        main_checks: MainChecks::Green,
+        ..Snapshot::default()
+    };
+    let plan = decide(&snapshot, &State::default(), &config, now);
+    let reviewed = plan.start[0].id.clone();
+
+    // 那一轮审查正常结束（结论是要修改），实现者推了新 head。
+    let state = State {
+        sessions: vec![ended(
+            &reviewed,
+            "review",
+            None,
+            Some(60),
+            "2026-10-14T03:00:00+08:00",
+            "2026-10-14T03:40:00+08:00",
+        )],
+        ..State::default()
+    };
+    let mut again = first;
+    again.head_sha = "eca6af1b0d2e4f5a6b7c8d9e0f1a2b3c4d5e6f70".to_string();
+    let snapshot = Snapshot {
+        pulls: vec![again],
+        ..snapshot
+    };
+    let plan = decide(&snapshot, &state, &config, now);
+    assert_eq!(
+        plan.start.len(),
+        1,
+        "新 head 要重新审查：派 {:?}，跳过 {:?}",
+        plan.start,
+        plan.skip
+    );
+    assert_ne!(
+        plan.start[0].id, reviewed,
+        "新 head 是另一件活：{:?}",
+        plan.start
+    );
+}
+
+#[test]
+fn accepting_again_after_a_fix_is_a_new_round() {
+    // 验收未通过 → 实现者修 → 重新 `待验收`，是第二轮验收，不是已经做过的那一轮。
+    let config = config();
+    let now = at("2026-10-14T04:00:00+08:00");
+    let waiting = Snapshot {
+        issues: vec![issue(51, &["待验收"], Some("codebuddy"))],
+        main_checks: MainChecks::Green,
+        ..Snapshot::default()
+    };
+    let first = decide(&waiting, &State::default(), &config, now).start[0]
+        .id
+        .clone();
+    let mut state = State {
+        sessions: vec![ended(
+            &first,
+            "accept",
+            Some(51),
+            None,
+            "2026-10-14T01:00:00+08:00",
+            "2026-10-14T01:50:00+08:00",
+        )],
+        ..State::default()
+    };
+
+    // 验收未通过，实现者修完，又挂回 `待验收`。
+    let rejected = Snapshot {
+        issues: vec![issue(51, &["验收未通过"], Some("codebuddy"))],
+        ..waiting.clone()
+    };
+    let fix = decide(&rejected, &state, &config, now).start[0].id.clone();
+    state.sessions.push(ended(
+        &fix,
+        "fix-issue",
+        Some(51),
+        None,
+        "2026-10-14T02:00:00+08:00",
+        "2026-10-14T02:50:00+08:00",
+    ));
+
+    let plan = decide(&waiting, &state, &config, now);
+    assert_eq!(
+        plan.start.len(),
+        1,
+        "修完以后要再验收一轮：派 {:?}，跳过 {:?}",
+        plan.start,
+        plan.skip
+    );
+    assert_ne!(plan.start[0].id, first, "这是新的一轮：{:?}", plan.start);
+}
+
+#[test]
+fn a_daily_job_runs_again_tomorrow_even_with_yesterdays_session_recorded() {
+    // 昨天那次定时任务在状态里留下一个真实的会话记录，不该把今天这次挡掉。
+    let config = Config {
+        scheduled: vec![Scheduled {
+            name: "nightly-review".to_string(),
+            at: "03:00".to_string(),
+            vendor: "codex".to_string(),
+            instruction: "按 prompts/nightly-review.md 复盘".to_string(),
+        }],
+        ..config()
+    };
+    let empty = Snapshot {
+        main_checks: MainChecks::Green,
+        ..Snapshot::default()
+    };
+    let yesterday = decide(
+        &empty,
+        &State::default(),
+        &config,
+        at("2026-10-14T03:01:00+08:00"),
+    )
+    .start[0]
+        .id
+        .clone();
+    let state = State {
+        sessions: vec![ended(
+            &yesterday,
+            "nightly-review",
+            None,
+            None,
+            "2026-10-14T03:01:00+08:00",
+            "2026-10-14T04:30:00+08:00",
+        )],
+        scheduled_ran: [("nightly-review".to_string(), "2026-10-14".to_string())]
+            .into_iter()
+            .collect(),
+        ..State::default()
+    };
+    let plan = decide(&empty, &state, &config, at("2026-10-15T03:01:00+08:00"));
+    assert_eq!(
+        plan.start.len(),
+        1,
+        "第二天照常跑：派 {:?}，跳过 {:?}",
+        plan.start,
+        plan.skip
+    );
+}
+
+#[test]
+fn a_second_failing_run_on_main_is_a_second_thing_to_fix() {
+    // 修过一次红不等于现在的红修过了：新的失败 run 是新的活。
+    let config = config();
+    let now = at("2026-10-14T04:00:00+08:00");
+    let first = Snapshot {
+        main_checks: MainChecks::Red,
+        main_run: Some(38456076570),
+        ..Snapshot::default()
+    };
+    let fixed = decide(&first, &State::default(), &config, now).start[0]
+        .id
+        .clone();
+    let state = State {
+        sessions: vec![ended(
+            &fixed,
+            "fix-ci",
+            None,
+            None,
+            "2026-10-14T01:00:00+08:00",
+            "2026-10-14T01:40:00+08:00",
+        )],
+        ..State::default()
+    };
+    let later = Snapshot {
+        main_run: Some(38464764998),
+        ..first
+    };
+    let plan = decide(&later, &state, &config, now);
+    assert_eq!(
+        plan.start.len(),
+        1,
+        "另一个失败的 run 要再派一次：派 {:?}，跳过 {:?}",
+        plan.start,
+        plan.skip
+    );
+    assert_ne!(plan.start[0].id, fixed, "{:?}", plan.start);
 }
 
 #[test]
@@ -459,7 +674,7 @@ fn roles_the_cloud_handles_are_not_dispatched_here() {
         "云端负责的角色本机不派：{:?}",
         plan.start
     );
-    assert!(skipped(&plan, "review-60-a1").contains("#9"));
+    assert!(skipped(&plan, "review-60-91f0f06-a1").contains("#9"));
     assert!(skipped(&plan, "fix-ci-a1").contains("#9"));
 }
 
@@ -531,6 +746,127 @@ fn ignored_issues_are_never_dispatched() {
     );
     assert!(plan.start.is_empty(), "{:?}", plan.start);
     assert!(plan.skip.is_empty(), "{:?}", plan.skip);
+}
+
+#[test]
+fn an_ignored_issue_takes_the_pull_request_for_it_with_it() {
+    // `ignore_issues` 是用来放过“等 owner 裁决”的活的。PR 和它的 issue 是同一件
+    // 活，所以排除 issue 也排除那个 PR。
+    let snapshot = Snapshot {
+        issues: vec![],
+        pulls: vec![pull(33, &["待审查"], Some("claude"), Some(16))],
+        main_checks: MainChecks::Green,
+        main_run: None,
+    };
+    let config = Config {
+        ignore_issues: vec![16],
+        ..config()
+    };
+    let plan = decide(
+        &snapshot,
+        &State::default(),
+        &config,
+        at("2026-10-14T04:00:00+08:00"),
+    );
+    assert!(
+        plan.start.is_empty(),
+        "被排除的 issue 的 PR 也不派：{:?}",
+        plan.start
+    );
+    assert!(plan.skip.is_empty(), "连跳过都不提：{:?}", plan.skip);
+}
+
+#[test]
+fn a_pull_request_waits_while_its_own_issue_has_a_session() {
+    // 排除别的 issue 不该切断 PR 和它自己 issue 的关联，否则同一件活会同时
+    // 跑两个会话。
+    let snapshot = Snapshot {
+        issues: vec![],
+        pulls: vec![pull(33, &["待审查"], Some("claude"), Some(16))],
+        main_checks: MainChecks::Green,
+        main_run: None,
+    };
+    let config = Config {
+        ignore_issues: vec![20],
+        ..config()
+    };
+    let mut live = running(
+        "implement-16-a1",
+        Some(16),
+        "claude",
+        "2026-10-14T03:50:00+08:00",
+    );
+    live.pid = Some(std::process::id());
+    let state = State {
+        sessions: vec![live],
+        ..State::default()
+    };
+    let plan = decide(&snapshot, &state, &config, at("2026-10-14T04:00:00+08:00"));
+    assert!(
+        plan.start.is_empty(),
+        "#16 已经有会话在做，它的 PR 要排队：{:?}",
+        plan.start
+    );
+    assert!(
+        skipped(&plan, "review-33-91f0f06-a1").contains("implement-16-a1"),
+        "{:?}",
+        plan.skip
+    );
+}
+
+#[test]
+fn a_red_main_stops_new_work_from_being_stacked_on_it() {
+    // AGENTS.md：main 红着的时候不要往上叠新改动。先修红的那个会话跑起来，
+    // 不等于可以同时开新实现，也不等于可以把别的 PR 合进红的 main。
+    let snapshot = Snapshot {
+        issues: vec![
+            issue(50, &[], None),
+            issue(51, &["待验收"], Some("codebuddy")),
+        ],
+        pulls: vec![pull(60, &["待审查"], Some("codebuddy"), None)],
+        main_checks: MainChecks::Red,
+        main_run: Some(38456076570),
+    };
+    let plan = decide(
+        &snapshot,
+        &State::default(),
+        &config(),
+        at("2026-10-14T04:00:00+08:00"),
+    );
+    assert_eq!(
+        plan.start.iter().map(|t| t.role.name()).collect::<Vec<_>>(),
+        vec!["fix-ci", "accept"],
+        "红 main 上只修红，验收不碰 main 所以照常：{:?}",
+        plan.start
+    );
+    assert!(
+        skipped(&plan, "implement-50-a1").contains("红"),
+        "{:?}",
+        plan.skip
+    );
+    assert!(
+        skipped(&plan, "review-60-91f0f06-a1").contains("红"),
+        "{:?}",
+        plan.skip
+    );
+
+    // 修红的活归云端时也一样：本机不派新实现，等云端把红修好。
+    let config = Config {
+        cloud_roles: vec!["fix-ci".to_string()],
+        ..config()
+    };
+    let plan = decide(
+        &snapshot,
+        &State::default(),
+        &config,
+        at("2026-10-14T04:00:00+08:00"),
+    );
+    assert_eq!(
+        plan.start.iter().map(|t| t.role.name()).collect::<Vec<_>>(),
+        vec!["accept"],
+        "修红归云端不等于可以在红 main 上叠新实现：{:?}",
+        plan.start
+    );
 }
 
 #[test]

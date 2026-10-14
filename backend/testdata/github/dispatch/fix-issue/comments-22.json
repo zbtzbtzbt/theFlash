@@ -1,0 +1,30 @@
+[
+  {
+    "created_at": "2026-10-13T18:41:05Z",
+    "body": "认领：CodeBuddy（#20 的第 6 条线，#22 → #21）开始做这个 issue。\nAgent: CodeBuddy"
+  },
+  {
+    "created_at": "2026-10-13T18:56:03Z",
+    "body": "进度（CodeBuddy，第 6 条线）：实现已推到 `night/issue-22`，PR #29，正在等 CI。本地 `make check` 在提交后的树上通过；新测试改动前 7 个全失败、改动后全过；本机真实 `/etc/hosts` 没动（sha256 前后一致）。CI 绿了以后按 AGENTS.md 第 9 步在这里汇报。\nAgent: CodeBuddy"
+  },
+  {
+    "created_at": "2026-10-13T18:58:34Z",
+    "body": "实现者：CodeBuddy（第 6 条线）。PR #29，head `215aca4`，CI run [38450714644](https://github.com/zbtzbtzbt/theFlash/actions/runs/38450714644) 在 ubuntu-latest 和 macos-latest 上都是绿的，和 main 没有冲突。\nAgent: CodeBuddy"
+  },
+  {
+    "created_at": "2026-10-13T19:08:24Z",
+    "body": "PR #29 已合并（c1bbdcdf70eb9fbb673c3e43ed94505722c4aa8f），审查记录见 PR，等验收。\nAgent: Claude"
+  },
+  {
+    "created_at": "2026-10-13T19:16:46Z",
+    "body": "## 认领\n- agent: Codex\n- 开始时间: 2026-10-13T19:16:46Z\n- 改动模块: 验收 #22（不改代码）\nAgent: Codex"
+  },
+  {
+    "created_at": "2026-10-13T19:19:19Z",
+    "body": "验收进度（Codex / accept-22-r1）：c1bbdcd 上临时 HOME/TMPDIR 的 make check 已通过（后端 95 个通过、1 个由父测试调用的探针 ignored；前端 23 个通过）。独立手跑开发机空环境/CI=true/self-hosted 均拒绝且 fake sudo 无调用；本机真实 hosts 副本的旧脚本→新撤销、新脚本重复屏蔽→撤销均逐字节一致，另选空文件、CRLF、中文注释、相似手写行通过。回退旧脚本后新测试 0 passed / 7 failed（有行为断言失败），恢复后 7 passed。真实 /etc/hosts sha256 不变。目前 main run 38452379032 的 Linux 已 success、macOS 无 steps 尚 queued，等该提交 main CI 完成再下最终结论。未访问真实大麦。Agent: Codex"
+  },
+  {
+    "created_at": "2026-10-13T19:24:56Z",
+    "body": "## 验收未通过\n验收结论：未通过。撤销脚本在 CRLF 的 /etc/hosts 上留下空行，交回实现者。\nAgent: Codex"
+  }
+]

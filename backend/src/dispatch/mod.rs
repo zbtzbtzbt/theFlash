@@ -108,6 +108,15 @@ impl Role {
     fn needs_same_vendor(&self) -> bool {
         matches!(self, Role::FixPull | Role::FixIssue)
     }
+
+    /// Whether a red main has to be green again before this role runs.
+    /// AGENTS.md: nothing new gets stacked on a red main. Starting work on
+    /// a fresh issue and merging a reviewed pull request both do that;
+    /// fixing a pull request on its own branch, accepting work already
+    /// merged and the scheduled jobs do not.
+    fn waits_for_a_green_main(&self) -> bool {
+        matches!(self, Role::Implement | Role::Review)
+    }
 }
 
 /// A session the dispatcher wants to start.
@@ -139,6 +148,8 @@ impl Task {
 pub enum Skip {
     /// Handled in the cloud (#9), so this machine leaves it alone.
     Cloud,
+    /// main's checks are red, and this would stack something new on it.
+    RedMain,
     /// Another session is working on the same issue or pull request.
     Busy(String),
     /// It was already dispatched, and retries are used up.
@@ -159,6 +170,7 @@ impl Skip {
     pub fn why(&self) -> String {
         match self {
             Skip::Cloud => "按 #9 的裁决归云端，本机不重复派".to_string(),
+            Skip::RedMain => "main 的检查是红的，先修红再往上叠新改动".to_string(),
             Skip::Busy(id) => format!("同一个 issue 已经有会话 {id} 在做"),
             Skip::Done(id) => format!("已经派过 {id}，重试次数用完了"),
             Skip::UnknownImplementer => "看不出是哪个 agent 实现的，不猜".to_string(),
@@ -267,6 +279,12 @@ struct Wanted {
     role: Role,
     issue: Option<u64>,
     pull: Option<u64>,
+    /// What tells this event apart from the next one of the same kind on
+    /// the same subject: the head commit of a pull request, the id of the
+    /// failing run, the day a scheduled job is due. `None` means the
+    /// event has no identity of its own and the round it belongs to
+    /// answers instead (see [`round`]).
+    event: Option<String>,
     /// The vendor already attached to the work: the implementer of the
     /// change, or the vendor a scheduled job names.
     known: Option<String>,
@@ -289,8 +307,12 @@ fn candidates(
             role: Role::FixCi,
             issue: None,
             pull: None,
+            event: snapshot.main_run.map(|id| id.to_string()),
             known: None,
-            why: "main 的检查是红的，先修红".to_string(),
+            why: match snapshot.main_run {
+                Some(id) => format!("main 的检查是红的（run {id}），先修红"),
+                None => "main 的检查是红的，先修红".to_string(),
+            },
         });
     }
 
@@ -300,6 +322,9 @@ fn candidates(
                 role: Role::Scheduled(job.name.clone()),
                 issue: None,
                 pull: None,
+                // Tomorrow's run of a daily job is not the one that ran
+                // today, so the day is part of what it is.
+                event: Some(state::local_day(now)),
                 known: Some(job.vendor.clone()),
                 why: job.instruction.clone(),
             });
@@ -308,6 +333,15 @@ fn candidates(
 
     for pull in &snapshot.pulls {
         if !allowed(&pull.labels, config) {
+            continue;
+        }
+        // A pull request for an issue the settings exclude is excluded
+        // with it: the issue is excluded because nobody is to be sent to
+        // work on it, and its pull request is that same work.
+        if pull
+            .issue
+            .is_some_and(|number| config.ignore_issues.contains(&number))
+        {
             continue;
         }
         let role = if pull.labels.iter().any(|l| l == FIX_PULL_LABEL) {
@@ -333,8 +367,10 @@ fn candidates(
             role,
             // The issue the pull request is for, so a review and the
             // issue's own session never run at the same time.
-            issue: pull.issue.filter(|n| !config.ignore_issues.contains(n)),
+            issue: pull.issue,
             pull: Some(pull.number),
+            // Reviewing head A says nothing about head B.
+            event: Some(short(&pull.head_sha)),
             known: vendor_of(pull.agent.as_deref(), config),
             why,
         });
@@ -364,6 +400,9 @@ fn candidates(
             role,
             issue: Some(issue.number),
             pull: None,
+            // An issue's labels do not say which round this is, so the
+            // sessions already run on it do (see `round`).
+            event: None,
             // An issue assigned to one agent by label only goes to that
             // agent; otherwise the agent that last spoke on it is its
             // implementer.
@@ -375,25 +414,40 @@ fn candidates(
 
     wanted
         .into_iter()
-        .map(|w| build(w, state, config, now))
+        .map(|w| build(w, state, config, snapshot.main_checks, now))
         .collect()
 }
 
 /// Turns one wanted session into a task, or into the reason it cannot be
 /// one: handled in the cloud, already dispatched, or no vendor the rules
 /// allow.
-fn build(wanted: Wanted, state: &State, config: &Config, now: DateTime<Utc>) -> Candidate {
+fn build(
+    wanted: Wanted,
+    state: &State,
+    config: &Config,
+    main: MainChecks,
+    now: DateTime<Utc>,
+) -> Candidate {
     let Wanted {
         role,
         issue,
         pull,
+        event,
         known,
         why,
     } = wanted;
-    let key = match (&role, issue, pull) {
+    let subject = issue.or(pull);
+    let base = match (&role, issue, pull) {
         (Role::Review | Role::FixPull, _, Some(pull)) => format!("{}-{pull}", role.name()),
         (_, Some(issue), _) => format!("{}-{issue}", role.name()),
         _ => role.name().to_string(),
+    };
+    let key = match event {
+        Some(event) => format!("{base}-{event}"),
+        None => match round(state, subject, role.name()) {
+            1 => base,
+            n => format!("{base}-r{n}"),
+        },
     };
     let attempt = state
         .sessions
@@ -411,6 +465,12 @@ fn build(wanted: Wanted, state: &State, config: &Config, now: DateTime<Utc>) -> 
 
     if config.in_cloud(&role) {
         return Candidate::Skip(task, Skip::Cloud);
+    }
+    // Whether the red is being fixed here or in the cloud, and whether a
+    // fix session is already running or not, nothing new goes on top of a
+    // red main: the order tasks come in is not a gate on its own.
+    if main == MainChecks::Red && role.waits_for_a_green_main() {
+        return Candidate::Skip(task, Skip::RedMain);
     }
     // A session that was started and ended is not started again, except
     // once more after a failure or a timeout: a dispatcher that keeps
@@ -458,6 +518,38 @@ fn build(wanted: Wanted, state: &State, config: &Config, now: DateTime<Utc>) -> 
     }
     task.vendor = vendor;
     Candidate::Start(task)
+}
+
+/// Which round of this role on this piece of work is being asked for.
+///
+/// An issue's labels say what it needs now, not how many times it has
+/// needed it: `待验收` → `验收未通过` → `待验收` is two rounds of accepting
+/// with a fix in between, and the second one is work nobody has done. A
+/// round ends when another role takes the issue, so the rounds are the
+/// blocks of sessions of this role in the issue's history, and the one
+/// being asked for is the last block when that block is still this role's
+/// and the next one otherwise.
+fn round(state: &State, subject: Option<u64>, role: &str) -> usize {
+    let Some(subject) = subject else {
+        return 1;
+    };
+    let mut blocks = 0;
+    let mut previous = "";
+    for session in state
+        .sessions
+        .iter()
+        .filter(|s| s.issue.or(s.pull) == Some(subject))
+    {
+        if session.role == role && previous != role {
+            blocks += 1;
+        }
+        previous = session.role.as_str();
+    }
+    if previous == role {
+        blocks.max(1)
+    } else {
+        blocks + 1
+    }
 }
 
 /// The configured vendor with the fewest sessions today, skipping `avoid`.
