@@ -76,6 +76,41 @@ pub(crate) fn sale_state(button: Option<&BuyButton>) -> SaleState {
     }
 }
 
+/// The sale state a buy-button status code maps to, or None for a code
+/// theFlash has not seen on damai.cn's own pages. The structure inspection
+/// (docs/subsystems/damai-inspect.md) asks this so that a code nobody has
+/// mapped yet is reported instead of quietly printing as 未知.
+pub fn sale_state_of_code(code: &str) -> Option<SaleState> {
+    let status = code.trim().parse().ok()?;
+    match sale_state(Some(&BuyButton {
+        status: Some(status),
+        text: None,
+    })) {
+        SaleState::Unknown(_) => None,
+        state => Some(state),
+    }
+}
+
+pub fn buy_button_code_is_mapped(code: &str) -> bool {
+    sale_state_of_code(code).is_some()
+}
+
+/// Whether a `frontEndStatus` maps to a tier status. Asked with a session
+/// that is on sale and a tier that is salable, which is the combination
+/// every mapped code reads under.
+pub fn tier_code_is_mapped(code: &str) -> bool {
+    let sku = SkuRaw {
+        name: None,
+        price: None,
+        front_end_status: Some(code.to_string()),
+        salable: Some(true),
+    };
+    !matches!(
+        tier_status(&SaleState::OnSale, &sku),
+        TierStatus::Unknown(_)
+    )
+}
+
 /// A tier's status within its session. frontEndStatus 1 alone doesn't mean
 /// the tier can be bought: before the sale opens damai.cn sends 1 with
 /// skuSalable true (the page shows 可预约), so the session's state decides.
@@ -123,6 +158,23 @@ mod tests {
         assert_eq!(sale_state(Some(&button(106))), SaleState::NotYetOnSale);
         assert_eq!(sale_state(Some(&button(92))), SaleState::SoldOut);
         assert_eq!(sale_state(Some(&button(100))), SaleState::NotOnPcChannel);
+    }
+
+    /// The mapped codes are one list: asking "does this code map?" and
+    /// mapping it cannot drift apart.
+    #[test]
+    fn code_mapping_answers_the_same_as_reading_the_button() {
+        for code in 0..1000 {
+            let text = code.to_string();
+            let mapped = sale_state(Some(&button(code)));
+            match (sale_state_of_code(&text), mapped) {
+                (None, SaleState::Unknown(_)) => {}
+                (Some(a), b) => assert_eq!(a, b, "{code}"),
+                (None, b) => panic!("{code}：读成 {b:?}，却说没映射"),
+            }
+        }
+        assert_eq!(sale_state_of_code(" 204 "), Some(SaleState::OnSale));
+        assert_eq!(sale_state_of_code("两百零四"), None);
     }
 
     #[test]

@@ -34,15 +34,11 @@ pub(crate) struct ItemPage {
 /// The page's data, or None for a page without dataDefault, which is what
 /// damai.cn serves (with HTTP 200) for an item that doesn't exist.
 pub(crate) fn parse_item_page(html: &str) -> Result<Option<ItemPage>, String> {
-    let Some(data) = embedded_json(html, "dataDefault") else {
+    let Some(json) = item_page_json(html)? else {
         return Ok(None);
     };
-    let data = data.map_err(|e| format!("dataDefault 不是有效的 JSON：{e}"))?;
-    let stat = match embedded_json(html, "staticDataDefault") {
-        Some(Ok(v)) => v,
-        Some(Err(e)) => return Err(format!("staticDataDefault 不是有效的 JSON：{e}")),
-        None => Value::Null,
-    };
+    let data = &json["dataDefault"];
+    let stat = &json["staticDataDefault"];
 
     let buy_button = {
         let status = integer(&data["buyBtnStatus"]);
@@ -87,6 +83,29 @@ pub(crate) fn parse_item_page(html: &str) -> Result<Option<ItemPage>, String> {
         sell_start_ms: integer(&data["sellStartTime"]),
         performs,
     }))
+}
+
+/// The page's two embedded JSON blobs side by side, under the names the
+/// page gives them, so a field path reads the way
+/// docs/subsystems/damai-event.md writes it
+/// (`dataDefault.performBases`). None for a page without `dataDefault`,
+/// which is what damai.cn serves for an item that doesn't exist. This is
+/// what the structure inspection looks at, so it sees damai.cn's own
+/// shape rather than what `parse_item_page` managed to read out of it.
+pub fn item_page_json(html: &str) -> Result<Option<Value>, String> {
+    let Some(data) = embedded_json(html, "dataDefault") else {
+        return Ok(None);
+    };
+    let data = data.map_err(|e| format!("dataDefault 不是有效的 JSON：{e}"))?;
+    let stat = match embedded_json(html, "staticDataDefault") {
+        Some(Ok(v)) => v,
+        Some(Err(e)) => return Err(format!("staticDataDefault 不是有效的 JSON：{e}")),
+        None => Value::Null,
+    };
+    Ok(Some(serde_json::json!({
+        "dataDefault": data,
+        "staticDataDefault": stat,
+    })))
 }
 
 /// The JSON value that starts right after the opening tag of the element
