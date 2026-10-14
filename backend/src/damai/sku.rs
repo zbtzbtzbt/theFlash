@@ -5,6 +5,12 @@ use serde_json::Value;
 
 use super::page::{BuyButton, perform_id};
 use super::text::{integer, string};
+// The owner's rules about credentials and personal data, kept in one
+// reading for the whole repository (docs/code-standards.md). They live
+// under `inspect` because the fixtures it records were the first thing
+// that needed them; what theFlash says about a response needs the same
+// rules (#72).
+use crate::inspect::redact;
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct SkuRaw {
@@ -62,7 +68,7 @@ pub(crate) fn parse_sku_json(data: &Value) -> Result<PerformSkus, String> {
     if info["responseSuccess"].as_str() == Some("false") {
         return Err(format!(
             "接口返回失败（responseCode {}）",
-            string(&info["responseCode"]).unwrap_or_else(|| "空".into())
+            head(&string(&info["responseCode"]).unwrap_or_else(|| "空".into()))
         ));
     }
 
@@ -148,8 +154,15 @@ pub(crate) fn session_mismatch(p: &PerformSkus, asked: u64) -> Option<String> {
     })
 }
 
+/// The start of something damai.cn sent, as an error message may quote it:
+/// enough to tell a slider challenge from a new layout, with the owner's
+/// rules applied to it first. A query prints this on stderr and
+/// `theflash inspect` puts the same string in its report and in the issue
+/// it opens, so a logged-in run used to paste its own session into both
+/// (#72). Redacted before it is cut down, so a value cannot survive by
+/// being split in half.
 fn head(s: &str) -> String {
-    s.chars().take(80).collect()
+    redact::for_report(s).chars().take(80).collect()
 }
 
 #[cfg(test)]

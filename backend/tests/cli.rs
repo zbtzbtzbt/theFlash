@@ -346,6 +346,63 @@ fn malformed_sku_list_is_a_failure_instead_of_empty() {
     }
 }
 
+/// The two error messages theFlash builds out of a response's own bytes:
+/// the first characters of a tier response that is not JSONP, and the
+/// session object behind a `performId` the reader refuses. A query prints
+/// them on stderr, where a terminal log keeps them, and `theflash inspect`
+/// puts the same strings in a report and in the issue it opens (#72). So
+/// whatever they quote has the owner's rules applied to it first: the
+/// value is gone and the message still says what went wrong.
+#[test]
+fn an_error_built_from_a_response_quotes_it_with_the_credentials_taken_out() {
+    // Built from pieces so this file does not carry what repo_guard looks
+    // for.
+    let (cookie, value) = (["un", "b"].concat(), ["synthetic", "123"].concat());
+    let mobile = ["139", "0013", "8001"].concat();
+
+    let not_jsonp = MockDamai::start_bodies(vec![
+        (
+            "/item.htm?id=1086791513717".into(),
+            fixture("item_on_sale.html"),
+        ),
+        (
+            "dataId=".into(),
+            format!("{cookie}={value}\n<html>changed layout</html>"),
+        ),
+    ]);
+    let out = theflash(&not_jsonp.base_url(), &["event", "1086791513717"]);
+    let said = format!("{}{}", stdout(&out), stderr(&out));
+    assert!(
+        !said.contains(&value),
+        "票档响应里的登录 cookie 原样进了终端：{said}"
+    );
+    assert!(said.contains("不是 JSONP"), "没说清响应怎么了：{said}");
+
+    // The id and the name of one session, replaced together: the message
+    // quotes the session object whole, so a number planted in another
+    // session's name would never have been in it.
+    let original = fixture("item_on_sale.html");
+    let page = original.replacen(
+        "\"performId\":286937788,\"performName\":\"2026-10-17 周六 17:00\"",
+        &format!(
+            "\"performId\":\"not-a-number\",\"performName\":\"2026-10-17 周六 17:00 {mobile}\""
+        ),
+        1,
+    );
+    assert_ne!(page, original, "这一页没有被改到，这次复现不成立");
+    let bad_session = MockDamai::start_bodies(vec![("/item.htm?id=1086791513717".into(), page)]);
+    let out = theflash(&bad_session.base_url(), &["event", "1086791513717"]);
+    let said = format!("{}{}", stdout(&out), stderr(&out));
+    assert!(
+        !said.contains(&mobile),
+        "读不了的场次里的手机号原样进了终端：{said}"
+    );
+    assert!(
+        said.contains("场次缺少 performId") && said.contains("not-a-number"),
+        "没说是哪个场次 ID 读不了：{said}"
+    );
+}
+
 #[test]
 fn invalid_links_with_numeric_ids_are_refused_before_any_request() {
     let damai = MockDamai::start(&[

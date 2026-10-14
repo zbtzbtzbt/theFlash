@@ -1007,11 +1007,15 @@ fn write_candidate(
     Ok(())
 }
 
+/// The event's name as damai.cn writes it, with the owner's rules applied:
+/// the report prints it, the issue a run opens carries it, and the sample
+/// set keeps it on disk for the next run to print again (#72).
 fn event_name(json: &Value) -> Option<String> {
     json["staticDataDefault"]["itemBase"]["itemName"]
         .as_str()
         .map(|s| s.split_whitespace().collect::<Vec<_>>().join(" "))
         .filter(|s| !s.is_empty())
+        .map(|s| redact::for_report(&s))
 }
 
 /// The first session on the page, which is the one session whose tiers an

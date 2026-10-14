@@ -768,3 +768,224 @@ fn nothing_reads_or_writes_the_state_directory_until_a_request_is_due() {
     );
     assert!(damai.hits().is_empty(), "{:?}", damai.hits());
 }
+
+/// If `Gate::enter` claims its rate-limit slot before acquiring the shared
+/// lock in `stop()`, two callers that both block on `risk-stop.lock` see
+/// their slot timestamps pass while waiting and burst out together as soon
+/// as the lock is released (#110).
+#[test]
+fn a_delayed_breaker_read_cannot_release_two_slots_together() {
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::atomic::{AtomicI64, Ordering};
+    use std::sync::mpsc;
+    use theflash::damai::Clock;
+
+    struct ClockProbe {
+        now: AtomicI64,
+        seen: mpsc::Sender<i64>,
+    }
+
+    impl Clock for ClockProbe {
+        fn now_ms(&self) -> i64 {
+            let n = self.now.load(Ordering::SeqCst);
+            let _ = self.seen.send(n);
+            n
+        }
+
+        fn sleep_ms(&self, ms: i64) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+            Box::pin(async move {
+                if ms > 0 {
+                    tokio::time::sleep(Duration::from_millis(ms as u64)).await;
+                    self.now.fetch_add(ms, Ordering::SeqCst);
+                }
+            })
+        }
+    }
+
+    let home = Home::new("review100-blocked-stop");
+    let dir = home.state_dir();
+    let (tx, rx) = mpsc::channel();
+    let clock = Arc::new(ClockProbe {
+        now: AtomicI64::new(0),
+        seen: tx,
+    });
+    let gate = Arc::new(
+        Gate::new(
+            dir.clone(),
+            Duration::from_millis(300),
+            clock.clone(),
+            "review100".into(),
+        )
+        .unwrap(),
+    );
+    let held = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(dir.join("risk-stop.lock"))
+        .unwrap();
+    held.lock().unwrap();
+    let server = MockDamai::start(&[("/item.htm", "item_on_sale.html")]);
+    let start = |g: Arc<Gate>, c: Arc<ClockProbe>| {
+        let url = server.base_url();
+        std::thread::spawn(move || {
+            let client = Client::with_gate(url, g).unwrap();
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(client.item_page(ITEM)).unwrap();
+            c.now.load(Ordering::SeqCst)
+        })
+    };
+    let a = start(gate.clone(), clock.clone());
+    assert_eq!(rx.recv_timeout(Duration::from_secs(3)).unwrap(), 0);
+    clock.now.store(1000, Ordering::SeqCst);
+    let b = start(gate.clone(), clock.clone());
+    assert_eq!(rx.recv_timeout(Duration::from_secs(3)).unwrap(), 1000);
+    held.unlock().unwrap();
+    let x = a.join().unwrap();
+    let y = b.join().unwrap();
+    let gaps = server.arrival_gaps_ms();
+    assert!(
+        y - x >= 300,
+        "enter returned at {x}/{y} ms after breaker lock was released; reserved spacing was lost (gaps={gaps:?})"
+    );
+    let least = MIN_REQUEST_GAP.as_millis() as i64 - 50;
+    assert!(
+        gaps[0] >= least,
+        "熔断锁释放后两次请求在服务器上只隔了 {} 毫秒（至少 {least}）：{:?}",
+        gaps[0],
+        server.hits()
+    );
+}
+
+/// Deterministic reproduction of #108: when the first request is delayed
+/// for 230 ms (either on `risk-stop.lock` or while connecting/sending
+/// before the server receives the request), the next redirect hop or a
+/// concurrent default client's request must still arrive at the server at
+/// least one rate-limit slot after the first request arrived, rather than
+/// having the 230 ms delay subtracted from the 300 ms gap (leaving only
+/// 70 ms or 19 ms between arrivals).
+#[tokio::test]
+async fn a_delayed_first_hop_still_keeps_redirect_and_concurrent_requests_one_slot_apart() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+    use std::time::Instant;
+
+    let least = MIN_REQUEST_GAP.as_millis() as i64 - 50;
+    let body = support::fixture("item_on_sale.html");
+
+    // 1. Redirect: first hop stalls 230 ms before the server reads and
+    // timestamps it, then answers 302; second hop answers 200 immediately.
+    {
+        let home = Home::new("delayed-redirect-hop1");
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let body = body.clone();
+        let server = std::thread::spawn(move || {
+            let mut arrivals = Vec::new();
+            for hop in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                if hop == 0 {
+                    std::thread::sleep(Duration::from_millis(230));
+                }
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap() == 0 || line == "\r\n" {
+                        break;
+                    }
+                }
+                arrivals.push(Instant::now());
+                if hop == 0 {
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 302 Found\r\nLocation: /item.htm?id=1086791513717&spm=moved\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    );
+                } else {
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                }
+            }
+            arrivals[1]
+                .saturating_duration_since(arrivals[0])
+                .as_millis() as i64
+        });
+
+        let gate = Arc::new(
+            Gate::new(
+                home.state_dir(),
+                MIN_REQUEST_GAP,
+                Arc::new(SystemClock::default()),
+                "theflash test".into(),
+            )
+            .unwrap(),
+        );
+        let client = Client::with_gate(format!("http://{addr}"), gate).unwrap();
+        let html = client.item_page(ITEM).await.unwrap();
+        assert!(html.contains("dataDefault"));
+        let gap_ms = server.join().unwrap();
+        assert!(
+            gap_ms >= least,
+            "第一跳延迟 230 毫秒后，重定向下一跳只隔了 {gap_ms} 毫秒（至少 {least}）"
+        );
+    }
+
+    // 2. Two concurrent clients sharing one Gate: the first client's
+    // request stalls 250 ms before the server reads and timestamps it.
+    {
+        let home = Home::new("delayed-concurrent-clients");
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let mut arrivals = Vec::new();
+            for req_idx in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                if req_idx == 0 {
+                    std::thread::sleep(Duration::from_millis(250));
+                }
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap() == 0 || line == "\r\n" {
+                        break;
+                    }
+                }
+                arrivals.push(Instant::now());
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+            arrivals[1]
+                .saturating_duration_since(arrivals[0])
+                .as_millis() as i64
+        });
+
+        let gate = Arc::new(
+            Gate::new(
+                home.state_dir(),
+                MIN_REQUEST_GAP,
+                Arc::new(SystemClock::default()),
+                "theflash test".into(),
+            )
+            .unwrap(),
+        );
+        let base = format!("http://{addr}");
+        let left = Client::with_gate(&base, gate.clone()).unwrap();
+        let right = Client::with_gate(&base, gate).unwrap();
+        let (a, b) = tokio::join!(left.item_page(ITEM), right.item_page(ITEM));
+        a.unwrap();
+        b.unwrap();
+        let gap_ms = server.join().unwrap();
+        assert!(
+            gap_ms >= least,
+            "第一个客户端请求延迟 250 毫秒后，第二个客户端请求只隔了 {gap_ms} 毫秒（至少 {least}）"
+        );
+    }
+}

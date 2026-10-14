@@ -143,6 +143,43 @@ pub fn redact(text: &str) -> String {
 }
 
 #[derive(Debug, Clone, Copy)]
+
+/// damai.cn's own text as something theFlash prints may carry it. Values
+/// [`redact`] can replace are replaced; a line that still trips a rule
+/// afterwards is dropped and named instead, because a login header has no
+/// value to swap out and the text is on its way somewhere that cannot be
+/// taken back.
+///
+/// A fixture is written once and read by whoever fixes a change, so a
+/// response it cannot clean is refused whole. A report is not: it goes to
+/// a terminal, to a scheduled run's log and into the issue `theflash
+/// inspect --open-issue` opens by itself, and dropping it would throw away
+/// the finding along with the credential. So every string an inspection
+/// copies out of a response comes through here — the event's name, the
+/// words beside a status code nobody has mapped, a tier's label, and the
+/// errors theFlash builds out of a response's own bytes — and what is left
+/// is a safe error summary, a field path and redacted page text (#72).
+pub fn for_report(text: &str) -> String {
+    let redacted = redact(text);
+    let left = sensitive(&redacted);
+    if left.is_empty() {
+        return redacted;
+    }
+    redacted
+        .split_inclusive('\n')
+        .enumerate()
+        .map(
+            |(i, line)| match left.iter().find(|hit| hit.line == i + 1) {
+                Some(hit) => {
+                    let ending = &line[line.trim_end_matches(['\n', '\r']).len()..];
+                    format!("〈这一行命中“{}”，没有写进报告〉{ending}", hit.rule.name())
+                }
+                None => line.to_string(),
+            },
+        )
+        .collect()
+}
+
 enum Replacement {
     /// A cookie value, which has no length worth keeping.
     Redacted,
