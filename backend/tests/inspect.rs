@@ -1885,13 +1885,186 @@ fn record_says_when_the_page_it_saved_is_one_a_query_cannot_read() {
     ]);
     let out = support::output_within(cmd, 60);
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-    assert!(
-        dir.join("item_broken.html").is_file(),
-        "读不了的页面才是要复现的那一份，它没被录下来：{stderr}"
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "读不了的场次说明不是丢失的响应，命令不该失败：{stderr}{}",
+        stdout(&out)
     );
     assert!(
-        stderr.contains("theflash event 读不了") && stderr.contains("performId"),
+        dir.join("item_broken.html").is_file() && dir.join("sku_broken_286937790.jsonp").is_file(),
+        "读不了的页面和后续能读的场次票档都要录下来：{stderr}"
+    );
+    assert!(
+        stderr.contains("这一页 theflash event 读不了") && stderr.contains("performId"),
         "没说这一页查询读不了：{stderr}"
+    );
+    assert!(
+        !stderr.contains("写下来的是"),
+        "所有请求到的文件都写成功了，不该打印半成品清单：{stderr}"
+    );
+}
+
+/// When a page has an unreadable session (#73) AND one of the fixtures it
+/// did fetch could not be written or was refused by redaction (#78), the
+/// caller needs both pieces of information: why a session's tiers were
+/// never requested, and which fetched fixture went missing (#128).
+#[test]
+fn record_keeps_unreadable_page_note_when_another_fixture_is_lost() {
+    let broken_page = || {
+        changed(unchanged_routes(), "/item.htm?id=1086791513717", |body| {
+            body.replacen(
+                "\"performId\":286937788",
+                "\"performId\":\"not-a-number\"",
+                1,
+            )
+        })
+    };
+
+    // Case 1: tier fixture path occupied by a directory ("写不进去").
+    {
+        let home = Home::new("record-bad-perform-unwritable");
+        let dir = home.path().join("testdata");
+        let blocked = dir.join("sku_broken_286937790.jsonp");
+        std::fs::create_dir_all(&blocked).unwrap();
+        let next = (
+            "dataId=286937790".to_string(),
+            support::fixture("sku_on_sale_286937790.jsonp"),
+        );
+        let damai = support::MockDamai::start_bodies(with_route(broken_page(), next));
+        let mut cmd = home.theflash(&damai.base_url());
+        cmd.args([
+            "inspect",
+            "record",
+            "1086791513717",
+            "--as",
+            "broken",
+            "--dir",
+            dir.to_str().unwrap(),
+            "--sessions",
+            "1",
+            "--gap",
+            "0",
+        ]);
+        let out = support::output_within(cmd, 60);
+        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert_eq!(out.status.code(), Some(1), "{stderr}{}", stdout(&out));
+        assert!(dir.join("item_broken.html").is_file(), "{stderr}");
+        assert!(
+            stderr.contains("这一页 theflash event 读不了") && stderr.contains("performId"),
+            "票档写不进去时把 #73 的读不了场次说明弄丢了：{stderr}"
+        );
+        assert!(
+            stderr.contains("写不进去")
+                && stderr.contains("写下来的是")
+                && stderr.contains("item_broken.html"),
+            "没交代写不进去的票档和已写下的详情页：{stderr}"
+        );
+    }
+
+    // Case 2: tier fixture refused by redaction rule ("没有保存").
+    {
+        let home = Home::new("record-bad-perform-refused");
+        let dir = home.path().join("testdata");
+        std::fs::create_dir_all(&dir).unwrap();
+        let header = ["Set-", "Cookie", ":"].concat();
+        let next = (
+            "dataId=286937790".to_string(),
+            format!(
+                "{header} sid=1\n{}",
+                support::fixture("sku_on_sale_286937790.jsonp")
+            ),
+        );
+        let damai = support::MockDamai::start_bodies(with_route(broken_page(), next));
+        let mut cmd = home.theflash(&damai.base_url());
+        cmd.args([
+            "inspect",
+            "record",
+            "1086791513717",
+            "--as",
+            "broken",
+            "--dir",
+            dir.to_str().unwrap(),
+            "--sessions",
+            "1",
+            "--gap",
+            "0",
+        ]);
+        let out = support::output_within(cmd, 60);
+        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert_eq!(out.status.code(), Some(1), "{stderr}{}", stdout(&out));
+        assert!(dir.join("item_broken.html").is_file(), "{stderr}");
+        assert!(!dir.join("sku_broken_286937790.jsonp").exists(), "{stderr}");
+        assert!(
+            stderr.contains("这一页 theflash event 读不了") && stderr.contains("performId"),
+            "票档被脱敏拒绝时把 #73 的读不了场次说明弄丢了：{stderr}"
+        );
+        assert!(
+            stderr.contains("没有保存")
+                && stderr.contains("Cookie")
+                && stderr.contains("写下来的是")
+                && stderr.contains("item_broken.html"),
+            "没交代被拒绝的票档和已写下的详情页：{stderr}"
+        );
+    }
+}
+
+/// When a page has an unreadable session (#73) and fetching a later
+/// session's tiers hits risk control and stops the run (#78), `report_partial`
+/// must still print the unreadable-session note before the kept-files
+/// summary and the risk-control error (#128).
+#[test]
+fn record_keeps_unreadable_page_note_when_later_session_hits_risk_control() {
+    let home = Home::new("record-bad-perform-risk");
+    let dir = home.path().join("testdata");
+    std::fs::create_dir_all(&dir).unwrap();
+    let routes = changed(unchanged_routes(), "/item.htm?id=1086791513717", |body| {
+        body.replacen(
+            "\"performId\":286937788",
+            "\"performId\":\"not-a-number\"",
+            1,
+        )
+    });
+    let next = (
+        "dataId=286937790".to_string(),
+        support::fixture("risk_control.html"),
+    );
+    let damai = support::MockDamai::start_bodies(with_route(routes, next));
+    let mut cmd = home.theflash(&damai.base_url());
+    cmd.args([
+        "inspect",
+        "record",
+        "1086791513717",
+        "--as",
+        "broken",
+        "--dir",
+        dir.to_str().unwrap(),
+        "--sessions",
+        "2",
+        "--gap",
+        "0",
+    ]);
+    let out = support::output_within(cmd, 60);
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert_eq!(out.status.code(), Some(1), "{stderr}{}", stdout(&out));
+    assert_eq!(
+        damai.hits().len(),
+        2,
+        "遇到风控后不应继续请求后面的场次：{:?}",
+        damai.hits()
+    );
+    assert!(dir.join("item_broken.html").is_file(), "{stderr}");
+    assert!(
+        stderr.contains("这一页 theflash event 读不了") && stderr.contains("performId"),
+        "风控停机时把 #73 的读不了场次说明弄丢了：{stderr}"
+    );
+    assert!(
+        stderr.contains("写下来的是") && stderr.contains("item_broken.html"),
+        "风控停机时没打印已保存文件清单：{stderr}"
+    );
+    assert!(
+        stderr.contains("触发了风控"),
+        "风控停机时没打印风控错误：{stderr}"
     );
 }
 
