@@ -1,4 +1,4 @@
-<!-- reviewed-through: eaf63f6 (2026-10-14 12:28 +0800) -->
+<!-- reviewed-through: dabd956 (2026-10-14 12:55 +0800) -->
 # 已合并工作的教训
 
 本项目的代码由 agent 编写、审查、合并和发布。每天夜里有一个复盘 agent 检查当天的 commit：哪些改动后来又被返工、哪些不该合并、哪些验证得太薄。学到的东西记在这里。改代码之前先读这份文件。
@@ -65,6 +65,7 @@
 **以某个保证命名的测试，在保证被破坏时必须失败；只断言宽泛的退出码或“文字里有文件名”不算。**
 - #53（PR #50 / `78b5a4e`）：docs 索引的三个格式守护（缺状态、标题编号、标题里的 `|`）被删掉后，`scripts/tests/test_docs_index.py` 仍全绿——测试只在索引未更新时跑 `--check`，没把破坏后的生成器再跑一遍。
 - #48（#30 / `a5b9169`）：状态样式颜色测试在 happy-dom 里对“有背景色”的断言永远过；删掉整条 `.not-yet-on-sale` 规则仍全绿。同 issue：`browser_event_json_preserves_cli_content` 名字说保留 CLI 内容，实际只比 `report` 字段。
+- Done right on 10-14: `dabd956`（#48）——颜色看真实徽标相对无状态类的差、五种两两不同；`event-json` 用多份真实回放按页面字段拼回 CLI 逐字比；presentation 六个“未知”名都查。只改测试与文档。
 - #44（#11 / `dab6050`）：`finish_push` 删掉后全仓测试仍绿。Done right on 10-14: `ff15558`（#44/#66）——风控退出手机提醒与拼错配置有真正会红的离线守护；同窗还合入 `e2eaf65`（#51）、`3dbeabc`（#17）。CI 仍被 #63 挡住未跑。
 - 怎么避免：审查时按 code-standards 故意破坏命名保证；合并前 `git show` 里每个新测试都要有一条“破坏后 FAIL”的记录。未修前不要在相关模块上继续堆功能。
 - Seen 1× (2026-10-14)。
@@ -100,7 +101,7 @@
 - Seen 1× (2026-10-14)。
 
 **判断 main 红不红只看 Test 工作流；被设计拒绝的 Release run 不算 main 红。**
-- `eaf63f6`：版本升到 0.1.0-rc.2，正文写明等本 commit Test 绿再打 tag——与发版门槛一致。
+- `eaf63f6`：版本升到 0.1.0-rc.2；tag/release [v0.1.0-rc.2](https://github.com/zbtzbtzbt/theFlash/releases/tag/v0.1.0-rc.2) 已出（两台 macOS + install.sh）。
 - Done right on 10-14: `3b1cc18`（#5）——Release gate 拒绝未跑完的 Test 时，不带 `--workflow` 的 `gh run list` 会把拒绝显示成 main 红，误导 work-tick。
 - Seen 1× (2026-10-14)。
 
