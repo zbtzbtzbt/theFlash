@@ -1,4 +1,4 @@
-<!-- reviewed-through: cf5c789 (2026-10-14 16:53 +0800) -->
+<!-- reviewed-through: bceaf95 (2026-10-14 17:15 +0800) -->
 # 已合并工作的教训
 
 本项目的代码由 agent 编写、审查、合并和发布。每天夜里有一个复盘 agent 检查当天的 commit：哪些改动后来又被返工、哪些不该合并、哪些验证得太薄。学到的东西记在这里。改代码之前先读这份文件。
@@ -80,12 +80,12 @@
 - Seen 1× (2026-10-14)。
 - **注意**：`72d1c28` 合入绕过合并闸门（#159）。
 
-**调度 implement 必须走 claims queue；租约存活判定必须与 `claims queue` 共用同一套 `read_lease`（含推送续租与评论 URL）。**
+**调度 implement 必须走 claims queue；租约、推送错误分类与指派标签解析都必须与 claims 共用实现。**
 - Done right on 10-14: `8543ea9`（#103/#135）——dispatch 跳过等裁决、未定级和被依赖挡住的；与 #68 队列一致。
-- `8543ea9` 之后仍有三处分歧：不读 branch push 把活租约当过期、`Unreadable` 当成已交回、心跳/收回认领不绑定评论 URL。Done right on 10-14: `02b5e52`（#103/#157）——复用 `claim::read_lease` + `replay_pushes_for_issue`；对照测试钉住与 queue 序列一致。
-- 怎么避免：dispatch 与 claims 对「谁在干」只能有一份实现；改任一侧前跑「两侧 next 必须相同」的对照测试。
-- Seen 2× (2026-10-14)。
-- **注意**：`02b5e52` 的合入本身绕过了合并闸门（见「合并与关闭」），代码补强有效，流程不算过关。
+- `8543ea9` 之后仍有三处分歧：不读 branch push、`Unreadable` 当成已交回、心跳不绑定 URL。Done right on 10-14: `02b5e52`（#103/#157）——复用 `claim::read_lease`（合入曾绕闸，见合并节）。
+- 推送读取与 `指派:` 仍各写一份：全角 `指派：` 被 dispatch 误认、`指派:codex-2` 前缀误匹配、activity 断网被当成可继续派活（#170）。Done right on 10-14: `bceaf95`（#170/#172，经闸门）——共用 `fetch_pushes_for_issue` 与 `assigned_agent`；断网退出 2、403 为 Unreadable；对照测试钉住与 queue 一致。
+- 怎么避免：dispatch/claims 对「谁在干 / 派给谁」只能有一份实现；改任一侧前跑两侧 next 对照 + 断网/403/全角冒号用例。
+- Seen 3× (2026-10-14)。
 
 **用户可见的失败说明要分清“样本集丢了”和“候选丢了”，别用同一句话吓定时任务。**
 - Done right on 10-14: `44bbbfd`（#125/#137）——只有样本集真没写下来才说下一次不接着走。
