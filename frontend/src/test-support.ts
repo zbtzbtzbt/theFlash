@@ -58,6 +58,10 @@ export async function close(server: Server): Promise<void> {
 }
 // Same boundary as Rust tests/support::offline: Rust child processes only
 // skip the proxy for loopback. Both HTTP and HTTPS CONNECT hit this trap.
+// Node uses the proxy variables for its own fetch and http only with
+// NODE_USE_ENV_PROXY, which it reads at start, so this covers the Node
+// processes started after it, not the one that calls it. Every test run
+// calls it before the test files start (setup, below).
 export async function offline(): Promise<{ server: Server; hits: string[] }> {
   const hits: string[] = [];
   const server = createServer((req, res) => {
@@ -81,5 +85,22 @@ export async function offline(): Promise<{ server: Server; hits: string[] }> {
     process.env[key] = address(server);
   process.env.NO_PROXY = "127.0.0.1,localhost,::1";
   process.env.no_proxy = process.env.NO_PROXY;
+  process.env.NODE_USE_ENV_PROXY = "1";
   return { server, hits };
+}
+// vitest.config.ts runs this once, before the test files, in the process
+// that starts them. Each file then runs behind the tripwire whether or not
+// it calls offline() itself, and so does everything it starts: theflash,
+// Node's fetch and http. Anything the tripwire saw fails the run (#34).
+export async function setup(): Promise<() => Promise<void>> {
+  const guard = await offline();
+  return async () => {
+    await close(guard.server);
+    if (guard.hits.length > 0)
+      throw new Error(
+        "测试试图访问真实大麦：这次运行里有测试向本机以外的地址发出了请求，已被陷阱拦下：\n" +
+          guard.hits.map((hit) => `  ${hit}\n`).join("") +
+          "测试要把 THEFLASH_DAMAI_BASE_URL 指向本地 fixture 服务器（replay()），其他请求也只能发往本机。",
+      );
+  };
 }
