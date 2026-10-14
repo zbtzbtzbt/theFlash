@@ -75,6 +75,11 @@ pub enum Error {
     Http { url: String, status: u16 },
     #[error("看不懂大麦返回的{what}：{reason}")]
     Parse { what: &'static str, reason: String },
+    /// A response this machine fetched and could not write down. Nothing
+    /// is wrong at damai.cn and the request already cost what it costs,
+    /// but the command was run for the file, so it failed (#77).
+    #[error("{0}")]
+    NotWritten(String),
 }
 
 impl Error {

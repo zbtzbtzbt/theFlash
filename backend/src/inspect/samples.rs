@@ -188,9 +188,9 @@ pub fn save(path: &Path, samples: &[Sample], at: &str) -> Result<(), String> {
     };
     let text = serde_json::to_string_pretty(&set).map_err(|e| e.to_string())? + "\n";
     if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| format!("{}：{e}", dir.display()))?;
+        std::fs::create_dir_all(dir).map_err(|e| format!("{} 建不出来：{e}", dir.display()))?;
     }
-    std::fs::write(path, text).map_err(|e| format!("{}：{e}", path.display()))
+    std::fs::write(path, text).map_err(|e| format!("{} 写不进去：{e}", path.display()))
 }
 
 /// Which situation this detail page shows, or None when damai.cn's buy
@@ -400,6 +400,42 @@ mod tests {
         }];
         save(&path, &samples, "2026-10-14 04:00").unwrap();
         assert_eq!(load(&path), (samples, None));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A sample set that cannot be written is said in the words of the
+    /// place that refused it: which path, and what the system said. A run
+    /// that got this far has nothing to keep, so its report has to name
+    /// the path rather than only "没保存下来" (#77).
+    #[test]
+    fn a_sample_set_that_cannot_be_written_says_which_path_refused_it() {
+        let dir = std::env::temp_dir().join(format!("theflash-samples-ro-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let samples = vec![Sample {
+            item_id: 1,
+            category: Category::OnSale,
+            name: None,
+        }];
+
+        // A parent that is a regular file: the directory cannot be made.
+        let block = dir.join("block");
+        std::fs::write(&block, "不是目录").unwrap();
+        let under_a_file = block.join("inspect-samples.json");
+        let why = save(&under_a_file, &samples, "2026-10-14 04:00").unwrap_err();
+        assert!(
+            why.contains(&block.display().to_string()) && why.contains("建不出来"),
+            "{why}"
+        );
+
+        // A path that is already a directory: the write itself fails.
+        let a_directory = dir.join("inspect-samples.json");
+        std::fs::create_dir_all(&a_directory).unwrap();
+        let why = save(&a_directory, &samples, "2026-10-14 04:00").unwrap_err();
+        assert!(
+            why.contains(&a_directory.display().to_string()) && why.contains("写不进去"),
+            "{why}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

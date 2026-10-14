@@ -391,6 +391,7 @@ fn a_report_with_no_finding_says_so_and_one_with_a_finding_names_it() {
         uncovered: Vec::new(),
         expiring: Vec::new(),
         samples_path: PathBuf::from("/tmp/inspect-samples.json"),
+        unsaved: Vec::new(),
         notes: Vec::new(),
     };
     assert!(!clean.has_findings());
@@ -429,6 +430,7 @@ fn a_situation_nothing_covers_is_a_finding_and_a_budget_cut_is_not() {
         uncovered: Vec::new(),
         expiring: Vec::new(),
         samples_path: PathBuf::from("/tmp/inspect-samples.json"),
+        unsaved: Vec::new(),
         notes: Vec::new(),
     };
 
@@ -483,6 +485,7 @@ fn a_sample_about_to_stop_covering_its_situation_is_a_finding() {
         uncovered: Vec::new(),
         expiring: Vec::new(),
         samples_path: PathBuf::from("/tmp/inspect-samples.json"),
+        unsaved: Vec::new(),
         notes: Vec::new(),
     };
     report.expiring.push(Expiring {
@@ -520,6 +523,7 @@ fn findings_are_what_decides_whether_an_issue_is_opened() {
         uncovered: Vec::new(),
         expiring: Vec::new(),
         samples_path: PathBuf::from("/tmp/inspect-samples.json"),
+        unsaved: Vec::new(),
         notes: vec!["说明不算发现".into()],
     };
     assert_eq!(report_findings(&clean, &Never).unwrap(), None);
@@ -542,6 +546,67 @@ fn findings_are_what_decides_whether_an_issue_is_opened() {
         render(&lost)
     );
     assert!(issue_title(&lost).contains("1 类样本补不上"));
+}
+
+/// A run that could not write its result down is not a success: the next
+/// run starts again from the samples this one was replacing, and whoever
+/// scheduled it reads the exit code, not the report. It is said as what it
+/// is — a path on this machine — because calling a disk error a damai.cn
+/// revision sends the next agent to the wrong place (#77).
+#[test]
+fn a_result_that_did_not_reach_the_disk_is_a_finding_and_is_not_called_a_revision() {
+    let clean = Report {
+        at: "2026-10-14 04:00（北京时间）".into(),
+        requests: 9,
+        events: vec![EventReport {
+            item_id: 1086791513717,
+            name: Some("甲".into()),
+            category: Some(Category::OnSale),
+            replaced: None,
+            changes: Vec::new(),
+            unseen: Vec::new(),
+            checked: true,
+            session: Some(286937789),
+            failed: None,
+            candidates: Vec::new(),
+        }],
+        uncovered: Vec::new(),
+        expiring: Vec::new(),
+        samples_path: PathBuf::from("/tmp/blocked/inspect-samples.json"),
+        unsaved: Vec::new(),
+        notes: Vec::new(),
+    };
+    assert!(!clean.has_findings());
+
+    let mut unsaved = clean;
+    unsaved.unsaved.push(
+        "样本没保存下来：/tmp/blocked 建不出来：File exists (os error 17)。\
+         这次定下来的样本没有留下，下一次巡检还是按上一次的样本跑；\
+         腾出这个路径，或者用 --samples 指一个能写的文件，再跑一次"
+            .into(),
+    );
+    assert!(unsaved.has_findings(), "样本没保存下来，这次巡检却算成功了");
+    let text = render(&unsaved);
+    assert!(text.contains("/tmp/blocked 建不出来"), "{text}");
+    assert!(text.contains("--samples"), "没说该怎么办：{text}");
+    assert!(
+        !text.contains("结论：没有变化。"),
+        "结果没保存下来，结论却说这次没有变化：{text}"
+    );
+    assert!(
+        text.contains("不是大麦改版"),
+        "本机的磁盘问题要说成本机的：{text}"
+    );
+    assert!(issue_title(&unsaved).contains("结果没保存下来"));
+    let body = issue_body(&unsaved);
+    assert!(
+        !body.contains("在真实大麦上发现了变化"),
+        "写不下来不是大麦改版：{body}"
+    );
+    assert!(
+        body.contains("/tmp/blocked/inspect-samples.json"),
+        "issue 里没说样本集在哪：{body}"
+    );
 }
 
 /// Asking for requests closer together than the real site's floor is only
