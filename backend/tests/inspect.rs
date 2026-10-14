@@ -237,6 +237,47 @@ fn a_status_code_nobody_has_mapped_is_reported_with_the_page_words() {
     assert_eq!(out.status.code(), Some(1), "{text}");
 }
 
+/// damai.cn writes its home page in Chinese, so the 200 bytes a run reads
+/// after a link almost never end on a character boundary. Cutting the page
+/// there panicked, and a panic takes the whole inspection with it: this
+/// run had already seen an unmapped status code and printed nothing about
+/// it, exiting 101 instead of 1 (#75).
+#[test]
+fn a_home_page_written_in_chinese_does_not_take_the_report_down() {
+    let home = Home::new("home-chinese");
+    let routes = changed(unchanged_routes(), "/item.htm?id=1086791513717", |body| {
+        body.replace("\"buyBtnStatus\":204", "\"buyBtnStatus\":777")
+    });
+    // The on-sale sample stopped being on sale, so the run runs out of
+    // candidates and asks the home page — whose one link is followed by a
+    // hundred Chinese characters, as damai.cn's own is.
+    let chinese_home = (
+        "/".to_string(),
+        format!(
+            r#"<a href="item.htm?id=1086791513717">{}</a>"#,
+            "中".repeat(100)
+        ),
+    );
+    let damai = support::MockDamai::start_bodies(with_route(routes, chinese_home));
+    let out = run(&home, &damai, &[]);
+    let text = stdout(&out);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!stderr.contains("panicked"), "{stderr}");
+    assert!(text.contains("没见过的购买按钮状态码：777"), "{text}");
+    assert!(text.contains("1 个没见过的状态码"), "{text}");
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "{text}\n{stderr}\n{:?}",
+        damai.hits()
+    );
+    assert!(
+        damai.hits().iter().any(|h| h == "GET /"),
+        "没问首页，这次复现没走到出问题的那条路：{:?}",
+        damai.hits()
+    );
+}
+
 /// A tier status code nobody has mapped, with the tag damai.cn puts beside
 /// it on the page.
 #[test]
