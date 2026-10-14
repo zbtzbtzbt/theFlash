@@ -43,6 +43,8 @@ pub struct Options {
     pub filter: Filter,
     pub interval: Duration,
     pub system_notify: bool,
+    pub open_browser: bool,
+    pub count: u32,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -62,6 +64,7 @@ pub async fn watch(client: &Client, opts: &Options) -> Result<(), WatchError> {
         opts.item_id,
         opts.filter.session.clone(),
         opts.system_notify,
+        opts.open_browser,
     );
     let result = run(&mut env, opts).await;
     env.finish_push().await;
@@ -115,6 +118,11 @@ pub(crate) async fn run<E: Env>(env: &mut E, opts: &Options) -> Result<(), Watch
         "查询节奏：每 {interval_s} 秒查一次，每次 {per_round} 个请求（约 {} 个/小时）",
         per_round * 3600 / interval_s
     ));
+    if opts.open_browser {
+        env.say(
+            "开售前检查：请先在默认浏览器登录大麦、核对实名观演人与收货地址，并确认支付宝余额或免密额度可用（遇滑块请在浏览器内完成）",
+        );
+    }
 
     let mut last: Last = HashMap::new();
     remember(&mut last, &now);
@@ -135,6 +143,7 @@ pub(crate) async fn run<E: Env>(env: &mut E, opts: &Options) -> Result<(), Watch
                     "现在就可以买",
                     &with(&name, available.iter().map(|w| w.line()), at),
                 );
+                handoff(env, opts, available[0]);
             }
         }
     }
@@ -252,6 +261,7 @@ async fn sale_open<E: Env>(
                             "已经可以买了",
                             &with(name, available.iter().map(|x| x.line()), at),
                         );
+                        handoff(env, opts, available[0]);
                     }
                     return Ok(());
                 }
@@ -339,6 +349,7 @@ async fn restock<E: Env>(
                 if !back.is_empty() {
                     let at = time_line(env, None);
                     env.alert("有票了", &with(name, back.iter().map(|x| x.line()), at));
+                    handoff(env, opts, back[0]);
                 }
                 remember(last, &w);
             }
@@ -424,6 +435,20 @@ fn remember(last: &mut Last, w: &[Watched]) {
     for x in w {
         last.insert(x.key(), x.status.clone());
     }
+}
+
+/// Prints the confirmation/seat-selection URL for `target` and, unless
+/// `--no-open` was passed, hands it to the user's browser (#54).
+fn handoff<E: Env>(env: &mut E, opts: &Options, target: &Watched) {
+    let count = opts.count.max(1);
+    let url = target.handoff_url(opts.item_id, count);
+    if opts.open_browser {
+        env.open_browser(&url);
+    }
+    env.say(&format!(
+        "购买确认页（{} · {}，{count} 张）：{url}",
+        target.session, target.tier
+    ));
 }
 
 fn with(name: &str, lines: impl Iterator<Item = String>, at: String) -> Vec<String> {

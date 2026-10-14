@@ -16,8 +16,8 @@ pub(crate) mod text;
 pub use access::{Clock, Gate, MIN_REQUEST_GAP, Resumed, RiskStop, SystemClock, state_dir};
 pub use client::{Client, ClockReading, DEFAULT_BASE_URL, DEFAULT_HOME_URL, parse_item_id};
 pub use event::{
-    Event, SaleState, Session, Tier, TierStatus, buy_button_code_is_mapped, sale_state_of_code,
-    tier_code_is_mapped,
+    Event, Handoff, SaleState, Session, Tier, TierStatus, buy_button_code_is_mapped,
+    sale_state_of_code, tier_code_is_mapped,
 };
 pub use page::{item_page_json, item_page_problem, perform_id};
 pub use sku::{tier_answer_problem, tier_json};

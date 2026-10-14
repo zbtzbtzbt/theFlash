@@ -11,7 +11,9 @@ const USAGE: &str = "用法：
                                       开售或有票时提醒，Ctrl-C 停止
       --session <场次>                只盯名称含这段文字的场次，例如 10-17
       --tier <票档>                   只盯名称含这段文字的票档，例如 380
+      --count <张数>                  确认页购买张数（1～6），默认 1
       --interval <秒>                 开售后每隔多少秒查一次，默认 30，最少 10
+      --no-open                       只提醒，不在浏览器里自动打开购买确认页
       --no-system-notify              只在终端提醒，不发系统通知
   theflash inspect [选项]             巡检真实大麦的页面结构，变了就报出来
       --samples <文件>                样本集，默认放在用户状态目录里
@@ -108,6 +110,8 @@ async fn watch_command(args: &[&str]) -> ExitCode {
     let mut filter = Filter::default();
     let mut interval = watch::DEFAULT_INTERVAL;
     let mut system_notify = true;
+    let mut open_browser = true;
+    let mut count = 1u32;
     let mut it = args.iter();
     while let Some(arg) = it.next() {
         match *arg {
@@ -119,6 +123,13 @@ async fn watch_command(args: &[&str]) -> ExitCode {
                     filter.tier = Some(v.to_string());
                 }
             }
+            "--count" => match it.next().and_then(|s| s.parse::<u32>().ok()) {
+                Some(n @ 1..=6) => count = n,
+                _ => {
+                    eprintln!("--count 要一个 1 到 6 之间的整数张数");
+                    return ExitCode::from(2);
+                }
+            },
             "--interval" => match it.next().and_then(|s| s.parse::<u64>().ok()) {
                 Some(s) if Duration::from_secs(s) >= watch::MIN_INTERVAL => {
                     interval = Duration::from_secs(s);
@@ -131,6 +142,7 @@ async fn watch_command(args: &[&str]) -> ExitCode {
                     return ExitCode::from(2);
                 }
             },
+            "--no-open" => open_browser = false,
             "--no-system-notify" => system_notify = false,
             s if s.starts_with("--") || input.is_some() => return usage(),
             s => input = Some(s),
@@ -156,6 +168,8 @@ async fn watch_command(args: &[&str]) -> ExitCode {
         filter,
         interval,
         system_notify,
+        open_browser,
+        count,
     };
     tokio::select! {
         r = watch::watch(&client, &opts) => match r {
