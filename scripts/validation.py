@@ -48,12 +48,14 @@ def safe_line(line):
 
 def summary(task, job):
     output = '\n'.join(task.get('key_output', [])) or '（无输出）'
+    exit_text = (task['exit_code'] if task.get('exit_code') is not None
+                 else '未知' if task.get('started') is not None else '未启动')
     return (f"### 验证任务 {task['id']}\n\n"
             f"- 状态：{task['status']}；停止原因：{task.get('reason', '无')}\n"
             f"- 计划开始：{stamp(task['at'])}\n"
-            f"- 实际开始：{stamp(task['started']) if task.get('started') else '未启动'}\n"
+            f"- 实际开始：{stamp(task['started']) if task.get('started') is not None else '未启动'}\n"
             f"- 结束：{stamp(task['ended'])}\n"
-            f"- 退出码：{task.get('exit_code') if task.get('exit_code') is not None else '未启动'}\n"
+            f"- 退出码：{exit_text}\n"
             f"- 日志位置（本机）：`{job / 'output.log'}`\n\n"
             f"关键输出（最多前 8 / 后 12 行；完整输出在本机日志）：\n"
             f"<pre>{html.escape(output).replace('@', '&#64;')}</pre>\n\n"
@@ -85,7 +87,10 @@ class System:
             pass
 
     def post(self, task, body):
-        result = subprocess.run([task['gh'], 'issue', 'comment', str(task['issue']),
+        # Resolve on delivery, including legacy tasks pinned to a removed Cellar
+        # version. Keep the PATH symlink rather than its versioned target.
+        gh = shutil.which('gh') or task['gh']
+        result = subprocess.run([gh, 'issue', 'comment', str(task['issue']),
                                  '--repo', task['repo'], '--body-file', str(body)],
                                 capture_output=True, text=True, timeout=60)
         if result.returncode:
@@ -93,23 +98,41 @@ class System:
         return result.stdout.strip()
 
 
-def deliver(job, task, effects):
-    if task.get('delivery') == 'posted':
-        return
+def deliver(job, task, effects, force=False):
+    if task.get('delivery') in {'posted', 'abandoned'}:
+        return task['delivery'] == 'posted'
+    if not force and effects.now() < task.get('next_delivery', 0):
+        return False
     body = job / 'summary.md'
     body.write_text(summary(task, job))
-    for attempt in range(3):
-        try:
-            task['comment_url'] = effects.post(task, body)
-            task['delivery'] = 'posted'
-            save(job / 'task.json', task)
-            return
-        except (OSError, RuntimeError, subprocess.TimeoutExpired):
-            task['delivery'] = 'pending'
-            save(job / 'task.json', task)
-            if attempt < 2:
-                effects.sleep(60)
-    # Retain summary for explicit `report`; never rerun the tested command.
+    try:
+        task['comment_url'] = effects.post(task, body)
+    except (OSError, RuntimeError, subprocess.TimeoutExpired):
+        failures = min(task.get('delivery_failures', 0) + 1, 5)
+        task.update(delivery='pending', delivery_failures=failures,
+                    next_delivery=effects.now() + min(60 * 2 ** (failures - 1), 900),
+                    delivery_error='GitHub 评论失败；请检查网络、gh 安装及登录状态')
+        save(job / 'task.json', task)
+        return False
+    task.update(delivery='posted', delivery_failures=0)
+    task.pop('next_delivery', None)
+    task.pop('delivery_error', None)
+    save(job / 'task.json', task)
+    return True
+
+
+def logged_output(job):
+    first, last = [], deque(maxlen=12)
+    path = job / 'output.log'
+    if path.exists():
+        with path.open(errors='replace') as log:
+            while line := log.readline(8192):
+                line = safe_line(line.rstrip())
+                if len(first) < 8:
+                    first.append(line)
+                else:
+                    last.append(line)
+    return first + list(last)
 
 
 def run_task(job, effects=None, cancelled=None):
@@ -122,7 +145,7 @@ def run_task(job, effects=None, cancelled=None):
     if task['status'] != 'registered':
         # A previous runner died. Replaying a real-world command is unsafe.
         task.update(status='interrupted', reason='runner 中断；没有重新运行命令',
-                    ended=effects.now())
+                    ended=effects.now(), key_output=logged_output(job))
         save(job / 'task.json', task)
         deliver(job, task, effects)
         return
@@ -235,10 +258,17 @@ def run_task(job, effects=None, cancelled=None):
     deliver(job, task, effects)
 
 
-def register(root, agents, command, at, duration, issue, repo, gh, call=subprocess.run,
+def register(root, agents, command, at, duration, issue, repo, gh, call=None,
              cwd=None):
+    call = call or subprocess.run
     if not math.isfinite(at) or not math.isfinite(duration) or duration <= 0 or issue <= 0:
         raise ValueError('开始时间、运行时长和 issue 必须有效；时长大于零')
+    if at < time.time() - 5:
+        raise ValueError('开始时间已经过去超过 5 秒；请核对日期，立即开始请用 --at now')
+    if cwd is not None:
+        cwd = cwd.expanduser().resolve()
+        if not cwd.is_dir():
+            raise ValueError('--cwd 必须是已存在的目录')
     if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repo):
         raise ValueError('repo 必须是 owner/repository')
     if not command:
@@ -259,12 +289,12 @@ def register(root, agents, command, at, duration, issue, repo, gh, call=subproce
     runner = job / 'runner.py'
     shutil.copyfile(Path(__file__).resolve(), runner)
     task = dict(id=task_id, label=label, command=[str(Path(executable).resolve()), *command[1:]],
-                at=at, duration=duration, issue=issue, repo=repo, gh=str(Path(gh).resolve()),
-                cwd=str(cwd.resolve() if cwd else job), status='registered', delivery='pending',
+                at=at, duration=duration, issue=issue, repo=repo, gh=os.path.abspath(gh),
+                cwd=str(cwd if cwd else job), status='registered', delivery='pending',
                 plist=str(agents / (label + '.plist')))
     save(job / 'task.json', task)
     plist = dict(Label=label, ProgramArguments=[sys.executable, str(runner),
-                 '_run', str(job)], RunAtLoad=True,
+                 '_run', str(job)], RunAtLoad=True, StartInterval=60,
                  WorkingDirectory=str(job), ProcessType='Standard',
                  StandardOutPath=str(job / 'runner.log'),
                  StandardErrorPath=str(job / 'runner.log'),
@@ -306,7 +336,11 @@ def main():
     reg.add_argument('command', nargs=argparse.REMAINDER, help='-- 命令 参数…')
     sub.add_parser('list')
     for name in ['cancel', 'uninstall', 'report']:
-        sub.add_parser(name).add_argument('id')
+        action = sub.add_parser(name)
+        action.add_argument('id')
+        if name == 'uninstall':
+            action.add_argument('--discard-report', action='store_true',
+                                help='仅对已结束任务：放弃自动补发，卸载并保留本机证据')
     sub.add_parser('_run').add_argument('job', type=Path)
     args = parser.parse_args()
     if args.action == '_run':
@@ -349,20 +383,30 @@ def main():
                 task = load(job)
                 if task['status'] not in TERMINAL:
                     raise ValueError('任务还没有结束')
-                deliver(job, task, System())
+                if task['delivery'] == 'abandoned':
+                    raise ValueError('已放弃自动发送；摘要和日志保留在任务目录')
+                if not deliver(job, task, System(), force=True):
+                    raise RuntimeError('结果仍待发送；请检查网络、gh 安装及登录状态；摘要保留在任务目录')
                 print(task['delivery'])
         else:
-            if task['status'] not in TERMINAL or task['delivery'] != 'posted':
-                raise ValueError('请先 cancel，等任务结束并 report 成功后再卸载')
             # Refuse bootout while runner is still posting or supervising.
             with (job / 'runner.lock').open('a') as lock:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                task = load(job)
+                if task['status'] not in TERMINAL:
+                    raise ValueError('请先 cancel，等任务结束后再卸载；不能卸载活动任务')
+                if task['delivery'] not in {'posted', 'abandoned'} and not args.discard_report:
+                    raise ValueError('结果尚未送达；等待自动重试，或 report；放弃发送请用 --discard-report')
                 result = subprocess.run(['/bin/launchctl', 'bootout',
                                          f"gui/{os.getuid()}/{task['label']}"],
                                         capture_output=True, text=True)
                 if result.returncode and 'No such process' not in result.stderr:
                     raise RuntimeError('launchctl bootout 失败；保留 plist 以供重试')
                 Path(task['plist']).unlink(missing_ok=True)
+                if task['delivery'] != 'posted':
+                    (job / 'summary.md').write_text(summary(task, job))
+                    task['delivery'] = 'abandoned'
+                    save(job / 'task.json', task)
             print('已卸载；保留日志和摘要')
 
 

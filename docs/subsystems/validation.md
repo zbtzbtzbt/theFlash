@@ -19,19 +19,19 @@ python3 scripts/validation.py report <任务ID>
 python3 scripts/validation.py uninstall <任务ID>
 ```
 
-`--at` 默认 now，指定时间必须含时区。不使用 shell 执行参数，不解释重定向、管道或变量。可显式用 `/usr/bin/env NAME=value command` 设置非敏感参数；不要在命令或环境参数里放凭据。被测程序和工作目录要在执行时仍可用。命令默认在独立任务目录执行，涉及相对文件参数时显式设置 `--cwd /absolute/path`。登记 shell 可以立即退出。
+`--at` 默认 now，指定时间必须含时区，早于现在超过 5 秒会拒绝；立即开始用 now。不使用 shell 执行参数，不解释重定向、管道或变量。可显式用 `/usr/bin/env NAME=value command` 设置非敏感参数；不要在命令或环境参数里放凭据。登记时检查工作目录存在且是目录；被测程序和工作目录要在执行时仍可用。命令默认在独立任务目录执行，涉及相对文件参数时显式设置 `--cwd /absolute/path`。登记 shell 可以立即退出。
 
-默认状态目录是 `~/Library/Application Support/theFlash/validation/<ID>/`，可在子命令前用 `--state-dir` 指定（拒绝 Desktop/Documents/Downloads 内的状态目录）；plist 在 `~/Library/LaunchAgents/cn.theflash.validation.<ID>.plist`。每个任务目录权限 0700，plist 0600，保存固定版 runner。真实 smoke 曾发现 Desktop 中的 runner 卡在 macOS 隐私权限的文件 open；终端的访问授权不会自动传给 launchd。被测程序和显式工作目录也应放在可由 launchd 访问的位置，不要依赖登记终端的权限。使用当前 Python 和 gh 的绝对路径，给 launchd 保存 HOME 和 PATH，不保存认证环境变量。gh 自己使用既有登录配置；不要把凭据复制到任务目录。
+默认状态目录是 `~/Library/Application Support/theFlash/validation/<ID>/`，可在子命令前用 `--state-dir` 指定（拒绝 Desktop/Documents/Downloads 内的状态目录）；plist 在 `~/Library/LaunchAgents/cn.theflash.validation.<ID>.plist`。每个任务目录权限 0700，plist 0600，保存固定版 runner。真实 smoke 曾发现 Desktop 中的 runner 卡在 macOS 隐私权限的文件 open；终端的访问授权不会自动传给 launchd。被测程序和显式工作目录也应放在可由 launchd 访问的位置，不要依赖登记终端的权限。使用当前 Python 的绝对路径，保存 gh 的 PATH 路径且不解开符号链接，发送时重新查找 gh，给 launchd 保存 HOME 和 PATH，不保存认证环境变量。gh 自己使用既有登录配置；不要把凭据复制到任务目录。
 
 ## 状态和事实来源
 
 `task.json` 是事实来源。`registered → starting → running → stopping → finished/cancelled`；启动意图先持久化，再启动子进程，防止启动与保存 PID 之间崩溃后重放；不能启动、创建防睡眠程序或写日志失败时，停止被测程序并报告 failed，监督者崩溃后恢复时 interrupted。取消在任务目录写标记，由监督者在下一轮处理：开始前取消不启动命令、不创建 caffeinate；运行时取消仅对自己的被测 PID 发 SIGINT。结束代码保留原值（负数表示信号）；到时正常响应 SIGINT 的 watch 通常退出 0，停止原因仍显示“达到最长运行时间”。忽略 SIGINT 的程序会留在 stopping，不能卸载活动任务。
 
-`output.log` 合并 stdout/stderr，每行 UTC 时间戳；超长行分段/截断，关键输出保留前 8 和后 12 行。已知敏感字段所在行省略，任意输出仍需调用方保证不带秘密。`runner.log` 用于解释器/launchd 启动诊断，不向 issue 上传原始诊断。`summary.md` 包含任务 ID、计划与实际起止时间、退出码、停止原因、关键输出、本机日志路径；并非把日志发布成公网文件。保存完成结果后调用 gh 的 `--body-file` 评论关联 issue。自动评论署名 `Agent: validation runner`，表示工具生成的结果，不作为登记者、实现者或验收者的身份声明。旧任务无需新增字段；已经登记的 runner 是固定副本，仍使用登记时的版本，新登记任务才包含此修复。
+`output.log` 合并 stdout/stderr，每行 UTC 时间戳；超长行分段/截断，关键输出保留前 8 和后 12 行。已知敏感字段所在行省略，任意输出仍需调用方保证不带秘密。`runner.log` 用于解释器/launchd 启动诊断，不向 issue 上传原始诊断。`summary.md` 包含任务 ID、计划与实际起止时间、退出码、停止原因、关键输出、本机日志路径；并非把日志发布成公网文件。保存完成结果后调用 gh 的 `--body-file` 评论关联 issue。自动评论署名 `Agent: validation runner`，表示工具生成的结果，不作为登记者、实现者或验收者的身份声明。已经登记的 runner 是固定副本，仍使用登记时的版本，新登记任务才有自动恢复。旧任务结束后可用新脚本 report（发送时查找当前 gh）补发，再卸载；不自动改写活动任务。
 
-评论失败最多三次、间隔一分钟，`delivery=pending`；`report` 仅补发结果。成功为 posted，重复调用不重复评论。网络在服务器接受评论后断开仍可能导致重试重复发送，任务 ID 可供识别；不承诺 exactly-once。运行器与 report/uninstall 共用文件锁，防止抢写结果。卸载要求已结束、评论成功且 runner 已释放锁，bootout 后删除 plist，保留本机证据。
+每个 LaunchAgent 带 `StartInterval=60`：runner 崩溃后自动标记 interrupted 并保留关键日志，终态只补发摘要。每次发送最多调用一次 gh（超时 60 秒），失败保存 `delivery=pending` 和 `next_delivery`，退避 60/120/240/480/900 秒，之后每 900 秒继续尝试，不设次数上限；launchd 分钟调度可能再加一分钟，睡眠期间暂停。发送不持有 caffeinate。`report` 绕过退避立即补发一次，失败退出非零并解释待发送原因。成功为 posted，重复调用不重复评论。网络在服务器接受评论后断开仍可能导致重试重复发送，任务 ID 可供识别；不承诺 exactly-once。运行器与 report/uninstall 共用文件锁，防止抢写结果。正常卸载要求已结束、评论成功且 runner 已释放锁，bootout 后删除 plist，保留本机证据。发送一直失败时可修复网络/gh 安装和登录后等待自动重试或手动 report；明确放弃评论则用 `uninstall <ID> --discard-report`，仅允许已结束的任务，标记 delivery=abandoned 并保留摘要和日志。已送达任务每分钟被唤起时只读状态退出，卸载后停止唤起。
 
-退出终端不影响运行；注销会终止用户 LaunchAgent，重新登录时会报告中断而不重放命令。电源故障同样不能保证任务完成。合盖/睡眠不能靠 launchd 唤醒，时限包含睡眠，具体机制见 0009。日常任务由调用方逐日登记完整日期，不在这里暗中重复真实请求。
+退出终端不影响运行；注销会终止用户 LaunchAgent，重新登录时会报告中断而不重放命令。电源故障同样不能保证任务完成。合盖/睡眠不能靠 launchd 唤醒，时限包含睡眠，具体机制见 0009。每日巡检由 #14 的常驻调度按北京时间每日启动新的本机会话，会话按共享锁/风控规则检查后登记 #10 的一次性命令；不依赖旧会话记忆，不在 runner 里重复真实请求。#10/PR #40 已合入，#14/PR #41 未合入，每日链路未启用，调度合入后需补端到端验收。
 
 ## 验证与安全边界
 
