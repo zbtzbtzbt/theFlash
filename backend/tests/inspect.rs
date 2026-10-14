@@ -345,6 +345,63 @@ fn a_stale_sample_is_replaced_from_the_pool_without_asking_the_home_page() {
     assert_eq!(out.status.code(), Some(0), "换样本本身不算发现：{text}");
 }
 
+/// #46: the seed 未开售 sample 1092337348536 opened at 2026-10-14 10:18 and
+/// moved to 已开售. Because `seed()` takes the first entry of each pool,
+/// 1092337348536 stays first for offline replay and the backup behind it in
+/// `POOL` takes 未开售 over without asking the home page.
+#[test]
+fn when_the_seed_not_yet_on_sale_sample_has_opened_the_pool_backup_replaces_it() {
+    let home = Home::new("seed-not-yet-on-sale-opened");
+    let samples = home.path().join("samples.json");
+    std::fs::write(&samples, SEED_SAMPLES).unwrap();
+    let routes = changed(unchanged_routes(), "/item.htm?id=1092337348536", |body| {
+        body.replace("\"buyBtnStatus\":106", "\"buyBtnStatus\":204")
+    });
+    let backup = (
+        "/item.htm?id=1091895653399".to_string(),
+        support::fixture("item_not_yet_on_sale.html")
+            .replace("\"sellStartTime\":1791944280000", SELL_START_FAR_OUT),
+    );
+    let empty_home = (
+        "/".to_string(),
+        "<html><body>没有演出链接</body></html>".to_string(),
+    );
+    let damai =
+        support::MockDamai::start_bodies(with_route(with_route(routes, backup), empty_home));
+    let out = run(
+        &home,
+        &damai,
+        &["--samples", samples.to_str().unwrap(), "--max-events", "8"],
+    );
+    let text = stdout(&out);
+    assert!(text.contains("[未开售] 1091895653399"), "{text}");
+    assert!(
+        text.contains("换掉了这一类原来的样本 1092337348536（不再是这个状态）"),
+        "{text}"
+    );
+    assert!(
+        !damai.hits().iter().any(|h| h == "GET /"),
+        "候选池里还有未开售备用样本，不该去首页：{:?}",
+        damai.hits()
+    );
+    assert_eq!(
+        saved_ids(&samples, "notYetOnSale"),
+        [1091895653399],
+        "未开售没有换成候选池里的备用样本：{text}"
+    );
+    assert_eq!(
+        saved_ids(&samples, "onSale"),
+        [1086791513717, 1092337348536],
+        "已开售的 1092337348536 应该排在原已开售样本后面作备用：{text}"
+    );
+    assert!(text.contains("结论：没有变化。"), "{text}");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "从候选池换上未开售样本后巡检应通过：{text}"
+    );
+}
+
 /// An event that moved on — the sale opened — is filed under the
 /// situation it shows now, so 已开售 refills itself from the sample that
 /// used to be 未开售, with nothing to look it up in.
