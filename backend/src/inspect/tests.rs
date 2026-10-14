@@ -642,6 +642,61 @@ fn a_result_that_did_not_reach_the_disk_is_a_finding_and_is_not_called_a_revisio
     );
 }
 
+/// 换掉了 is a claim about the sample file, not about the pages this run
+/// read, so it is printed only for a run whose samples reached the disk.
+/// The same replacement in a run that kept nothing is said as what it is
+/// — picked and lost — and names the sample the next run still reads
+/// first (#79).
+#[test]
+fn a_replacement_is_only_called_done_when_the_sample_file_took_it() {
+    let mut report = Report {
+        at: "2026-10-14 04:00（北京时间）".into(),
+        requests: 9,
+        events: vec![EventReport {
+            item_id: 1086791513717,
+            name: Some("甲".into()),
+            category: Some(Category::OnSale),
+            replaced: Some(Replaced {
+                was: 1077137031347,
+                became: "不再是这个状态".into(),
+            }),
+            changes: Vec::new(),
+            unseen: Vec::new(),
+            checked: true,
+            session: Some(286937789),
+            failed: None,
+            candidates: Vec::new(),
+        }],
+        uncovered: Vec::new(),
+        expiring: Vec::new(),
+        samples_path: PathBuf::from("/tmp/inspect-samples.json"),
+        unsaved: Vec::new(),
+        notes: Vec::new(),
+    };
+    let done = render(&report);
+    assert!(
+        done.contains("换掉了这一类原来的样本 1077137031347（不再是这个状态）"),
+        "{done}"
+    );
+
+    report.unsaved.push(sample_set_lost(
+        "/tmp/inspect-samples.json 写不进去：Permission denied (os error 13)".into(),
+    ));
+    let picked = render(&report);
+    assert!(
+        !picked.contains("换掉了"),
+        "样本文件没有接下这次的样本，报告却说已经换掉了：{picked}"
+    );
+    assert!(
+        picked.contains("这次选中它接替这一类原来的样本 1077137031347（不再是这个状态）"),
+        "{picked}"
+    );
+    assert!(
+        picked.contains("下一次巡检还是先读 1077137031347"),
+        "没说下一次读的还是原来那一场：{picked}"
+    );
+}
+
 /// The two things a run can fail to write down cost different work, so
 /// the report tells them apart. A candidate response that stayed at
 /// damai.cn means the change has to be fetched again before it can be

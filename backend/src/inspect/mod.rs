@@ -108,8 +108,8 @@ pub struct EventReport {
     /// None when damai.cn's buy button carried a code theFlash does not
     /// map, which is in `unseen`.
     pub category: Option<Category>,
-    /// The sample this event replaced, when it is a new one.
-    pub replaced: Option<u64>,
+    /// The sample this event took its situation over from, when it did.
+    pub replaced: Option<Replaced>,
     pub changes: Vec<Change>,
     pub unseen: Vec<Unseen>,
     /// Whether this event's page was read and its fields checked at all.
@@ -122,6 +122,21 @@ pub struct EventReport {
     pub failed: Option<String>,
     /// Redacted responses written for whoever fixes the change.
     pub candidates: Vec<PathBuf>,
+}
+
+/// A sample set change this run is about to write down: one event now
+/// covers a situation the event in `was` used to cover. Reporting it is a
+/// claim about the file, so it is worked out from the samples this run
+/// keeps, not from the situation a page happens to show: an event that
+/// joined a situation another sample still covers, and a candidate that
+/// was probed and then kept only as a backup, replaced nothing (#79).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Replaced {
+    pub was: u64,
+    /// What became of it, in the same words as a situation with nothing
+    /// left: it moved to another situation, or this run could not read
+    /// it. Only one of them means the old sample is gone for good.
+    pub became: String,
 }
 
 impl EventReport {
@@ -502,14 +517,9 @@ pub async fn run(client: &Client, opts: &Options) -> Result<Report, Error> {
             failed: None,
             candidates: Vec::new(),
         };
-        let was = page
+        event.replaced = page
             .category
-            .and_then(|c| samples::ids_for(&saved, c).first().copied());
-        if let Some(was) = was
-            && was != id
-        {
-            event.replaced = Some(was);
-        }
+            .and_then(|c| took_over(&saved, &kept, &pages, &tried, &failures, id, c));
         collect(&page.json, shape::ITEM_PAGE_FIELDS, &mut event.changes);
         // Every field can be in place, with a kind theFlash reads, in a
         // page no query can be answered from: a `performId` that is a
@@ -747,11 +757,60 @@ fn what_became_of(
     let Some(item_id) = samples::ids_for(saved, category).first().copied() else {
         return "样本集里本来就没有这一类".to_string();
     };
+    format!("{item_id} {}", became_of(item_id, tried, failures))
+}
+
+/// What this run found out about one event it used to have a sample of.
+fn became_of(item_id: u64, tried: &[u64], failures: &[Failed]) -> String {
     match failures.iter().find(|f| f.item_id == item_id) {
-        Some(failed) => format!("{item_id} 这次读不了（{}）", failed.why),
-        None if tried.contains(&item_id) => format!("{item_id} 不再是这个状态"),
-        None => format!("{item_id} 这次没读到"),
+        Some(failed) => format!("这次读不了（{}）", failed.why),
+        None if tried.contains(&item_id) => "不再是这个状态".to_string(),
+        None => "这次没读到".to_string(),
     }
+}
+
+/// The sample `item_id` took `category` over from, when it took it over
+/// from anything. Three things have to hold, and the report used to check
+/// none of them (#79):
+///
+/// - this event is the one the next run reads first for `category`, not
+///   one of the backups kept behind it;
+/// - another event held that place in the sample set this run started
+///   from;
+/// - that event stopped showing `category` — one that is still showing it
+///   is kept too, and which of the two is read first is this run's
+///   ordering, not a replacement.
+///
+/// Without them a report said "换掉了过期的样本 X" to any page that
+/// happened to show the same situation as a saved sample, while the file
+/// it wrote kept X exactly where it was: on 2026-10-14 10:56 a real run
+/// told the still-valid 已开售 sample it had been swapped out by the
+/// event whose sale had just opened.
+fn took_over(
+    saved: &[Sample],
+    kept: &[Sample],
+    pages: &[Page],
+    tried: &[u64],
+    failures: &[Failed],
+    item_id: u64,
+    category: Category,
+) -> Option<Replaced> {
+    let front = kept.iter().find(|s| s.category == category)?;
+    if front.item_id != item_id {
+        return None;
+    }
+    let was = samples::ids_for(saved, category).first().copied()?;
+    if was == item_id
+        || pages
+            .iter()
+            .any(|p| p.item_id == was && p.category == Some(category))
+    {
+        return None;
+    }
+    Some(Replaced {
+        was,
+        became: became_of(was, tried, failures),
+    })
 }
 
 /// One response: what damai.cn sent, kept even when theFlash could not
@@ -1197,8 +1256,22 @@ pub fn render(report: &Report) -> String {
         let category = event.category.map_or("未分类", Category::name);
         let name = event.name.as_deref().unwrap_or("名称未知");
         out.push_str(&format!("\n[{category}] {} {name}\n", event.item_id));
-        if let Some(was) = event.replaced {
-            out.push_str(&format!("  换掉了过期的样本 {was}\n"));
+        if let Some(replaced) = &event.replaced {
+            // Done, or only picked: a run whose sample file kept its old
+            // bytes swapped nothing out, however the pages read (#79).
+            // sample_set_unsaved is the same fact as samples_saved was: the
+            // sample set is what "换掉了" claims about (#125 / #79).
+            out.push_str(&if report.sample_set_unsaved() {
+                format!(
+                    "  这次选中它接替这一类原来的样本 {}（{}），但样本没保存下来，下一次巡检还是先读 {}\n",
+                    replaced.was, replaced.became, replaced.was
+                )
+            } else {
+                format!(
+                    "  换掉了这一类原来的样本 {}（{}）\n",
+                    replaced.was, replaced.became
+                )
+            });
         }
         if let Some(why) = &event.failed {
             out.push_str(&format!("  查不了：{why}\n"));
