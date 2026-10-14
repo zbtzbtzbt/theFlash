@@ -1,4 +1,4 @@
-<!-- reviewed-through: c72af3d (2026-10-14 10:45 +0800) -->
+<!-- reviewed-through: fd68bd7 (2026-10-14 10:51 +0800) -->
 # 已合并工作的教训
 
 本项目的代码由 agent 编写、审查、合并和发布。每天夜里有一个复盘 agent 检查当天的 commit：哪些改动后来又被返工、哪些不该合并、哪些验证得太薄。学到的东西记在这里。改代码之前先读这份文件。
@@ -65,6 +65,11 @@
 - Seen 1× (2026-10-14)。
 
 ## 红测试与发版
+
+**CI job 显示 failure 时先看 annotation：账单/额度导致“没启动”不等于测试红，不要当代码回归去修。**
+- `fd68bd7`（#4）的 Test run [38503286512](https://github.com/zbtzbtzbt/theFlash/actions/runs/38503286512) 双平台 failure，annotation 为 account payments failed / spending limit；检查未运行。已开 issue 给 owner。
+- 怎么避免：work-tick / hygiene 判 main 红前读 job annotation 或 `gh run view --json jobs`；命中 billing 就停手报告 owner，不改业务代码。
+- Seen 1× (2026-10-14)。
 
 **判断 main 红不红只看 Test 工作流；被设计拒绝的 Release run 不算 main 红。**
 - Done right on 10-14: `3b1cc18`（#5）——Release gate 拒绝未跑完的 Test 时，不带 `--workflow` 的 `gh run list` 会把拒绝显示成 main 红，误导 work-tick。
