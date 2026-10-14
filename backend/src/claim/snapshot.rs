@@ -227,12 +227,24 @@ const PUSH_TYPES: [&str; 3] = ["push", "force_push", "branch_creation"];
 
 /// When a branch was last pushed to, from an `activity` response: the
 /// newest entry that is a push. GitHub answers newest first; this does
-/// not rely on that.
+/// not rely on that, and reads every `--paginate` page.
 fn last_push_from_json(what: &str, text: &str) -> Result<Option<Push>, Error> {
     if let Ok(error) = serde_json::from_str::<ApiError>(text) {
         return Ok(Some(Push::Unreadable(error.message)));
     }
-    let list: Vec<ApiActivity> = from_json(what, text)?;
+    if text.trim().is_empty() {
+        return Err(Error::Json {
+            what: what.to_string(),
+            why: "什么都没返回".to_string(),
+        });
+    }
+    let mut list = Vec::new();
+    for page in serde_json::Deserializer::from_str(text).into_iter::<Vec<ApiActivity>>() {
+        list.extend(page.map_err(|e| Error::Json {
+            what: what.to_string(),
+            why: e.to_string(),
+        })?);
+    }
     let mut last: Option<DateTime<Utc>> = None;
     for entry in list
         .iter()
@@ -366,7 +378,16 @@ fn gh_api_list(path: &str) -> Result<String, Error> {
 }
 
 fn gh(args: &[&str]) -> Result<String, Error> {
-    let out = Command::new("gh")
+    gh_with(&["gh".to_string()], args)
+}
+
+fn gh_with(gh_command: &[String], args: &[&str]) -> Result<String, Error> {
+    let (program, fixed) = gh_command.split_first().ok_or_else(|| Error::Gh {
+        what: args.join(" "),
+        why: "gh_command 是空的".to_string(),
+    })?;
+    let out = Command::new(program)
+        .args(fixed)
         .args(args)
         .output()
         .map_err(|e| Error::Gh {
@@ -413,8 +434,9 @@ impl Snapshot {
             issues,
             pushes: BTreeMap::new(),
         };
+        let default_gh = ["gh".to_string()];
         for branch in snapshot.claimed_branches() {
-            if let Some(push) = fetch_last_push(repo, &branch)? {
+            if let Some(push) = fetch_last_push(&default_gh, repo, &branch)? {
                 snapshot.pushes.insert(branch, push);
             }
         }
@@ -436,14 +458,17 @@ impl Snapshot {
         ))?)
     }
 
-    /// Branch evidence named by a separately loaded target issue.
+    /// Branch evidence named by a separately loaded target issue, read
+    /// through the given `gh` command line so `claims` and `dispatch`
+    /// share the exact same push reader and error classification (#170).
     pub fn fetch_pushes_for_issue(
+        gh_command: &[String],
         repo: &str,
         issue: &Issue,
     ) -> Result<BTreeMap<String, Push>, Error> {
         let mut pushes = BTreeMap::new();
         for branch in claimed_branches(std::slice::from_ref(issue)) {
-            if let Some(push) = fetch_last_push(repo, &branch)? {
+            if let Some(push) = fetch_last_push(gh_command, repo, &branch)? {
                 pushes.insert(branch, push);
             }
         }
@@ -470,12 +495,12 @@ fn fetch_comments(repo: &str, number: u64) -> Result<Vec<Comment>, Error> {
 /// two hours of silence and get the issue taken away; reading activity
 /// needs push access, and without it the push time is reported as
 /// unreadable rather than guessed from the commit.
-fn fetch_last_push(repo: &str, branch: &str) -> Result<Option<Push>, Error> {
+fn fetch_last_push(gh_command: &[String], repo: &str, branch: &str) -> Result<Option<Push>, Error> {
     let path = format!(
         "repos/{repo}/activity?ref=refs/heads/{}&per_page=100",
         encode(branch.trim())
     );
-    match gh_api_list(&path) {
+    match gh_with(gh_command, &["api", "--paginate", &path]) {
         Ok(text) => last_push_from_json("分支的推送活动", &text),
         Err(Error::Gh { why, .. }) if why.contains("404") || why.contains("Not Found") => Ok(None),
         Err(Error::Gh { why, .. }) if is_permission_error(&why) => Ok(Some(Push::Unreadable(why))),

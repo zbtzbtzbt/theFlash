@@ -132,18 +132,6 @@ struct ApiComment {
 }
 
 #[derive(Deserialize)]
-struct ApiActivity {
-    #[serde(default)]
-    activity_type: String,
-    timestamp: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct ApiError {
-    message: String,
-}
-
-#[derive(Deserialize)]
 struct ApiPull {
     number: u64,
     #[serde(default)]
@@ -349,10 +337,7 @@ impl Snapshot {
                 comments: comments_from_json(&text)?,
             };
             let pushes = crate::claim::Snapshot::replay_pushes_for_issue(dir, &claim_issue)
-                .map_err(|e| Error::Json {
-                    what: "分支的推送活动".to_string(),
-                    why: e.to_string(),
-                })?;
+                .map_err(from_claim_error)?;
             apply_claim_issue(issue, &claim_issue, &pushes);
         }
         let (main_checks, main_run) = match optional(dir, "main-test-runs.json") {
@@ -496,84 +481,12 @@ fn optional(dir: &Path, name: &str) -> Option<String> {
 
 // ---- live responses ----
 
-const PUSH_TYPES: [&str; 3] = ["push", "force_push", "branch_creation"];
-
-fn encode(value: &str) -> String {
-    let mut out = String::new();
-    for b in value.bytes() {
-        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
-            out.push(b as char);
-        } else {
-            out.push_str(&format!("%{b:02X}"));
-        }
+fn from_claim_error(err: crate::claim::snapshot::Error) -> Error {
+    match err {
+        crate::claim::snapshot::Error::Gh { what, why } => Error::Gh { what, why },
+        crate::claim::snapshot::Error::Json { what, why } => Error::Json { what, why },
+        crate::claim::snapshot::Error::Read { path, why } => Error::Read { path, why },
     }
-    out
-}
-
-fn last_push_from_json(text: &str) -> Result<Option<crate::claim::Push>, Error> {
-    if let Ok(error) = serde_json::from_str::<ApiError>(text) {
-        return Ok(Some(crate::claim::Push::Unreadable(error.message)));
-    }
-    let list: Vec<ApiActivity> = pages("分支的推送活动", text)?;
-    let mut last: Option<DateTime<Utc>> = None;
-    for entry in list
-        .iter()
-        .filter(|e| PUSH_TYPES.contains(&e.activity_type.as_str()))
-    {
-        let Some(stamp) = entry.timestamp.as_deref().filter(|t| !t.is_empty()) else {
-            continue;
-        };
-        let at = DateTime::parse_from_rfc3339(stamp)
-            .map(|t| t.with_timezone(&Utc))
-            .map_err(|e| Error::Json {
-                what: format!("分支的推送活动 的时间 {stamp}"),
-                why: e.to_string(),
-            })?;
-        if last.is_none_or(|known| at > known) {
-            last = Some(at);
-        }
-    }
-    Ok(last.map(crate::claim::Push::At))
-}
-
-fn fetch_pushes_for_issue(
-    gh_command: &[String],
-    repo: &str,
-    issue: &crate::claim::Issue,
-) -> Result<std::collections::BTreeMap<String, crate::claim::Push>, Error> {
-    let mut pushes = std::collections::BTreeMap::new();
-    if !issue.labels.iter().any(|l| l == super::CLAIM_LABEL) {
-        return Ok(pushes);
-    }
-    let mut branches = Vec::new();
-    for comment in &issue.comments {
-        if let Some(branch) =
-            crate::claim::lease::parse_claim(&comment.body, &comment.url, comment.posted_at)
-                .and_then(|c| c.branch)
-            && !branches.contains(&branch)
-        {
-            branches.push(branch);
-        }
-    }
-    for branch in branches {
-        let path = format!(
-            "repos/{repo}/activity?ref=refs/heads/{}&per_page=100",
-            encode(branch.trim())
-        );
-        let push = match gh(
-            gh_command,
-            &["api".to_string(), "--paginate".to_string(), path],
-        ) {
-            Ok(text) => last_push_from_json(&text)?,
-            Err(Error::Gh { why, .. }) if why.contains("404") || why.contains("Not Found") => None,
-            Err(Error::Gh { why, .. }) => Some(crate::claim::Push::Unreadable(why)),
-            Err(e) => return Err(e),
-        };
-        if let Some(push) = push {
-            pushes.insert(branch, push);
-        }
-    }
-    Ok(pushes)
 }
 
 /// A snapshot of `repo`, read through the configured `gh` command, which
@@ -602,7 +515,12 @@ pub fn fetch(gh_command: &[String], repo: &str, workflow: &str) -> Result<Snapsh
             labels: issue.labels.clone(),
             comments: comments_from_json(&text)?,
         };
-        let pushes = fetch_pushes_for_issue(gh_command, repo, &claim_issue)?;
+        let pushes = if claim_issue.labels.iter().any(|l| l == super::CLAIM_LABEL) {
+            crate::claim::Snapshot::fetch_pushes_for_issue(gh_command, repo, &claim_issue)
+                .map_err(from_claim_error)?
+        } else {
+            std::collections::BTreeMap::new()
+        };
         apply_claim_issue(issue, &claim_issue, &pushes);
     }
     let pulls = pulls_from_json(&gh(
