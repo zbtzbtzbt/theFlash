@@ -76,9 +76,11 @@ class Fake:
         assert self.sleeps < 20000, '监督循环没有停止（SIGINT/截止点保证被破坏）'
         self.clock += seconds
         self.on_sleep()
-        # Give the pipe reader execution time, without any wall-time assertion.
+        # Yield long enough for the pipe-reader thread under CI load.
+        # time.sleep(0) only reschedules; busy runners can spin past the
+        # 20000-iteration guard before the reader runs (#101).
         import time
-        time.sleep(0)
+        time.sleep(0.001)
 
     def start(self, task):
         self.starts.append(self.clock)
