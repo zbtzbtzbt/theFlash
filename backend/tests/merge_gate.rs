@@ -652,25 +652,7 @@ fn merging_marks_linked_issues_for_acceptance_and_posts_the_review_record() {
     );
     // Applying `--add-label 待验收 --remove-label 验收未通过` transitions a
     // failed-acceptance issue into a new `accept` round in `dispatch::plan`.
-    let mut labels = vec![
-        "bug".to_string(),
-        "P1".to_string(),
-        "验收未通过".to_string(),
-    ];
-    labels.retain(|l| l != theflash::merge_gate::REJECTED_LABEL);
-    labels.push(theflash::merge_gate::ACCEPT_LABEL.to_string());
-    let snap = theflash::dispatch::snapshot::Snapshot {
-        issues: vec![theflash::dispatch::snapshot::Issue {
-            number: 74,
-            title: "issue 74".to_string(),
-            labels,
-            agent: Some("claude".to_string()),
-            last_comment_at: None,
-        }],
-        pulls: Vec::new(),
-        main_checks: theflash::dispatch::snapshot::MainChecks::Green,
-        main_run: None,
-    };
+    // Leaving both labels would keep dispatching `fix-issue` (Codex #134).
     let mut agents = std::collections::BTreeMap::new();
     for v in ["claude", "codex"] {
         agents.insert(
@@ -689,8 +671,41 @@ fn merging_marks_linked_issues_for_acceptance_and_posts_the_review_record() {
         cloud_roles: Vec::new(),
         ..Default::default()
     };
+    let both = theflash::dispatch::snapshot::Snapshot {
+        issues: vec![theflash::dispatch::snapshot::Issue {
+            number: 74,
+            title: "issue 74".to_string(),
+            labels: vec![
+                "bug".to_string(),
+                "P1".to_string(),
+                theflash::merge_gate::REJECTED_LABEL.to_string(),
+                theflash::merge_gate::ACCEPT_LABEL.to_string(),
+            ],
+            agent: Some("claude".to_string()),
+            last_comment_at: None,
+        }],
+        pulls: Vec::new(),
+        main_checks: theflash::dispatch::snapshot::MainChecks::Green,
+        main_run: None,
+    };
+    let stuck = theflash::dispatch::plan(
+        &both,
+        &theflash::dispatch::state::State::default(),
+        &cfg,
+        theflash::dispatch::now(),
+    );
+    assert_eq!(stuck.start[0].role.name(), "fix-issue", "{stuck:?}");
+    let mut labels = both.issues[0].labels.clone();
+    labels.retain(|l| l != theflash::merge_gate::REJECTED_LABEL);
+    let handed = theflash::dispatch::snapshot::Snapshot {
+        issues: vec![theflash::dispatch::snapshot::Issue {
+            labels,
+            ..both.issues[0].clone()
+        }],
+        ..both
+    };
     let planned = theflash::dispatch::plan(
-        &snap,
+        &handed,
         &theflash::dispatch::state::State::default(),
         &cfg,
         theflash::dispatch::now(),
