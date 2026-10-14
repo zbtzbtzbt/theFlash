@@ -683,6 +683,7 @@ fn merging_marks_linked_issues_for_acceptance_and_posts_the_review_record() {
             ],
             agent: Some("claude".to_string()),
             last_comment_at: None,
+            ..Default::default()
         }],
         pulls: Vec::new(),
         main_checks: theflash::dispatch::snapshot::MainChecks::Green,
