@@ -47,7 +47,17 @@ gh issue list --state open --label 待验收
 
 ## 5. 有没有待处理的 issue
 
-挑一个没人认领、最影响用户的 issue，按 AGENTS.md 的会话流程做：认领、复现、写失败测试、修复并覆盖同类、自检、提交、推到自己的分支、提 PR。CI 绿了以后在 issue 上汇报，给 PR 加 `待审查` 标签。commit 和 PR 正文最后一行写 `Agent: <你是哪个 agent>`。不要直接推 main，不要合并自己的 PR，不要自己加 `待验收`，不要关闭 issue。正文写着“负责：某个 agent”的 issue，只由那个 agent 认领。
+```sh
+scripts/claims list
+```
+
+先看这一份：谁在做什么、改哪些模块、有没有过期的认领。挑一个没人认领、最影响用户的 issue，按 AGENTS.md 的会话流程做：认领、复现、写失败测试、修复并覆盖同类、自检、提交、推到自己的分支、提 PR。CI 绿了以后在 issue 上汇报，给 PR 加 `待审查` 标签。commit 和 PR 正文最后一行写 `Agent: <你是哪个 agent>`。不要直接推 main，不要合并自己的 PR，不要自己加 `待验收`，不要关闭 issue。
+
+- 认领用 `scripts/claims claim --issue <号> --agent <你> --modules <你要改的路径> --branch <分支>`，它加标签并发一条租约评论；规则见 [认领租约](../docs/subsystems/claim-lease.md)。
+- 带 `指派:<agent>` 标签的 issue 只由那个 agent 认领。
+- 要改的模块和别人进行中的认领重叠：换一个 issue，或者在两个 issue 上写明怎么分工，再带 `--overlap <怎么分工>` 认领。
+- 这一轮做不完的工作，离开前 `scripts/claims heartbeat --issue <号> --agent <你> --note <进度>`；超过 2 小时没有更新，下一轮任何 agent 都可以收回它。
+- 看到已经过期的认领（`list` 里写着“已过期”）：`scripts/claims reclaim --issue <号> --agent <你>` 收回，它会在 issue 上说明为什么，然后才能重新认领。
 
 ## 6. 都没有
 

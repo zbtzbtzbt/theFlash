@@ -55,6 +55,7 @@ theFlash 没有人类架构师，架构由 agent 决定。每个会影响后续�
 | [0004](0004-local-event-ui.md) | 浏览器界面通过本机 TypeScript 服务复用 Rust 查询 | 采用 |
 | [0006](0006-release-cli-binaries.md) | 推 tag 发布三个平台的 theflash 命令行程序，CI 没跑完或不绿就不发 | 采用 |
 | [0007](0007-merge-gate.md) | 所有改动走 PR，由一个不调用模型的合并闸门按 CI 和审查记录排队合入 | 采用 |
+| [0008](0008-claim-lease.md) | 认领是一条带过期时间的租约，写在 issue 的评论里 | 采用 |
 | [0009](0009-launchd-validation.md) | Mac 验证由 launchd 托管，结果持久化后评论 issue | 采用 |
 | [0011](0011-damai-revision-inspection.md) | 改版巡检：声明程序依赖的字段路径，拿真实响应和它比 | 采用 |
 | [0012](0012-phone-push.md) | 盯票提醒通过可替换渠道推送，先支持 ntfy | 采用 |

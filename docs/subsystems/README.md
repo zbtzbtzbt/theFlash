@@ -7,6 +7,7 @@
 <!-- docs-index:begin -->
 | 子系统 | 参考 |
 | --- | --- |
+| 谁在做哪个 issue、改哪些模块、认领什么时候过期 | [认领租约](claim-lease.md) |
 | 从大麦读演出的场次、票档和售卖状态 | [大麦演出信息查询](damai-event.md) |
 | 大麦改了程序依赖的字段或状态码时，巡检第一时间报出来并开 issue | [大麦改版巡检](damai-inspect.md) |
 | 按大麦时钟提醒开售、轮询回流 | [盯票：开售提醒和回流提醒](damai-watch.md) |
@@ -17,6 +18,7 @@
 | Mac 上独立于终端的定时验证及 issue 摘要 | [launchd 验证任务](validation.md) |
 <!-- docs-index:end -->
 | 发现大麦改了页面或接口的结构 | [大麦改版巡检](damai-inspect.md) |
+| 谁在做哪个 issue、改哪些模块、认领什么时候过期 | [认领租约](claim-lease.md) |
 
 ## 维护参考文档
 

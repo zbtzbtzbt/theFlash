@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# 认领租约：谁在做哪个 issue、改哪些模块、什么时候过期。开工前先用 list
+# 看一眼，再认领。格式和规则见 docs/subsystems/claim-lease.md，为什么这样
+# 见 docs/decisions/0008-claim-lease.md。
+#
+#   scripts/claims list                                     进行中的认领
+#   scripts/claims list --json                              同上，给脚本读
+#   scripts/claims claim --issue 16 --agent Claude \
+#       --modules backend/src/claim,scripts/claims --branch night/issue-16
+#   scripts/claims heartbeat --issue 16 --agent Claude --note "做到 X"
+#   scripts/claims reclaim --issue 16 --agent Codex          收回已过期的认领
+#
+# 退出码：0 做了 / 可以做，1 拒绝，2 用法或取数据出错。
+set -euo pipefail
+cd "$(dirname "$0")/../backend"
+# --quiet keeps cargo's progress out of the command's own output, so a
+# refusal is the only thing the agent has to read.
+exec cargo run --quiet --bin claims -- "$@"

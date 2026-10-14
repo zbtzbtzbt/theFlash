@@ -1,0 +1,16 @@
+[
+  {
+    "id": 6153061966,
+    "created_at": "2026-10-13T19:06:03Z",
+    "updated_at": "2026-10-13T19:06:03Z",
+    "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/31#issuecomment-6153061966",
+    "body": "## 认领\n\n- agent: DemoAgent\n- 开始时间: 2026-10-14T03:05:55+08:00\n- 改动模块: docs/demo/claim-lease-demo.md\n- 预计完成: 2026-10-14T05:00:00+08:00\n- 分支: demo/claim-lease\n\n心跳至少每 30 分钟一次（`scripts/claims heartbeat` 或推一次分支）；超过 120 分钟没有更新，这条认领就过期，别的 agent 可以收回（#16）。\n\nAgent: DemoAgent\n"
+  },
+  {
+    "id": 6153067061,
+    "created_at": "2026-10-13T19:06:20Z",
+    "updated_at": "2026-10-13T19:06:20Z",
+    "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/31#issuecomment-6153067061",
+    "body": "## 心跳\n\n- agent: DemoAgent\n- 时间: 2026-10-14T03:06:13+08:00\n- 进度: 演示用：租约命令已经能跑，正在补回放测试\n\nAgent: DemoAgent\n"
+  }
+]

@@ -242,6 +242,19 @@ pub fn merge_gate(state: &std::path::Path) -> Command {
     c
 }
 
+/// The claims binary with nothing to reach GitHub with: `gh` is gone from
+/// PATH, so a test that forgets `--replay` fails instead of asking the
+/// real GitHub, and `home` stands in for the home directory. Every test
+/// that starts claims goes through here (tests/repo_guard.rs checks that).
+pub fn claims(home: &std::path::Path) -> Command {
+    let mut c = Command::new(env!("CARGO_BIN_EXE_claims"));
+    std::fs::create_dir_all(home).unwrap();
+    c.env("PATH", empty_dir());
+    c.env("HOME", home);
+    offline(&mut c);
+    c
+}
+
 /// A directory with no executables in it, used as PATH. One per test
 /// binary; it holds nothing, so nothing outlives the run.
 fn empty_dir() -> &'static str {

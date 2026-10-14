@@ -20,6 +20,7 @@ theFlash 是大麦网（damai.cn）的抢票程序，一个 AI Native 项目：�
 | `backend/` | Rust 后端（高性能部分）。工具链由根目录的 `rust-toolchain.toml` 指定。 |
 | `frontend/` | TypeScript 前端。Biome 负责格式和 lint，Vitest 负责测试，Node 版本见 `.node-version`。 |
 | `scripts/check.sh` | 合并或发版前必须通过的全部检查。`make check` 和 CI 跑的都是它。 |
+| `scripts/claims` | 认领：谁在做哪个 issue、改哪些模块、认领过期没有。见 [认领租约](docs/subsystems/claim-lease.md)。 |
 | `.github/workflows/test.yml` | CI：在 Linux 和 macOS 上跑 `scripts/check.sh`。 |
 
 只支持 macOS 和 Linux，不支持 Windows。不要为 Windows 写兼容代码、分支或 CI。
@@ -38,7 +39,14 @@ theFlash 是大麦网（damai.cn）的抢票程序，一个 AI Native 项目：�
 ## 一次会话的流程
 
 1. **自己的 worktree**：`git fetch && git worktree add --detach ../theFlash-<任务名> origin/main`。两个会话不能共用一个 checkout，否则会把对方暂存的文件提交到自己的标题下。
-2. **认领**：开工前在 issue 上留言说你在做，写明你是哪个 agent（例如 Claude、Codex），验收者靠这一点避开自己做的 issue。没有 issue 就新建一个。再看一眼 `git log origin/main`，确认没人已经修了。正文写着“负责：某个 agent”的 issue，只由那个 agent 认领。
+2. **认领**：先 `scripts/claims list` 看谁在做什么、改哪些模块、有没有已经过期的认领。要改的模块和进行中的认领重叠时，排在它后面，或者在两个 issue 上写明怎么分工。然后认领：
+
+   ```sh
+   scripts/claims claim --issue <号> --agent <你是哪个 agent> \
+       --modules <你要改的路径,逗号隔开> --branch <你的分支> --due <预计完成时间>
+   ```
+
+   它加上 `认领中` 标签并发一条[租约评论](docs/subsystems/claim-lease.md)（哪个 agent、改哪些模块、预计完成）。没有 issue 就新建一个。再看一眼 `git log origin/main`，确认没人已经修了。带 `指派:<agent>` 标签的 issue 只由那个 agent 认领。认领期间至少每 30 分钟 `scripts/claims heartbeat --issue <号> --agent <你> --note <进度>` 或者推一次分支；超过 2 小时没有任何更新，这条认领就算过期，别的 agent 可以 `scripts/claims reclaim` 收回。看到已经过期的认领，先收回（它会在 issue 上说明）再认领，不要直接盖掉。
 3. **复现**：按报告人的原始场景复现，用他们的输入、平台和界面。fixture 用他们的原始字节，不要自己编一个相似的。
 4. **先写失败的测试**：写一个在当前代码上失败的测试，记下失败信息。
 5. **修复，并覆盖同类**：grep 同样的模式，同类位置在同一个改动里一起修。
@@ -114,6 +122,7 @@ squash 合并时自己写 message，不用 GitHub 默认的（默认会把分支
 
 - 不要违反上面的大麦网安全规则。
 - 不要直接推 main（发版 tag 除外），不要合并自己的 PR，不要绕过合并闸门自己 `gh pr merge`。PR #12 就是在独立审查记录写出来之前被合并的，事后查不出是谁合的（#13）。
+- 不要收回还没过期的认领，也不要认领一个和进行中的租约改同一批文件的 issue。`scripts/claims` 会拦住这两件事；绕过它手写认领评论，等于两个 agent 同时改同一批文件（#4 和 #3 就差点这样撞上）。
 - main 红着的时候不要往上叠新改动。先修红，或者开一个写明原因的 issue。
 - 不要把“main 上也一样红”当成基线。
 - 不要推翻 [code-standards 里的 owner 决定](docs/code-standards.md#owner-的决定)。要改这些，留给 owner。
