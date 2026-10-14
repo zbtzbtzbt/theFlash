@@ -1,9 +1,9 @@
-// The frontend tests pass in a checkout whose path has Chinese characters
-// and spaces, like `../theFlash-验收` (#49). URL.pathname keeps such
-// characters percent-encoded, so a test that takes a file path from it asks
-// for `…/theFlash-%E9%AA%8C%E6%94%B6/…`, which does not exist;
-// fileURLToPath decodes them. The tests below run the frontend tests again
-// from a copy of this checkout under such a path.
+// The frontend tests pass in a checkout whose path has Chinese characters,
+// spaces, and percent signs, like `../theFlash 验收 100%` (#49, #104).
+// URL.pathname keeps such characters percent-encoded, so a test that takes a
+// file path from it asks for `…/theFlash%20%E9%AA%8C%E6%94%B6%20100%25/…`,
+// which does not exist; fileURLToPath decodes them. The tests below run the
+// frontend tests again from a copy of this checkout under such a path.
 import { execFile } from "node:child_process";
 import { cpSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -15,7 +15,7 @@ import { tempHome } from "./test-support.js";
 
 const probing = process.env.THEFLASH_CHECKOUT_PATH_PROBE === "1";
 const repo = fileURLToPath(new URL("../..", import.meta.url));
-const name = "theFlash 验收";
+const name = "theFlash 验收 100%";
 
 // Runs only in the copy, and fails that run unless the test files really
 // are there rather than reached through a link back to this checkout.
@@ -23,7 +23,7 @@ it.runIf(probing)("probe: the test files run from the copy", () => {
   expect(fileURLToPath(import.meta.url)).toContain(`${sep}${name}${sep}`);
 });
 
-// A copy of this checkout under `<dir>/theFlash 验收`. frontend/ is copied,
+// A copy of this checkout under `<dir>/theFlash 验收 100%`. frontend/ is copied,
 // not linked: vitest follows links, and a test file reached through one
 // would see this checkout's path. What the tests only find from their own
 // location (the fixtures, the built theflash, each installed package) is
@@ -53,10 +53,13 @@ function checkout(dir: string, built: boolean): string {
 
 // `vitest run` in `cwd`, as a developer there would start it, under a
 // temporary HOME so nothing it starts reads or writes the real one.
-function vitest(cwd: string, ...args: string[]): Promise<{ code: number; output: string }> {
+function vitest(
+  cwd: string,
+  ...args: string[]
+): Promise<{ code: number; output: string; path: string }> {
   const home = tempHome();
   const env: NodeJS.ProcessEnv = { ...process.env, THEFLASH_CHECKOUT_PATH_PROBE: "1" };
-  return new Promise<{ code: number; output: string }>((resolve) => {
+  return new Promise<{ code: number; output: string; path: string }>((resolve) => {
     execFile(
       process.execPath,
       [join(cwd, "node_modules", "vitest", "vitest.mjs"), "run", ...args],
@@ -65,6 +68,7 @@ function vitest(cwd: string, ...args: string[]): Promise<{ code: number; output:
         resolve({
           code: error ? (typeof error.code === "number" ? error.code : -1) : 0,
           output: `${stdout}${stderr}`,
+          path: cwd,
         }),
     );
   }).finally(home.remove);
@@ -79,22 +83,41 @@ async function inCopy<T>(built: boolean, run: (frontend: string) => Promise<T>):
   }
 }
 
-function expectCopyPassed(run: { code: number; output: string }): void {
+function hasUnsupportedVitePathChar(
+  run: { output: string; path?: string },
+  clean: string,
+): boolean {
+  if (run.path && /[#?*]/.test(run.path)) return true;
+  if (
+    /The (?:project root|config path) contains the (?:"[#?*]"(?: and )?)+ characters?\b/.test(clean)
+  ) {
+    return true;
+  }
+  return (
+    /ERR_LOAD_URL|UNRESOLVED_ENTRY/.test(clean) &&
+    /(?:resolved id:\s*|config from\s+|root\b[^\n]*)\S*[#?*]\S*/.test(clean)
+  );
+}
+
+function expectCopyPassed(run: { code: number; output: string; path?: string }): void {
+  const clean = stripVTControlCharacters(run.output);
   const failed = Array.from(
-    stripVTControlCharacters(run.output).matchAll(/^\s*FAIL\s+(.+)$/gm),
+    clean.matchAll(/^\s*FAIL\s+(.+)$/gm),
     (match) => match[1]?.trim() ?? "",
   ).filter(Boolean);
   const list =
     failed.length > 0
-      ? `前端测试在路径含中文和空格的 checkout 副本里失败，没过的测试：\n${failed.map((item) => `  - ${item}\n`).join("")}`
-      : "前端测试在路径含中文和空格的 checkout 副本里失败。\n";
-  expect(
-    run.code,
-    `${list}这些测试在原 checkout 里也失败的话，先修它们，原因不在路径；` +
+      ? `前端测试在路径含中文、空格和百分号的 checkout 副本里失败，没过的测试：\n${failed.map((item) => `  - ${item}\n`).join("")}`
+      : "前端测试在路径含中文、空格和百分号的 checkout 副本里失败。\n";
+  const hint = hasUnsupportedVitePathChar(run, clean)
+    ? "这是 Vite / Rolldown 上游对项目路径含 `#`、`?`、`*` 的 URL 解析限制（#104）：" +
+      "上游将根路径、配置文件和模块 ID 按 URL 处理，遇到 `#` 或 `?` 会截断路径。" +
+      "应改用不含 `#`、`?`、`*` 的工作目录名（中文、空格和 `%` 均受支持）。"
+    : "这些测试在原 checkout 里也失败的话，先修它们，原因不在路径；" +
       "只在副本里失败，多半是用了 `URL.pathname`（#49）。从 import.meta.url 得到文件路径要用 " +
-      "fileURLToPath，不能用 URL.pathname：它保留百分号编码，中文和空格变成 %E9%AA%8C、%20，" +
-      `这个路径不存在。那次运行的输出：\n${run.output}`,
-  ).toBe(0);
+      "fileURLToPath，不能用 URL.pathname：它保留百分号编码，中文、空格和百分号变成 %E9%AA%8C、%20、%25，" +
+      "这个路径不存在。";
+  expect(run.code, `${list}${hint}那次运行的输出：\n${run.output}`).toBe(0);
 }
 
 it.skipIf(probing)(
@@ -141,7 +164,52 @@ it.skipIf(probing)(
 );
 
 it.skipIf(probing)(
-  "the frontend tests pass in a checkout whose path has Chinese characters and a space",
+  "diagnoses Vite's # / ? / * checkout-path restriction (#104) instead of blaming URL.pathname (#49)",
+  () => {
+    const hashOutput = [
+      'The project root contains the "#" and "?" characters (/tmp/hash#only/frontend), which may not work when running Vite.',
+      "No test files found, exiting with code 1",
+      "Error: Failed to load url /src/test-support.ts (resolved id: /tmp/hash#only/frontend/src/test-support.ts). Does the file exist?",
+      "Serialized Error: { code: 'ERR_LOAD_URL' }",
+    ].join("\n");
+    const questionOutput = [
+      'The config path contains the "?" character (/tmp/question?only/frontend/vitest.config.ts), which may not work when running Vite. Consider renaming the file without the characters.',
+      "[UNRESOLVED_ENTRY] Cannot resolve entry module vitest.config.ts.",
+    ].join("\n");
+    const errLoadUrlOnly = [
+      "Error: Failed to load url /src/test-support.ts (resolved id: /tmp/star*only/frontend/src/test-support.ts). Does the file exist?",
+      "Serialized Error: { code: 'ERR_LOAD_URL' }",
+    ].join("\n");
+    for (const run of [
+      { code: 1, output: hashOutput },
+      { code: 1, output: questionOutput },
+      { code: 1, output: errLoadUrlOnly },
+      {
+        code: 1,
+        output: "No test files found, exiting with code 1",
+        path: "/tmp/hash#only/frontend",
+      },
+    ]) {
+      let message = "";
+      try {
+        expectCopyPassed(run);
+      } catch (error) {
+        message = error instanceof Error ? error.message : String(error);
+      }
+      const [summary = "", raw = ""] = message.split("那次运行的输出：\n");
+      expect(summary).toContain(
+        "Vite / Rolldown 上游对项目路径含 `#`、`?`、`*` 的 URL 解析限制（#104）",
+      );
+      expect(summary).toContain("应改用不含 `#`、`?`、`*` 的工作目录名");
+      expect(summary).not.toContain("URL.pathname");
+      expect(summary).not.toContain("#49");
+      expect(raw).toContain(run.output);
+    }
+  },
+);
+
+it.skipIf(probing)(
+  "the frontend tests pass in a checkout whose path has Chinese characters, spaces, and a percent sign",
   async () => {
     const run = await inCopy(true, (frontend) => vitest(frontend));
     expectCopyPassed(run);
