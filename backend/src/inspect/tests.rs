@@ -428,7 +428,6 @@ fn a_report_with_no_finding_says_so_and_one_with_a_finding_names_it() {
         expiring: Vec::new(),
         samples_path: PathBuf::from("/tmp/inspect-samples.json"),
         unsaved: Vec::new(),
-        samples_saved: true,
         notes: Vec::new(),
     };
     assert!(!clean.has_findings());
@@ -468,7 +467,6 @@ fn a_situation_nothing_covers_is_a_finding_and_a_budget_cut_is_not() {
         expiring: Vec::new(),
         samples_path: PathBuf::from("/tmp/inspect-samples.json"),
         unsaved: Vec::new(),
-        samples_saved: true,
         notes: Vec::new(),
     };
 
@@ -524,7 +522,6 @@ fn a_sample_about_to_stop_covering_its_situation_is_a_finding() {
         expiring: Vec::new(),
         samples_path: PathBuf::from("/tmp/inspect-samples.json"),
         unsaved: Vec::new(),
-        samples_saved: true,
         notes: Vec::new(),
     };
     report.expiring.push(Expiring {
@@ -563,7 +560,6 @@ fn findings_are_what_decides_whether_an_issue_is_opened() {
         expiring: Vec::new(),
         samples_path: PathBuf::from("/tmp/inspect-samples.json"),
         unsaved: Vec::new(),
-        samples_saved: true,
         notes: vec!["说明不算发现".into()],
     };
     assert_eq!(report_findings(&clean, &Never).unwrap(), None);
@@ -614,18 +610,14 @@ fn a_result_that_did_not_reach_the_disk_is_a_finding_and_is_not_called_a_revisio
         expiring: Vec::new(),
         samples_path: PathBuf::from("/tmp/blocked/inspect-samples.json"),
         unsaved: Vec::new(),
-        samples_saved: true,
         notes: Vec::new(),
     };
     assert!(!clean.has_findings());
 
     let mut unsaved = clean;
-    unsaved.unsaved.push(
-        "样本没保存下来：/tmp/blocked 建不出来：File exists (os error 17)。\
-         这次定下来的样本没有留下，下一次巡检还是按上一次的样本跑；\
-         腾出这个路径，或者用 --samples 指一个能写的文件，再跑一次"
-            .into(),
-    );
+    unsaved.unsaved.push(sample_set_lost(
+        "/tmp/blocked 建不出来：File exists (os error 17)".into(),
+    ));
     assert!(unsaved.has_findings(), "样本没保存下来，这次巡检却算成功了");
     let text = render(&unsaved);
     assert!(text.contains("/tmp/blocked 建不出来"), "{text}");
@@ -679,7 +671,6 @@ fn a_replacement_is_only_called_done_when_the_sample_file_took_it() {
         expiring: Vec::new(),
         samples_path: PathBuf::from("/tmp/inspect-samples.json"),
         unsaved: Vec::new(),
-        samples_saved: true,
         notes: Vec::new(),
     };
     let done = render(&report);
@@ -688,11 +679,9 @@ fn a_replacement_is_only_called_done_when_the_sample_file_took_it() {
         "{done}"
     );
 
-    report.samples_saved = false;
-    report.unsaved.push(
-        "样本没保存下来：/tmp/inspect-samples.json 写不进去：Permission denied (os error 13)"
-            .into(),
-    );
+    report.unsaved.push(sample_set_lost(
+        "/tmp/inspect-samples.json 写不进去：Permission denied (os error 13)".into(),
+    ));
     let picked = render(&report);
     assert!(
         !picked.contains("换掉了"),
@@ -705,6 +694,87 @@ fn a_replacement_is_only_called_done_when_the_sample_file_took_it() {
     assert!(
         picked.contains("下一次巡检还是先读 1077137031347"),
         "没说下一次读的还是原来那一场：{picked}"
+    );
+}
+
+/// The two things a run can fail to write down cost different work, so
+/// the report tells them apart. A candidate response that stayed at
+/// damai.cn means the change has to be fetched again before it can be
+/// replayed; the sample set is what the next run starts from. Saying the
+/// samples were lost when they were written sends whoever reads the issue
+/// to free a path that is already fine (#125).
+#[test]
+fn a_candidate_that_did_not_reach_the_disk_does_not_claim_the_sample_set_was_lost() {
+    // A run that found a status code it had not seen and wrote its sample
+    // set where it was asked to.
+    let clean = || Report {
+        at: "2026-10-14 04:00（北京时间）".into(),
+        requests: 9,
+        events: vec![EventReport {
+            item_id: 1086791513717,
+            name: Some("甲".into()),
+            category: Some(Category::OnSale),
+            replaced: None,
+            changes: Vec::new(),
+            unseen: Vec::new(),
+            checked: true,
+            session: Some(286937789),
+            failed: None,
+            candidates: Vec::new(),
+        }],
+        uncovered: Vec::new(),
+        expiring: Vec::new(),
+        samples_path: PathBuf::from("/tmp/good/inspect-samples.json"),
+        unsaved: Vec::new(),
+        notes: Vec::new(),
+    };
+
+    let mut lost = clean();
+    lost.unsaved.push(candidate_lost(
+        "/tmp/blocked 建不出来：File exists (os error 17)".into(),
+    ));
+    assert!(
+        lost.has_findings(),
+        "候选响应没保存下来，这次巡检却算成功了"
+    );
+    let text = render(&lost);
+    assert!(text.contains("/tmp/blocked 建不出来"), "{text}");
+    assert!(
+        text.contains("不是大麦改版"),
+        "本机的磁盘问题要说成本机的：{text}"
+    );
+    assert!(
+        !text.contains("下一次巡检不会接着这次的样本走"),
+        "样本集写下来了，下一次巡检就是接着它走的：{text}"
+    );
+    let body = issue_body(&lost);
+    assert!(
+        body.contains("inspect record"),
+        "issue 里没说怎么重新取这份响应：{body}"
+    );
+    assert!(
+        !body.contains("这次定下来的样本没有留给下一次"),
+        "样本集写下来了，issue 却让下一位去修样本路径：{body}"
+    );
+
+    // The sample set lost as well: both are named, and only now does the
+    // report say the next run falls back to the samples this one was
+    // replacing.
+    let mut both = clean();
+    both.unsaved.push(sample_set_lost(
+        "/tmp/blocked 建不出来：File exists (os error 17)".into(),
+    ));
+    both.unsaved.push(candidate_lost(
+        "/tmp/blocked 建不出来：File exists (os error 17)".into(),
+    ));
+    let text = render(&both);
+    assert!(
+        text.contains("候选响应没保存下来") && text.contains("样本没保存下来"),
+        "两样都没写下来，报告只说了一样：{text}"
+    );
+    assert!(
+        text.contains("下一次巡检不会接着这次的样本走"),
+        "样本集这次真的没写下来：{text}"
     );
 }
 

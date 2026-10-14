@@ -1400,6 +1400,79 @@ fn a_candidate_that_could_not_be_written_is_said_with_the_rest_of_the_report() {
     assert_eq!(out.status.code(), Some(1), "{text}");
 }
 
+/// A candidate response that stayed at damai.cn and a sample set that did
+/// not reach the disk are two different losses. The sample set decides
+/// what the next run checks; a candidate only decides whether the change
+/// can be replayed without asking damai.cn again. A report that answered
+/// both with 下一次巡检不会接着这次的样本走 sent whoever read it to free a
+/// samples path that had just been written (#125).
+#[test]
+fn a_lost_candidate_does_not_say_the_sample_set_was_lost_too() {
+    let home = Home::new("candidate-lost-samples-kept");
+    // A candidates directory that cannot be made: its parent is a file.
+    let block = home.path().join("block");
+    std::fs::write(&block, "不是目录").unwrap();
+    let dir = block.join("candidates");
+    let routes = changed(unchanged_routes(), "dataId=286937788", |body| {
+        body.replace("\"frontEndStatus\":\"2\"", "\"frontEndStatus\":\"777\"")
+    });
+    let damai = support::MockDamai::start_bodies(routes);
+
+    let samples = home.path().join("good/samples.json");
+    let out = run(
+        &home,
+        &damai,
+        &[
+            "--candidates",
+            dir.to_str().unwrap(),
+            "--samples",
+            samples.to_str().unwrap(),
+        ],
+    );
+    let text = stdout(&out);
+    // The change itself is still a finding, so the run fails either way:
+    // what this test is about is what the report says was lost.
+    assert_eq!(out.status.code(), Some(1), "{text}");
+    assert!(
+        samples.is_file(),
+        "这次复现没走到“样本集写下来了、候选没写下来”那条路：{text}"
+    );
+    assert!(text.contains("候选响应没保存下来"), "{text}");
+    assert!(
+        !text.contains("样本没保存下来"),
+        "样本集写下来了，报告却说它没保存：{text}"
+    );
+    assert!(
+        !text.contains("下一次巡检不会接着这次的样本走"),
+        "样本集写下来了，下一次巡检就是接着它走的：{text}"
+    );
+
+    // Both losses in one run are both named: neither line stands in for
+    // the other.
+    let blocked = block.join("samples.json");
+    let out = run(
+        &home,
+        &damai,
+        &[
+            "--candidates",
+            dir.to_str().unwrap(),
+            "--samples",
+            blocked.to_str().unwrap(),
+        ],
+    );
+    let text = stdout(&out);
+    assert_eq!(out.status.code(), Some(1), "{text}");
+    assert!(!blocked.exists(), "这次复现没走到保存失败那条路：{text}");
+    assert!(
+        text.contains("候选响应没保存下来") && text.contains("样本没保存下来"),
+        "两样都没写下来，报告只说了一样：{text}"
+    );
+    assert!(
+        text.contains("下一次巡检不会接着这次的样本走"),
+        "样本集这次真的没写下来，要说清下一次从哪儿接着跑：{text}"
+    );
+}
+
 /// A candidate the redaction rule refuses whole is a different thing from
 /// one this machine could not write: the refusal is the owner's rule
 /// working, and the bytes were never meant to stay here, so the report

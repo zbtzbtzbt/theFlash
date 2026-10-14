@@ -594,3 +594,203 @@ fn the_base_fixture_is_the_pull_request_it_claims_to_be() {
     assert!(record.contains(HEAD), "{record}");
     assert!(record.contains(REVIEWED_MAIN), "{record}");
 }
+
+#[test]
+fn merging_marks_linked_issues_for_acceptance_and_posts_the_review_record() {
+    let case = Case::ready("handoff-issues");
+    case.edit("pull.json", |v| {
+        v["title"] = json!("damai: 访问层的 5 处缺陷一起修（#74，#70） (#19)");
+    });
+    let log = case.state().join("gh.log");
+    let merged_sha = "ffffffffffffffffffffffffffffffffffffffff";
+    support::stub(
+        &case.state(),
+        "gh",
+        &format!(
+            "printf '%s\\n' \"$*\" >> '{}'\n\
+             if [ \"$1\" = \"api\" ]; then\n\
+               printf '{{\"merge_commit_sha\":\"{merged_sha}\"}}\\n'\n\
+             fi\n",
+            log.display()
+        ),
+    );
+    let out = support::merge_gate(&case.state())
+        .env("PATH", case.state().join("bin"))
+        .args(["merge", "--pr", "19", "--replay"])
+        .arg(&case.dir)
+        .output()
+        .unwrap();
+    let said = said(&out);
+    assert_eq!(out.status.code(), Some(0), "{said}");
+    let calls = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(
+        calls.contains(
+            "issue edit 74 --repo zbtzbtzbt/theFlash --add-label 待验收 --remove-label 验收未通过"
+        ),
+        "合并后没有给 #74 加 待验收 并移除 验收未通过：{calls}\n{said}"
+    );
+    assert!(
+        calls.contains(
+            "issue edit 70 --repo zbtzbtzbt/theFlash --add-label 待验收 --remove-label 验收未通过"
+        ),
+        "合并后没有给 #70 加 待验收 并移除 验收未通过：{calls}\n{said}"
+    );
+    assert!(
+        !calls.contains("issue edit 19 "),
+        "不该把 PR 自己的编号当成关联 issue：{calls}"
+    );
+    assert!(
+        calls.contains("issue comment 74 --repo zbtzbtzbt/theFlash --body")
+            && calls.contains(merged_sha)
+            && calls.contains(HEAD)
+            && calls.contains("issuecomment-6152100000"),
+        "合并后没有在 #74 上评论合入提交、被审查提交和审查记录链接：{calls}"
+    );
+    assert!(
+        calls.contains("issue comment 70 --repo zbtzbtzbt/theFlash --body"),
+        "合并后没有在 #70 上评论：{calls}"
+    );
+    // Applying `--add-label 待验收 --remove-label 验收未通过` transitions a
+    // failed-acceptance issue into a new `accept` round in `dispatch::plan`.
+    // Leaving both labels would keep dispatching `fix-issue` (Codex #134).
+    let mut agents = std::collections::BTreeMap::new();
+    for v in ["claude", "codex"] {
+        agents.insert(
+            v.to_string(),
+            theflash::dispatch::config::Agent {
+                command: vec!["true".to_string()],
+                prompt: theflash::dispatch::config::PromptStyle::Argv,
+            },
+        );
+    }
+    let cfg = theflash::dispatch::config::Config {
+        agents,
+        vendor_order: vec!["claude".to_string(), "codex".to_string()],
+        max_sessions: 4,
+        max_sessions_per_day: 10,
+        cloud_roles: Vec::new(),
+        ..Default::default()
+    };
+    let both = theflash::dispatch::snapshot::Snapshot {
+        issues: vec![theflash::dispatch::snapshot::Issue {
+            number: 74,
+            title: "issue 74".to_string(),
+            labels: vec![
+                "bug".to_string(),
+                "P1".to_string(),
+                theflash::merge_gate::REJECTED_LABEL.to_string(),
+                theflash::merge_gate::ACCEPT_LABEL.to_string(),
+            ],
+            agent: Some("claude".to_string()),
+            last_comment_at: None,
+            ..Default::default()
+        }],
+        pulls: Vec::new(),
+        main_checks: theflash::dispatch::snapshot::MainChecks::Green,
+        main_run: None,
+    };
+    let stuck = theflash::dispatch::plan(
+        &both,
+        &theflash::dispatch::state::State::default(),
+        &cfg,
+        theflash::dispatch::now(),
+    );
+    assert_eq!(stuck.start[0].role.name(), "fix-issue", "{stuck:?}");
+    let mut labels = both.issues[0].labels.clone();
+    labels.retain(|l| l != theflash::merge_gate::REJECTED_LABEL);
+    let handed = theflash::dispatch::snapshot::Snapshot {
+        issues: vec![theflash::dispatch::snapshot::Issue {
+            labels,
+            ..both.issues[0].clone()
+        }],
+        ..both
+    };
+    let planned = theflash::dispatch::plan(
+        &handed,
+        &theflash::dispatch::state::State::default(),
+        &cfg,
+        theflash::dispatch::now(),
+    );
+    assert_eq!(planned.start.len(), 1, "{planned:?}");
+    assert_eq!(planned.start[0].role.name(), "accept", "{planned:?}");
+    assert_eq!(planned.start[0].vendor, "codex", "{planned:?}");
+}
+
+#[test]
+fn label_failure_after_merge_keeps_exit_zero_and_prints_the_manual_command() {
+    let case = Case::ready("handoff-label-failure");
+    let log = case.state().join("gh.log");
+    support::stub(
+        &case.state(),
+        "gh",
+        &format!(
+            "printf '%s\\n' \"$*\" >> '{}'\n\
+             if [ \"$1\" = \"issue\" ] && [ \"$2\" = \"edit\" ]; then\n\
+               echo 'HTTP 502: Bad Gateway' >&2\n\
+               exit 1\n\
+             fi\n",
+            log.display()
+        ),
+    );
+    let out = support::merge_gate(&case.state())
+        .env("PATH", case.state().join("bin"))
+        .args(["merge", "--pr", "19", "--replay"])
+        .arg(&case.dir)
+        .output()
+        .unwrap();
+    let said = said(&out);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "加标签失败不应改变合并成功的退出码：{said}"
+    );
+    assert!(said.contains("已合并 PR #19"), "应报告 PR 已合并：{said}");
+    assert!(
+        said.contains(
+            "gh issue edit 3 --repo zbtzbtzbt/theFlash --add-label 待验收 --remove-label 验收未通过"
+        ),
+        "加标签失败应打印补标签的命令：{said}"
+    );
+    let calls = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(
+        !calls.contains("已加上 `待验收`") && calls.contains("自动加 `待验收` 标签失败"),
+        "加标签失败时 issue 评论不应谎称已加上标签：{calls}"
+    );
+    assert!(
+        said.contains("取 PR #19 的合入提交失败")
+            && !calls.contains("合入/被审查的提交")
+            && calls.contains("合入 main 的提交未取到"),
+        "取不到 merge_commit_sha 时必须报错且不把被审查 head 宣称为合入提交：{said}\n{calls}"
+    );
+
+    // Also when GitHub returns `{"merge_commit_sha": null}`, stderr and the
+    // issue comment must report that the merged commit was not obtained.
+    let case_null = Case::ready("handoff-null-sha");
+    let log_null = case_null.state().join("gh.log");
+    support::stub(
+        &case_null.state(),
+        "gh",
+        &format!(
+            "printf '%s\\n' \"$*\" >> '{}'\n\
+             if [ \"$1\" = \"api\" ]; then\n\
+               printf '{{\"merge_commit_sha\":null}}\\n'\n\
+             fi\n",
+            log_null.display()
+        ),
+    );
+    let out_null = support::merge_gate(&case_null.state())
+        .env("PATH", case_null.state().join("bin"))
+        .args(["merge", "--pr", "19", "--replay"])
+        .arg(&case_null.dir)
+        .output()
+        .unwrap();
+    let said_null = self::said(&out_null);
+    let calls_null = std::fs::read_to_string(&log_null).unwrap_or_default();
+    assert_eq!(out_null.status.code(), Some(0), "{said_null}");
+    assert!(
+        said_null.contains("取 PR #19 的合入提交失败")
+            && !calls_null.contains("合入/被审查的提交")
+            && calls_null.contains("合入 main 的提交未取到"),
+        "merge_commit_sha 为 null 时不能把被审查 head 宣称为合入提交：{said_null}\n{calls_null}"
+    );
+}

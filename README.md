@@ -15,7 +15,10 @@ theFlash 从架构设计到编码、测试、审查、发布，全部由 AI agen
 
 ## 项目怎么自己迭代
 
-- **白天**：agent 按 [prompts/work-tick.md](prompts/work-tick.md) 定时跑一轮，优先修红的 CI，再发版、审 PR、处理 issue。每个改动都要带一个“没有它就会失败”的测试，并在 commit 正文写明跑了什么、没试什么。
+一个 issue 从开出来到关闭经过的每一站、谁负责、先做什么，写在[协作流水线](docs/subsystems/pipeline.md)里。
+
+- **排队**：每个 issue 按重要和紧急定成 P0～P3（[Issue 优先级](docs/subsystems/issue-priority.md)）。`scripts/claims queue` 列出现在能开工的、按优先级排好的 issue，agent 从队首认领；等 owner 裁决的 issue 带 `等裁决`，不进队列。
+- **白天**：agent 按 [prompts/work-tick.md](prompts/work-tick.md) 定时跑一轮，先收尾再开始：修红的 CI、P0、发版、返工、审 PR、验收，最后才按队列开新 issue。每个改动都要带一个“没有它就会失败”的测试，并在 commit 正文写明跑了什么、没试什么。
 - **合并**：所有改动走 PR。另一个 agent 审查并在 PR 上写审查记录，再由 [合并闸门](docs/subsystems/merge-gate.md) 核对 CI、审查记录和被审查的提交对不对得上，全对上才合入，同一时间只合一个。闸门不调用模型。
 - **验收**：合并后给 issue 加上 `待验收` 标签，由第三个 agent 按 [prompts/acceptance.md](prompts/acceptance.md) 在真实环境里独立验证，通过才关闭。
 - **可选调度器**：[调度程序](docs/subsystems/dispatch.md) 可以按 GitHub 事件在本机启动独立 agent 会话；云端任务和跨厂商闭环仍需另行配置、验证。

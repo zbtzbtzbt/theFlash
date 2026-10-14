@@ -18,12 +18,22 @@ pub struct Issue {
     pub number: u64,
     pub title: String,
     pub labels: Vec<String>,
-    /// The agent named by the newest claim or heartbeat comment, if any.
+    pub body: String,
+    /// The agent that implemented the current lease chain, if any.
     /// All agents share one GitHub account, so who is working on an issue
     /// comes from what the comments say, not from `user.login` (#15).
     pub agent: Option<String>,
     /// When the newest comment on the issue was posted.
     pub last_comment_at: Option<DateTime<Utc>>,
+    /// When the current claim/heartbeat last showed life. An issue labelled
+    /// `认领中` whose lease has been silent past the claim expiry is ready
+    /// for `implement` again (after reclaim), matching `claims queue` (#103).
+    pub lease_alive_at: Option<DateTime<Utc>>,
+    /// True when the snapshot never saw this issue's comments (the replay
+    /// file was missing, or the live fetch failed open). A `认领中` label
+    /// with unknown comments is treated as busy — same as `claims queue`
+    /// when the board and the label disagree (#103).
+    pub lease_unknown: bool,
 }
 
 /// An open pull request as the dispatcher needs it.
@@ -97,6 +107,8 @@ struct ApiIssue {
     number: u64,
     #[serde(default)]
     title: String,
+    #[serde(default)]
+    body: Option<String>,
     #[serde(default)]
     labels: Vec<ApiLabel>,
     /// Present on pull requests only, which the issues endpoint also
@@ -201,8 +213,11 @@ fn issues_from_json(text: &str) -> Result<Vec<Issue>, Error> {
             number: i.number,
             title: i.title,
             labels: i.labels.into_iter().map(|l| l.name).collect(),
+            body: i.body.unwrap_or_default(),
             agent: None,
             last_comment_at: None,
+            lease_alive_at: None,
+            lease_unknown: false,
         })
         .collect();
     out.sort_by_key(|i| i.number);
@@ -301,12 +316,15 @@ fn issue_in_title(title: &str) -> Option<u64> {
 impl Snapshot {
     /// A snapshot built from saved responses in `dir`: `issues.json`,
     /// `pulls.json`, `main-test-runs.json`, and a `comments-<号>.json`
-    /// for each open issue. A missing comments file means the issue has
-    /// no comments, which is what a freshly opened issue looks like.
+    /// for each open issue. A missing comments file means the comments
+    /// were not captured: a `认领中` issue in that state is treated as
+    /// busy (same as `claims queue` when the board cannot read the lease).
+    /// An empty comments file means the issue truly has no comments.
     pub fn replay(dir: &Path) -> Result<Snapshot, Error> {
         let mut issues = issues_from_json(&read(dir, "issues.json")?)?;
         for issue in &mut issues {
             let Some(text) = optional(dir, &format!("comments-{}.json", issue.number)) else {
+                issue.lease_unknown = true;
                 continue;
             };
             apply_comments(issue, &text)?;
@@ -342,6 +360,7 @@ fn apply_comments(issue: &mut Issue, text: &str) -> Result<(), Error> {
     comments.sort_by_key(|(at, _)| *at);
     issue.last_comment_at = comments.last().map(|(at, _)| *at);
     issue.agent = implementer(&comments);
+    issue.lease_alive_at = lease_state(&comments).1;
     Ok(())
 }
 
@@ -363,15 +382,31 @@ fn apply_comments(issue: &mut Issue, text: &str) -> Result<(), Error> {
 /// With no claim comment at all, the earliest `Agent:` signature answers:
 /// the implementer reports before any reviewer or acceptor shows up.
 pub(super) fn implementer(comments: &[(DateTime<Utc>, String)]) -> Option<String> {
+    let (held, _) = lease_state(comments);
+    held.or_else(|| comments.iter().find_map(|(_, body)| agent_signature(body)))
+}
+
+/// Who holds the current lease chain, and when that lease last showed
+/// life (claim or heartbeat). A reclaim ends the chain.
+fn lease_state(comments: &[(DateTime<Utc>, String)]) -> (Option<String>, Option<DateTime<Utc>>) {
     let mut held: Option<String> = None;
-    for (_, body) in comments {
+    let mut alive_at: Option<DateTime<Utc>> = None;
+    for (at, body) in comments {
         match lease_comment(body) {
-            Some(Lease::Held(agent)) if held.is_none() => held = Some(agent),
-            Some(Lease::Reclaimed) => held = None,
-            _ => {}
+            Some(Lease::Held(agent)) => {
+                if held.is_none() {
+                    held = Some(agent);
+                }
+                alive_at = Some(*at);
+            }
+            Some(Lease::Reclaimed) => {
+                held = None;
+                alive_at = None;
+            }
+            None => {}
         }
     }
-    held.or_else(|| comments.iter().find_map(|(_, body)| agent_signature(body)))
+    (held, alive_at)
 }
 
 enum Lease {

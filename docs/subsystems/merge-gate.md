@@ -64,7 +64,7 @@ scripts/merge-gate check --replay <目录>    # 用保存的 GitHub 响应判断
 
 退出码：0 可以合并 / 已合并，1 拒绝合并，2 用法错或取数据失败。
 
-`merge` 和 `queue` 的顺序是：拿锁 → **拿到锁之后**才重新读 GitHub（排队期间 main 和 PR 都可能变） → `decide` → `gh pr merge --squash --match-head-commit <被审查的 sha>`，commit 正文带上 PR 正文和“审查者 X 在 <sha> 上审查通过（记录链接）” → 放锁。`--dry-run` 走完全部核对但不合并。
+`merge` 和 `queue` 的顺序是：拿锁 → **拿到锁之后**才重新读 GitHub（排队期间 main 和 PR 都可能变） → `decide` → `gh pr merge --squash --match-head-commit <被审查的 sha>`，commit 正文带上 PR 正文和“审查者 X 在 <sha> 上审查通过（记录链接）” → 给 PR 标题里的关联 issue 加上 `待验收`、去掉旧的 `验收未通过`，并评论真正合入 main 的 squash 提交、被审查的 head 与审查记录链接（#102；加标签失败不影响已合入的退出码 0，评论会写明要手动补标签，不谎称已加上） → 放锁。`--dry-run` 走完全部核对但不合并。
 
 ## 什么时候拒绝
 

@@ -1,4 +1,4 @@
-<!-- reviewed-through: dabd956 (2026-10-14 12:55 +0800) -->
+<!-- reviewed-through: de4931d (2026-10-14 13:31 +0800) -->
 # 已合并工作的教训
 
 本项目的代码由 agent 编写、审查、合并和发布。每天夜里有一个复盘 agent 检查当天的 commit：哪些改动后来又被返工、哪些不该合并、哪些验证得太薄。学到的东西记在这里。改代码之前先读这份文件。
@@ -42,6 +42,29 @@
 
 
 ## 验证
+
+**巡检判定“没有变化”的标准不能比查询更宽松：查询读不了的页面，inspect 也必须报“查不了”并非 0 退出。**
+- Done right on 10-14: `e4f0590`（#73/#107）——非法/越界 `performId` 时 `event` 退出 1，`inspect` 却跳过场次报没有变化；现共用 `damai::perform_id` / `item_page_problem`。
+- 怎么避免：inspect 与 event 共用同一套页面/场次校验；加“查询拒绝、巡检却绿”的对照测试。
+- Seen 1× (2026-10-14)。
+
+**open issue 要有可执行的优先级队列；认领跳过更高优先级必须写下理由。**
+- Done right on 10-14: `3525b2f`（#68/#96）——`claims queue` / `triage` / 认领顺序闸；P0–P3 与 `等裁决`；改动前旧 claim 会直接抢走低优先级。
+- Seen 1× (2026-10-14)。
+
+**生成出来的索引区外又手改一行时，check 必须失败。**
+- Done right on 10-14: `ee61c12`（#80/#97）——索引行跑出生成区、README 双份索引会在 make check 报出来。
+- Seen 1× (2026-10-14)。
+
+**写不下来的结果不能算成功：退出码和“没有变化”必须反映落盘失败；定时任务只看退出码。**
+- Done right on 10-14: `d31600e`（#78/#77/#124）——inspect 样本/候选/record 写失败只进 notes 仍退出 0、打印“没有变化”，造成假绿；现为 `unsaved`、退出 1，并区分本机磁盘与大麦改版。
+- 怎么避免：凡“保存 fixture / 状态”路径都要有“写失败 → 非 0”的破坏测试；报告结论不要只看业务 findings。
+- Seen 1× (2026-10-14)。
+
+**只读写本机状态、一个大麦请求都不发的命令，不要走会校验发请求配置的入口；本机配置错误也不要映射成“上游 502”。**
+- Done right on 10-14: `dbe9e43`（#83/#119）——`theflash risk` 经 `Gate::for_user` 校验 `THEFLASH_REQUEST_GAP_MS`，变量写错就看不了/解不了熔断；UI 不认识 `invalid-config` 却回 502。改为 `Gate::for_breaker_only`，界面区分本机配置错误。
+- 怎么避免：新增“纯本机”子命令时 grep 是否误用 `for_user` / Client::new；HTTP 状态码表与错误码同步增列。
+- Seen 1× (2026-10-14)。
 
 **第三方推送有硬限制时，渠道出口要压缩/拒绝并在启动时校验；边界用「恰好上限」实测，不要想当然。**
 - Done right on 10-14: `ddd0c5e`（#11/#93）——ntfy 4096 字节限制；日历场次长提醒压缩；topic 长度启动校验；审查发现恰好 4096 也被拒，改为 4095。改动前有真正 FAIL 的长正文/topic 测试。
@@ -111,6 +134,11 @@
 - Seen 1× (2026-10-14)。
 
 ## 合并与关闭
+
+**并行 PR 改同一函数的不同变量/语义时，文本不冲突也会把 main 编不过；合入前要在最新 main 上重编，不能只看 Git 无冲突。**
+- `e4f0590`（#73）在 `inspect::record` 里 `notes.push`；更早合入的 `d31600e`（#78）已删掉 `notes` 改成 `lost`。两边各自相对当时 main 绿，合起来 `cannot find value notes`（#129）。Done right on 10-14: `de4931d`——分开 lost（失败）与 notes（stderr 说明），并有破坏测试守住 stderr。
+- 怎么避免：审查/合并前 `git fetch && rebase origin/main && make check`；同一模块连续合入时看相邻 PR 是否改同一收尾路径。merge-gate 过 CI 是必要但不充分——要以**合到当时最新 main 之后**的 head 为准。
+- Seen 1× (2026-10-14)。
 
 **流程工具链（认领租约、合并闸门）合入时，fixture 回放可以代替“真多智能体演示”，但要在 Not tried 写清。**
 - Done right on 10-14: `c72af3d`（#16 claims）——有 0008 决定与子系统文档、882 行回放测试；Not tried 只留真实多 agent 演示。本轮未见恶意模式或手改护栏被拆。
