@@ -1,4 +1,4 @@
-<!-- reviewed-through: b4840a1 (2026-10-14 15:34 +0800) -->
+<!-- reviewed-through: 2d9f628 (2026-10-14 15:43 +0800) -->
 # 已合并工作的教训
 
 本项目的代码由 agent 编写、审查、合并和发布。每天夜里有一个复盘 agent 检查当天的 commit：哪些改动后来又被返工、哪些不该合并、哪些验证得太薄。学到的东西记在这里。改代码之前先读这份文件。
@@ -36,10 +36,11 @@
 
 ## 用户的数据和设置
 
-**从响应抄进报告 / issue / stderr 的每个字符串都要过报告脱敏；候选 fixture 脱敏不能代替出口脱敏。**
-- Done right on 10-14: `b4840a1`（#72/#158）——`redact::for_report` 覆盖 event_name、codes::text、sku::head、page 错误；stdout / 假 gh issue body / cli stderr 三条改动前 FAIL；逐出口破坏仍红。
-- 怎么避免：凡把响应片段 `format!` 进用户可见出口前必须走 `for_report`；新出口加“合成 cookie 进报告”测试。
-- Seen 1× (2026-10-14)。
+**从响应抄进报告 / issue / stderr 的每个字符串都要过报告脱敏；落盘 fixture 与 `repo_guard` 必须共用同一套凭据扫描。**
+- Done right on 10-14: `b4840a1`（#72/#158）——`redact::for_report` 覆盖报告/issue/stderr 出口；候选 fixture 脱敏不能代替这些出口。
+- `inspect/redact` 曾只认逐行 `name=value`，而 `repo_guard`（#21）已认跨行、导出对象、cookies.txt、相邻参数——`record` 写出带 cookie 的 fixture 仍退出 0，要等提交才被拦住（#71）。Done right on 10-14: `2d9f628`（#71/#143，经闸门）——规则合成一份；四种写法值均 `<redacted>`；`record_takes_out_every_form…` 改动前 FAIL；故意不跨行扫描会红。
+- 怎么避免：凭据规则只维护一处；`record`/落盘路径用与 repo_guard 相同的 `sensitive`；加写法只加一处测试。
+- Seen 2× (2026-10-14)。
 
 **从 `import.meta.url` / URL 拼本地文件路径必须用 `fileURLToPath`；路径含中文或空格时要用真实副本跑前端测试，不能只链 `src`。**
 - Done right on 10-14: `01b5cd5`（#49）——修 `URL.pathname` 导致的 ENOENT；守护把 frontend 拷到含中文和空格的临时 checkout 再跑一遍，并探针防止 vitest 跟着 symlink 逃回 ASCII 路径。
