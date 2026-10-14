@@ -1940,6 +1940,234 @@ fn record_says_what_it_kept_and_what_is_missing_whatever_stopped_a_fixture() {
     }
 }
 
+/// A login cookie's name and value, and a mainland mobile number, built
+/// from pieces so this file does not carry what `repo_guard.rs` looks for.
+/// Planted in a response, they stand for whatever a logged-in inspection
+/// would really be served.
+fn planted_cookie() -> (String, String) {
+    (["un", "b"].concat(), ["synthetic", "123"].concat())
+}
+
+fn planted_mobile() -> String {
+    ["139", "0013", "8001"].concat()
+}
+
+/// The id and name of the first session on the recorded on-sale page, as
+/// they sit next to each other in it. Replaced together, so a test that
+/// breaks the id and plants something in the name is talking about one
+/// session and not two.
+const SESSION_286937788: &str = "\"performId\":286937788,\"performName\":\"2026-10-17 周六 17:00\"";
+
+/// One way damai.cn's own text reaches an inspection report: what to
+/// change in the replayed responses, and what the run has to keep saying
+/// about it once the credential is out.
+struct Leak {
+    what: &'static str,
+    routes: Vec<(String, String)>,
+    /// The value that must not reach stdout, a log or an issue.
+    secret: String,
+    /// What the report still has to say, so redaction does not take the
+    /// finding with it.
+    says: Vec<String>,
+}
+
+/// Every outlet #72 names, each with a credential or a phone number in the
+/// place damai.cn would put its own text.
+fn leaks() -> Vec<Leak> {
+    let (name, value) = planted_cookie();
+    let mobile = planted_mobile();
+    vec![
+        // The response the issue reproduces with: a tier endpoint that
+        // stopped answering JSONP, whose first bytes went into the report
+        // as they arrived.
+        Leak {
+            what: "票档响应不是 JSONP",
+            routes: changed(unchanged_routes(), "dataId=286937788", |_| {
+                format!("{name}={value}\n<html>changed layout</html>")
+            }),
+            secret: value.clone(),
+            says: vec!["票档接口".into(), "不是 JSONP".into()],
+        },
+        Leak {
+            what: "接口返回失败的 responseCode",
+            routes: changed(unchanged_routes(), "dataId=286937788", |body| {
+                body.replace(
+                    r#""responseInfo":{"responseSuccess":"true","responseCode":""}"#,
+                    &format!(
+                        r#""responseInfo":{{"responseSuccess":"false","responseCode":"X1 {mobile}"}}"#
+                    ),
+                )
+            }),
+            secret: mobile.clone(),
+            says: vec!["接口返回失败".into(), "X1".into()],
+        },
+        // A name is not a finding by itself, so this run also has a real
+        // change in it: that is when the report is printed, logged and
+        // posted, and the name goes along with it.
+        Leak {
+            what: "演出名字",
+            routes: changed(
+                changed(unchanged_routes(), "/item.htm?id=1086791513717", |body| {
+                    body.replace(
+                        "【北京】2026德玛西亚杯国际邀请赛",
+                        &format!("【北京】2026德玛西亚杯国际邀请赛 {mobile}"),
+                    )
+                }),
+                "dataId=286937788",
+                |body| body.replace("\"price\":\"", "\"price\":0,\"priceWas\":\""),
+            ),
+            secret: mobile.clone(),
+            says: vec![
+                "[已开售] 1086791513717".into(),
+                "perform.skuList[0].price 变成了数字".into(),
+            ],
+        },
+        Leak {
+            what: "没见过的按钮状态码旁边的页面文字",
+            routes: with_route(
+                changed(unchanged_routes(), "/item.htm?id=1086791513717", |body| {
+                    body.replace("\"buyBtnStatus\":204", "\"buyBtnStatus\":777")
+                        .replace(
+                            "\"buyBtnText\":\"立即购票\"",
+                            &format!("\"buyBtnText\":\"立即购票 {name}={value}\""),
+                        )
+                }),
+                home_with(1086791513717),
+            ),
+            secret: value.clone(),
+            says: vec!["没见过的购买按钮状态码：777".into(), "立即购票".into()],
+        },
+        Leak {
+            what: "没见过的票档状态码旁边的票档名和标签",
+            routes: changed(unchanged_routes(), "dataId=286937788", |body| {
+                body.replace("\"frontEndStatus\":\"2\"", "\"frontEndStatus\":\"777\"")
+                    .replace(
+                        "\"priceName\":\"D-118元\"",
+                        &format!("\"priceName\":\"D-118元 {mobile}\""),
+                    )
+                    .replace(
+                        "\"tagDesc\":\"缺货登记\"",
+                        &format!("\"tagDesc\":\"缺货登记 {name}={value}\""),
+                    )
+            }),
+            secret: value.clone(),
+            says: vec!["没见过的票档状态码：777".into(), "缺货登记".into()],
+        },
+        // The report quotes the session object whole, so the planted
+        // number has to sit in the same object as the id that is refused.
+        Leak {
+            what: "详情页里读不了的场次",
+            routes: changed(unchanged_routes(), "/item.htm?id=1086791513717", |body| {
+                body.replacen(
+                    SESSION_286937788,
+                    &format!(
+                        "\"performId\":\"not-a-number\",\"performName\":\"2026-10-17 周六 17:00 {mobile}\""
+                    ),
+                    1,
+                )
+            }),
+            secret: mobile.clone(),
+            says: vec!["详情页".into(), "performId".into(), "not-a-number".into()],
+        },
+    ]
+}
+
+/// The owner's rule, on the way out instead of on the way to disk: a
+/// credential or someone's personal data in a response may not reach
+/// stdout, a log, or the issue an inspection opens by itself. Every
+/// string an inspection copies out of damai.cn's bytes used to be printed
+/// as it arrived — the first 80 characters of a response that is not
+/// JSONP, a `responseCode`, the event's name, the words beside a status
+/// code nobody has mapped, a tier's label — so a logged-in run would have
+/// pasted its own session onto GitHub (#72).
+#[test]
+fn nothing_an_inspection_copies_out_of_a_response_carries_a_credential() {
+    for leak in leaks() {
+        let home = Home::new("leak");
+        let damai = support::MockDamai::start_bodies(leak.routes);
+        let out = run(&home, &damai, &["--max-events", "8"]);
+        let text = stdout(&out);
+        let said = String::from_utf8_lossy(&out.stderr).into_owned();
+        let what = leak.what;
+        assert_eq!(out.status.code(), Some(1), "{what}：{text}{said}");
+        assert!(
+            !text.contains(&leak.secret),
+            "{what}：报告里还带着大麦响应里的凭据/个人信息：{text}"
+        );
+        assert!(
+            !said.contains(&leak.secret),
+            "{what}：stderr 里还带着大麦响应里的凭据/个人信息：{said}"
+        );
+        for fragment in &leak.says {
+            assert!(
+                text.contains(fragment.as_str()),
+                "{what}：脱敏把这次的发现也一起抹掉了，没说 {fragment}：{text}"
+            );
+        }
+        // The sample set keeps event names, so a redacted report that
+        // wrote the raw name to disk would hand it back to the next run.
+        let saved = std::fs::read_to_string(home.samples_file()).unwrap_or_default();
+        assert!(
+            !saved.contains(&leak.secret),
+            "{what}：样本文件里留下了大麦响应里的凭据/个人信息：{saved}"
+        );
+    }
+}
+
+/// A run with `--open-issue` sends the same report to GitHub, where it
+/// cannot be unsent. `gh` here is this test's own, so nothing leaves the
+/// machine: it answers `issue list` with none and writes down the argv it
+/// was given instead of creating anything.
+fn run_opening_an_issue(home: &Home, damai: &support::MockDamai) -> (std::process::Output, String) {
+    let capture = home.path().join("gh-argv");
+    support::stub(
+        home.path(),
+        "gh",
+        &format!(
+            "if [ \"$2\" = list ]; then echo '[]'; exit 0; fi\n\
+             : > '{capture}'\n\
+             for a in \"$@\"; do printf '%s\\n' \"$a\" >> '{capture}'; done\n\
+             echo https://github.com/probe/offline/issues/1",
+            capture = capture.display()
+        ),
+    );
+    let mut cmd = home.theflash(&damai.base_url());
+    cmd.env("PATH", home.path().join("bin"));
+    cmd.args([
+        "inspect",
+        "--gap",
+        "0",
+        "--open-issue",
+        "--repo",
+        "probe/offline",
+    ]);
+    let out = support::output_within(cmd, 60);
+    let argv = std::fs::read_to_string(&capture).unwrap_or_default();
+    (out, argv)
+}
+
+/// The issue an inspection opens by itself is the one place a leak cannot
+/// be taken back, so the title and the body it hands `gh` carry nothing
+/// the report may not print either (#72).
+#[test]
+fn the_issue_an_inspection_opens_carries_no_credential_from_the_response() {
+    for leak in leaks() {
+        let home = Home::new("leak-issue");
+        let damai = support::MockDamai::start_bodies(leak.routes);
+        let (out, argv) = run_opening_an_issue(&home, &damai);
+        let text = stdout(&out);
+        let what = leak.what;
+        assert!(
+            argv.contains("--body"),
+            "{what}：这次复现没走到开 issue 那条路：{text}{argv}"
+        );
+        assert!(
+            !argv.contains(&leak.secret),
+            "{what}：交给 gh 的 issue 正文里还带着大麦响应里的凭据/个人信息：{argv}"
+        );
+    }
+}
+
 /// Everything that stops damai access ends the whole inspection, not just
 /// the event being read: risk control, the breaker another theFlash
 /// process wrote, a breaker that cannot be read, and — the one that

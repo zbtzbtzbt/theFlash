@@ -5,6 +5,9 @@
 use serde_json::Value;
 
 use super::text::{integer, string};
+// See the note in sku.rs: one reading of the owner's rules, for fixtures
+// and for what theFlash says about a response alike.
+use crate::inspect::redact;
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct BuyButton {
@@ -87,7 +90,14 @@ fn read_item_page(json: &Value) -> Result<ItemPage, String> {
     for base in bases {
         for p in base["performs"].as_array().into_iter().flatten() {
             let Some(id) = perform_id(&p["performId"]) else {
-                return Err(format!("场次缺少 performId：{p}"));
+                // The session as damai.cn wrote it, so whoever reads this
+                // can see which value was refused — with the owner's rules
+                // applied, because a query prints it on stderr and
+                // `theflash inspect` puts it in the issue it opens (#72).
+                return Err(format!(
+                    "场次缺少 performId：{}",
+                    redact::for_report(&p.to_string())
+                ));
             };
             if performs.iter().any(|known| known.id == id) {
                 continue;

@@ -47,5 +47,6 @@
 - **候选 fixture 是大麦发的那份字节**，文件名就是 `testdata/damai/` 里的 fixture 名（`item_<itemId>.html`、`sku_<itemId>_<performId>.jsonp`），拷进去就能被现有的 `item_page_json` / `tier_json` 回放。读不懂的响应也留下来——那恰恰是修复的人最需要复现的那一份。候选文件在跑巡检的那台机器上，所以 issue 正文除了列路径，还写明怎么用 `theflash inspect record` 在别处重新取一份。
 - 大麦改了程序不读的字段，巡检不说话。这是故意的：报警只覆盖“程序会坏”的范围。代价是新功能开始读一个新字段时，要在同一个改动里把它加进声明；`shape.rs` 的文档注释写了这条要求。
 - 脱敏规则在 `inspect/redact.rs` 和 `backend/tests/repo_guard.rs` 里各有一份：后者是测试，不能被产品代码调用。两份都按 code-standards 的同一条规则写，`redact.rs` 的 `the_rules_find_what_the_repository_guard_finds` 用同样的样本盯住它们不漂移。把扫描逻辑提到库里、让 repo_guard 调用它，是更干净的做法，留给以后（#21 正在改 repo_guard，现在动会冲突）。
+- 脱敏原本只管“写进仓库的 fixture”，报告和自动开的 issue 原样引用响应（#72）。现在同一份规则也管**巡检说出来的话**：`redact::for_report` 处理每一个从响应里抄出来的字符串。因此 `damai::sku` / `damai::page` 也要调 `inspect::redact`——这两条错误消息是用响应自己的字节拼的，而 `theflash event` 和巡检共用它们（#73）。模块名上这是反向依赖；规则是 owner 的、跨整个仓库的，模块放哪儿不是本次要解决的事，`redact` 该搬到库的顶层时一起搬。
 - 这次用的是现有的 `damai::Client`，#4 的统一访问层当时还没合进 main。#4 合并后要做三件事：`inspect::stops_the_run` 换成 `Error::stops_damai_access`、`inspect::state_dir` 换成 `damai::state_dir`、巡检的 2 秒节流改成由 `Gate` 统一执行（巡检仍然要自己的 2 秒，因为 `Gate` 的下限是 300 毫秒）。
 - 出现以下证据时应重新考虑：首页不再匿名返回演出链接（样本换新就要换来源）；大麦开始对详情页风控（巡检会第一个撞上）；声明的字段数长到没人维护（说明该换成从 fixture 自动生成快照）。
