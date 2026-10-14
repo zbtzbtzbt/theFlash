@@ -232,17 +232,43 @@ fn merge_locked(options: &Options, pr: u64) -> ExitCode {
 /// the caller gets exit 0 and the exact command to finish the handoff by
 /// hand.
 fn hand_off_issues(repo: &str, pr: u64, title: &str, sha: &str, reviewer: &str, record_url: &str) {
-    let comment = merge_gate::issue_merged_comment(pr, sha, reviewer, record_url);
-    for issue in merge_gate::issues_in_title(title, pr) {
-        match snapshot::add_issue_label(repo, issue, merge_gate::ACCEPT_LABEL) {
-            Ok(_) => println!("已给 #{issue} 加上 {}", merge_gate::ACCEPT_LABEL),
-            Err(e) => eprintln!(
-                "给 #{issue} 加 `{}` 标签失败：{e}；请手动补上：\
-                 gh issue edit {issue} --repo {repo} --add-label {}",
-                merge_gate::ACCEPT_LABEL,
-                merge_gate::ACCEPT_LABEL
-            ),
-        }
+    let issues = merge_gate::issues_in_title(title, pr);
+    if issues.is_empty() {
+        return;
+    }
+    let merged_sha = snapshot::merged_commit_sha(repo, pr);
+    for issue in issues {
+        let labelled = match snapshot::hand_off_issue_labels(
+            repo,
+            issue,
+            merge_gate::ACCEPT_LABEL,
+            merge_gate::REJECTED_LABEL,
+        ) {
+            Ok(_) => {
+                println!("已给 #{issue} 加上 {}", merge_gate::ACCEPT_LABEL);
+                true
+            }
+            Err(e) => {
+                eprintln!(
+                    "给 #{issue} 加 `{}` 标签失败：{e}；请手动补上：\
+                     gh issue edit {issue} --repo {repo} --add-label {} --remove-label {}",
+                    merge_gate::ACCEPT_LABEL,
+                    merge_gate::ACCEPT_LABEL,
+                    merge_gate::REJECTED_LABEL,
+                );
+                false
+            }
+        };
+        let comment = merge_gate::issue_merged_comment(
+            repo,
+            issue,
+            pr,
+            merged_sha.as_deref(),
+            sha,
+            reviewer,
+            record_url,
+            labelled,
+        );
         if let Err(e) = snapshot::comment_issue(repo, issue, &comment) {
             eprintln!("在 #{issue} 上评论合并结果失败：{e}");
         }

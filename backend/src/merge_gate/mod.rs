@@ -30,6 +30,10 @@ pub const BLOCKING_LABELS: [&str; 3] = ["要修改", "不要合并", "等 owner"
 /// now waits for an independent agent to accept it (#102).
 pub const ACCEPT_LABEL: &str = "待验收";
 
+/// Removed when a fix pull request merges so `dispatch` schedules a fresh
+/// acceptance round instead of another `fix-issue` session (#102).
+pub const REJECTED_LABEL: &str = "验收未通过";
+
 /// Every issue number named as `#<number>` in a pull request title
 /// (such as `（#15）` or `（#14、#9）`), in the order written, without
 /// duplicates or the pull request's own number (#102).
@@ -56,12 +60,38 @@ pub fn issues_in_title(title: &str, pull_number: u64) -> Vec<u64> {
 }
 
 /// The comment left on a linked issue after its pull request merges,
-/// citing the reviewed commit and the review record that approved it (#102).
-pub fn issue_merged_comment(pr: u64, sha: &str, reviewer: &str, record_url: &str) -> String {
-    format!(
-        "PR #{pr} 已由合并闸门合入 main（被审查的提交 `{sha}`，审查者 {reviewer}，审查记录：{record_url}），\
-         已加上 `{ACCEPT_LABEL}`，请实现者之外的 agent 按 prompts/acceptance.md 独立验收。"
-    )
+/// citing the squash commit on `main`, the reviewed PR head, and the
+/// review record that approved it (#102). When `labelled` is false, the
+/// comment says the label still needs to be added manually instead of
+/// claiming `已加上 待验收`.
+#[allow(clippy::too_many_arguments)]
+pub fn issue_merged_comment(
+    repo: &str,
+    issue: u64,
+    pr: u64,
+    merged_sha: Option<&str>,
+    reviewed_sha: &str,
+    reviewer: &str,
+    record_url: &str,
+    labelled: bool,
+) -> String {
+    let commits = match merged_sha.filter(|m| !m.is_empty() && *m != reviewed_sha) {
+        Some(merged) => format!("合入的提交 `{merged}`，被审查的提交 `{reviewed_sha}`"),
+        None => format!("合入/被审查的提交 `{reviewed_sha}`"),
+    };
+    if labelled {
+        format!(
+            "PR #{pr} 已由合并闸门合入 main（{commits}，审查者 {reviewer}，审查记录：{record_url}），\
+             已加上 `{ACCEPT_LABEL}`，请实现者之外的 agent 按 prompts/acceptance.md 独立验收。"
+        )
+    } else {
+        format!(
+            "PR #{pr} 已由合并闸门合入 main（{commits}，审查者 {reviewer}，审查记录：{record_url}）。\
+             自动加 `{ACCEPT_LABEL}` 标签失败，请先手动执行 \
+             `gh issue edit {issue} --repo {repo} --add-label {ACCEPT_LABEL} --remove-label {REJECTED_LABEL}`，\
+             再由实现者之外的 agent 按 prompts/acceptance.md 独立验收。"
+        )
+    }
 }
 
 /// What the gate decided about one pull request.

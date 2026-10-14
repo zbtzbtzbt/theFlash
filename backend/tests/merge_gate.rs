@@ -602,10 +602,17 @@ fn merging_marks_linked_issues_for_acceptance_and_posts_the_review_record() {
         v["title"] = json!("damai: 访问层的 5 处缺陷一起修（#74，#70） (#19)");
     });
     let log = case.state().join("gh.log");
+    let merged_sha = "ffffffffffffffffffffffffffffffffffffffff";
     support::stub(
         &case.state(),
         "gh",
-        &format!("printf '%s\\n' \"$*\" >> '{}'\n", log.display()),
+        &format!(
+            "printf '%s\\n' \"$*\" >> '{}'\n\
+             if [ \"$1\" = \"api\" ]; then\n\
+               printf '{{\"merge_commit_sha\":\"{merged_sha}\"}}\\n'\n\
+             fi\n",
+            log.display()
+        ),
     );
     let out = support::merge_gate(&case.state())
         .env("PATH", case.state().join("bin"))
@@ -617,12 +624,16 @@ fn merging_marks_linked_issues_for_acceptance_and_posts_the_review_record() {
     assert_eq!(out.status.code(), Some(0), "{said}");
     let calls = std::fs::read_to_string(&log).unwrap_or_default();
     assert!(
-        calls.contains("issue edit 74 --repo zbtzbtzbt/theFlash --add-label 待验收"),
-        "合并后没有给 #74 加 待验收：{calls}\n{said}"
+        calls.contains(
+            "issue edit 74 --repo zbtzbtzbt/theFlash --add-label 待验收 --remove-label 验收未通过"
+        ),
+        "合并后没有给 #74 加 待验收 并移除 验收未通过：{calls}\n{said}"
     );
     assert!(
-        calls.contains("issue edit 70 --repo zbtzbtzbt/theFlash --add-label 待验收"),
-        "合并后没有给 #70 加 待验收：{calls}\n{said}"
+        calls.contains(
+            "issue edit 70 --repo zbtzbtzbt/theFlash --add-label 待验收 --remove-label 验收未通过"
+        ),
+        "合并后没有给 #70 加 待验收 并移除 验收未通过：{calls}\n{said}"
     );
     assert!(
         !calls.contains("issue edit 19 "),
@@ -630,14 +641,63 @@ fn merging_marks_linked_issues_for_acceptance_and_posts_the_review_record() {
     );
     assert!(
         calls.contains("issue comment 74 --repo zbtzbtzbt/theFlash --body")
+            && calls.contains(merged_sha)
             && calls.contains(HEAD)
             && calls.contains("issuecomment-6152100000"),
-        "合并后没有在 #74 上评论合入提交和审查记录链接：{calls}"
+        "合并后没有在 #74 上评论合入提交、被审查提交和审查记录链接：{calls}"
     );
     assert!(
         calls.contains("issue comment 70 --repo zbtzbtzbt/theFlash --body"),
         "合并后没有在 #70 上评论：{calls}"
     );
+    // Applying `--add-label 待验收 --remove-label 验收未通过` transitions a
+    // failed-acceptance issue into a new `accept` round in `dispatch::plan`.
+    let mut labels = vec![
+        "bug".to_string(),
+        "P1".to_string(),
+        "验收未通过".to_string(),
+    ];
+    labels.retain(|l| l != theflash::merge_gate::REJECTED_LABEL);
+    labels.push(theflash::merge_gate::ACCEPT_LABEL.to_string());
+    let snap = theflash::dispatch::snapshot::Snapshot {
+        issues: vec![theflash::dispatch::snapshot::Issue {
+            number: 74,
+            title: "issue 74".to_string(),
+            labels,
+            agent: Some("claude".to_string()),
+            last_comment_at: None,
+        }],
+        pulls: Vec::new(),
+        main_checks: theflash::dispatch::snapshot::MainChecks::Green,
+        main_run: None,
+    };
+    let mut agents = std::collections::BTreeMap::new();
+    for v in ["claude", "codex"] {
+        agents.insert(
+            v.to_string(),
+            theflash::dispatch::config::Agent {
+                command: vec!["true".to_string()],
+                prompt: theflash::dispatch::config::PromptStyle::Argv,
+            },
+        );
+    }
+    let cfg = theflash::dispatch::config::Config {
+        agents,
+        vendor_order: vec!["claude".to_string(), "codex".to_string()],
+        max_sessions: 4,
+        max_sessions_per_day: 10,
+        cloud_roles: Vec::new(),
+        ..Default::default()
+    };
+    let planned = theflash::dispatch::plan(
+        &snap,
+        &theflash::dispatch::state::State::default(),
+        &cfg,
+        theflash::dispatch::now(),
+    );
+    assert_eq!(planned.start.len(), 1, "{planned:?}");
+    assert_eq!(planned.start[0].role.name(), "accept", "{planned:?}");
+    assert_eq!(planned.start[0].vendor, "codex", "{planned:?}");
 }
 
 #[test]
@@ -670,7 +730,14 @@ fn label_failure_after_merge_keeps_exit_zero_and_prints_the_manual_command() {
     );
     assert!(said.contains("已合并 PR #19"), "应报告 PR 已合并：{said}");
     assert!(
-        said.contains("gh issue edit 3 --repo zbtzbtzbt/theFlash --add-label 待验收"),
+        said.contains(
+            "gh issue edit 3 --repo zbtzbtzbt/theFlash --add-label 待验收 --remove-label 验收未通过"
+        ),
         "加标签失败应打印补标签的命令：{said}"
+    );
+    let calls = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(
+        !calls.contains("已加上 `待验收`") && calls.contains("自动加 `待验收` 标签失败"),
+        "加标签失败时 issue 评论不应谎称已加上标签：{calls}"
     );
 }

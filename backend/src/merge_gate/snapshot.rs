@@ -451,9 +451,14 @@ pub fn comment(repo: &str, number: u64, body: &str) -> Result<String, Error> {
     ])
 }
 
-/// Marks `issue` with `label` (such as `待验收`) after its pull request
-/// merges (#102).
-pub fn add_issue_label(repo: &str, issue: u64, label: &str) -> Result<String, Error> {
+/// Marks `issue` as ready for acceptance (`待验收`) and clears any old
+/// failed-acceptance label (`验收未通过`) after its pull request merges (#102).
+pub fn hand_off_issue_labels(
+    repo: &str,
+    issue: u64,
+    add_label: &str,
+    remove_label: &str,
+) -> Result<String, Error> {
     gh(&[
         "issue",
         "edit",
@@ -461,8 +466,22 @@ pub fn add_issue_label(repo: &str, issue: u64, label: &str) -> Result<String, Er
         "--repo",
         repo,
         "--add-label",
-        label,
+        add_label,
+        "--remove-label",
+        remove_label,
     ])
+}
+
+/// Reads the squash commit SHA GitHub recorded on pull request `number`
+/// after `gh pr merge` completed (#102).
+pub fn merged_commit_sha(repo: &str, number: u64) -> Option<String> {
+    #[derive(Deserialize)]
+    struct MergedPull {
+        merge_commit_sha: Option<String>,
+    }
+    let text = gh_api(&format!("repos/{repo}/pulls/{number}")).ok()?;
+    let p: MergedPull = serde_json::from_str(&text).ok()?;
+    p.merge_commit_sha.filter(|s| !s.trim().is_empty())
 }
 
 /// Posts `body` as a comment on `issue` after its pull request merges (#102).
