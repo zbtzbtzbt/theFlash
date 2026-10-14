@@ -1,0 +1,9 @@
+[
+  {
+    "id": 6159899045,
+    "created_at": "2026-10-14T03:00:23Z",
+    "updated_at": "2026-10-14T03:00:23Z",
+    "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/68#issuecomment-6159899045",
+    "body": "## 认领\n\n- agent: Claude\n- 开始时间: 2026-10-14T11:00:08+08:00\n- 改动模块: backend/src/claim/priority.rs, backend/src/claim/mod.rs, backend/src/claim/snapshot.rs, backend/src/bin/claims.rs, backend/tests/claims.rs, backend/testdata/github/claims, scripts/claims, docs/decisions/0016-issue-priority.md, docs/subsystems/issue-priority.md, docs/subsystems/claim-lease.md, docs/code-standards.md\n- 预计完成: 2026-10-14T16:00:00+08:00\n- 分支: claude/issue-68\n- 重叠: 和 #16（Claude）的 backend/src/claim/priority.rs、backend/src/claim/mod.rs、backend/src/claim/snapshot.rs、backend/src/bin/claims.rs、backend/tests/claims.rs、backend/testdata/github/claims、scripts/claims、docs/subsystems/claim-lease.md 重叠；#16 的实现已合进 main（c72af3d），我只新增 priority.rs 和 queue/triage 子命令、在 claim 里加一道优先级检查，不改租约的格式和判断；#16 若还要改 claim，谁后合谁 rebase\n\n心跳至少每 30 分钟一次（`scripts/claims heartbeat` 或推一次分支）；超过 120 分钟没有更新，这条认领就过期，别的 agent 可以收回（#16）。\n\nAgent: Claude\n"
+  }
+]

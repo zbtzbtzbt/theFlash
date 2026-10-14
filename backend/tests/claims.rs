@@ -595,7 +595,8 @@ if [ "$1" = api ]; then
   target=""
   for a in "$@"; do case "$a" in repos/*) target="$a";; esac; done
   case "$target" in
-    */issues\?*) cat "$D/issues.json" ;;
+    */issues\?*labels=*) cat "$D/issues.json" ;;
+    */issues\?*) cat "$D/open-issues.json" ;;
     */comments*)
       n=$(printf '%s' "$target" | sed -e 's#.*/issues/##' -e 's#/comments.*##')
       if [ -f "$D/comments-$n.json" ]; then body=$(cat "$D/comments-$n.json"); else body='[]'; fi
@@ -847,6 +848,309 @@ fn a_stale_reclaim_does_not_remove_a_new_leases_label() {
     );
 }
 
+// ---- priority (#68) ----
+
+/// The repository as it was at 2026-10-14 11:11 +08:00, just after every
+/// open issue had been triaged: real responses, recorded with the script
+/// in `testdata/github/claims/README.md`. Twelve issues (#70–#81) had
+/// been opened minutes earlier and were not triaged yet; #54's body says
+/// it depends on #4; #63 and its two duplicates wait for the owner.
+fn priority_fixtures() -> PathBuf {
+    recorded("priority")
+}
+
+const PRIORITY_NOW: &str = "2026-10-14T11:12:00+08:00";
+
+/// Where `needle` first appears in `haystack`, failing the test when it
+/// does not, so an order assertion names what it could not find.
+fn position(haystack: &str, needle: &str) -> usize {
+    haystack
+        .find(needle)
+        .unwrap_or_else(|| panic!("输出里没有 {needle:?}：\n{haystack}"))
+}
+
+#[test]
+fn the_queue_puts_untriaged_issues_first_then_p0_to_p3_and_says_why_the_rest_wait() {
+    let run = claims(&priority_fixtures(), PRIORITY_NOW, &["queue"]);
+    assert_eq!(run.code, 0, "{}", run.out);
+    let out = &run.out;
+    let untriaged = position(out, "没定优先级");
+    let first_untriaged = position(out, "  #70 ");
+    let p1 = position(out, "P1 重要，不紧急");
+    let first_p1 = position(out, "  #2 盯住一场演出");
+    let p2 = position(out, "P2 不重要，紧急");
+    let first_p2 = position(out, "  #46 ");
+    let p3 = position(out, "P3 不重要，不紧急");
+    assert!(
+        untriaged < first_untriaged
+            && first_untriaged < p1
+            && p1 < first_p1
+            && first_p1 < p2
+            && p2 < first_p2
+            && first_p2 < p3,
+        "没定级的在最前面，然后 P1、P2、P3：\n{out}"
+    );
+    for want in [
+        "等裁决：#25（P3）、#63（P0）、#65（P0）、#67（P0）",
+        "被依赖挡着：#54（P1，等 #4）",
+        "#68（P1，Claude）",
+        "待验收：#11（P1）、#37（P3）",
+        "下一个：#2（P1）",
+    ] {
+        assert!(out.contains(want), "少了 {want:?}：\n{out}");
+    }
+    let ready = &out[..position(out, "不在队列里")];
+    for held in ["#54 ", "#63 ", "#68 ", "#11 "] {
+        assert!(
+            !ready.contains(&format!("  {held}")),
+            "{held}不该出现在可以开工的列表里：\n{out}"
+        );
+    }
+    assert!(
+        position(out, "  #13 ") < p2 && out.contains("验收没通过，是返工"),
+        "验收没通过的回到队列里，并说明是返工：\n{out}"
+    );
+}
+
+#[test]
+fn the_queue_for_an_agent_leaves_out_what_is_reserved_for_another() {
+    let run = claims(
+        &priority_fixtures(),
+        PRIORITY_NOW,
+        &["queue", "--agent", "Codex", "--json"],
+    );
+    assert_eq!(run.code, 0, "{}", run.out);
+    let q: serde_json::Value = serde_json::from_str(run.out.trim()).expect(&run.out);
+    assert_eq!(q["next"], 2, "{q:#}");
+    let ready: Vec<u64> = q["ready"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["issue"].as_u64().unwrap())
+        .collect();
+    assert!(!ready.contains(&53) && !ready.contains(&70), "{ready:?}");
+    let waiting = |n: u64| {
+        q["waiting"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|w| w["issue"] == n)
+            .unwrap_or_else(|| panic!("#{n} 不在 waiting 里：{q:#}"))
+            .clone()
+    };
+    assert_eq!(waiting(53)["why"], "指派给别人");
+    assert_eq!(waiting(53)["assigned_to"], "claude");
+    assert_eq!(waiting(54)["blocked_by"], serde_json::json!([4]));
+    assert_eq!(waiting(63)["priority"], "P0");
+    assert_eq!(waiting(63)["why"], "等裁决");
+
+    let anybody = claims(&priority_fixtures(), PRIORITY_NOW, &["queue", "--json"]);
+    let q: serde_json::Value = serde_json::from_str(anybody.out.trim()).expect(&anybody.out);
+    let first = &q["ready"][0];
+    assert_eq!(first["issue"], 70, "不说是谁时，指派的 issue 也排队：{q:#}");
+    assert_eq!(first["priority"], serde_json::Value::Null);
+    assert_eq!(first["level"], "没定");
+    assert_eq!(first["assigned_to"], "claude");
+}
+
+#[test]
+fn claiming_below_the_queue_is_refused_until_the_reason_is_written_down() {
+    let p2 = &[
+        "claim",
+        "--issue",
+        "49",
+        "--agent",
+        "Codex",
+        "--modules",
+        "frontend/src/server.test.ts,frontend/src/app.test.ts",
+    ];
+    let run = claims(&priority_fixtures(), PRIORITY_NOW, p2);
+    assert_eq!(run.code, 1, "{}", run.out);
+    assert!(
+        run.out.contains("#49（P2）不是现在该做的")
+            && run.out.contains("#2（P1）")
+            && run.out.contains("--out-of-order"),
+        "拒绝要说清排在前面的是谁、怎么继续：\n{}",
+        run.out
+    );
+
+    let mut with_reason = p2.to_vec();
+    with_reason.extend(["--out-of-order", "前面的都要访问真实大麦，我在云端"]);
+    let run = claims(&priority_fixtures(), PRIORITY_NOW, &with_reason);
+    assert_eq!(run.code, 0, "{}", run.out);
+    assert!(
+        run.out
+            .contains("- 不按顺序: 队列里还有比 P2 高、现在就能做的 #2（P1）")
+            && run.out.contains("；前面的都要访问真实大麦，我在云端"),
+        "放行时要把跳过了谁、为什么写进认领评论：\n{}",
+        run.out
+    );
+}
+
+#[test]
+fn claiming_what_waits_for_the_owner_or_for_another_issue_is_refused() {
+    let claim = |issue: &str, extra: &[&str]| {
+        let mut args = vec![
+            "claim",
+            "--issue",
+            issue,
+            "--agent",
+            "Codex",
+            "--modules",
+            "docs/somewhere",
+        ];
+        args.extend(extra);
+        claims(&priority_fixtures(), PRIORITY_NOW, &args)
+    };
+    let owner = claim("25", &[]);
+    assert_eq!(owner.code, 1, "{}", owner.out);
+    assert!(owner.out.contains("等裁决"), "{}", owner.out);
+    let owner = claim("25", &["--out-of-order", "我觉得可以"]);
+    assert_eq!(owner.code, 1, "等裁决的不能靠理由绕过：{}", owner.out);
+
+    let blocked = claim("54", &[]);
+    assert_eq!(blocked.code, 1, "{}", blocked.out);
+    assert!(
+        blocked.out.contains("它依赖的 #4 还没关"),
+        "{}",
+        blocked.out
+    );
+    let blocked = claim(
+        "54",
+        &["--out-of-order", "#4 已合进 main（fd68bd7），只差验收"],
+    );
+    assert_eq!(blocked.code, 0, "{}", blocked.out);
+    assert!(
+        blocked
+            .out
+            .contains("- 不按顺序: 它依赖的 #4 还没关；#4 已合进 main"),
+        "{}",
+        blocked.out
+    );
+}
+
+#[test]
+fn claiming_an_untriaged_issue_asks_for_its_priority_first() {
+    let untriaged = &[
+        "claim",
+        "--issue",
+        "70",
+        "--agent",
+        "Claude",
+        "--modules",
+        "backend/src/inspect",
+    ];
+    let run = claims(&priority_fixtures(), PRIORITY_NOW, untriaged);
+    assert_eq!(run.code, 1, "{}", run.out);
+    assert!(
+        run.out.contains("#70 还没定优先级") && run.out.contains("scripts/claims triage"),
+        "{}",
+        run.out
+    );
+    let mut with_reason = untriaged.to_vec();
+    with_reason.extend(["--out-of-order", "理由救不了没定级的"]);
+    let run = claims(&priority_fixtures(), PRIORITY_NOW, &with_reason);
+    assert_eq!(run.code, 1, "没定级不是顺序问题，理由绕不过去：{}", run.out);
+}
+
+#[test]
+fn triage_writes_both_axes_and_what_it_replaced() {
+    let triage = |issue: &str, priority: &str| {
+        claims(
+            &priority_fixtures(),
+            PRIORITY_NOW,
+            &[
+                "triage",
+                "--issue",
+                issue,
+                "--agent",
+                "Codex",
+                "--priority",
+                priority,
+                "--important",
+                "测试守不住它名字里的保证",
+                "--urgent",
+                "没有人被它挡住",
+            ],
+        )
+    };
+    let raise = triage("49", "p1");
+    assert_eq!(raise.code, 0, "{}", raise.out);
+    for want in [
+        "## 优先级",
+        "- 优先级: P1（重要，不紧急）",
+        "- 原来: P2",
+        "- 重要: 是。测试守不住它名字里的保证",
+        "- 紧急: 否。没有人被它挡住",
+        "要改的标签：加上 P1，去掉 P2",
+        "没有真的发评论、没有改标签",
+    ] {
+        assert!(raise.out.contains(want), "少了 {want:?}：\n{}", raise.out);
+    }
+    let first = triage("70", "P1");
+    assert!(first.out.contains("- 原来: 没定"), "{}", first.out);
+    assert!(first.out.contains("要改的标签：加上 P1\n"), "{}", first.out);
+
+    let same = triage("2", "P1");
+    assert_eq!(same.code, 0, "{}", same.out);
+    assert!(
+        same.out.contains("#2 已经是 P1") && !same.out.contains("## 优先级"),
+        "已经是这一档就什么都不发：\n{}",
+        same.out
+    );
+    let gone = triage("31", "P1");
+    assert_eq!(gone.code, 1, "{}", gone.out);
+    assert!(gone.out.contains("不在打开的 issue 里"), "{}", gone.out);
+}
+
+#[test]
+fn triage_posts_its_comment_before_it_swaps_the_labels_in_one_edit() {
+    let dir = temp("triage");
+    for entry in std::fs::read_dir(priority_fixtures()).unwrap() {
+        let entry = entry.unwrap();
+        std::fs::copy(entry.path(), dir.join(entry.file_name())).unwrap();
+    }
+    let run = run(claims_with_fake_gh(
+        &dir,
+        &[
+            "triage",
+            "--issue",
+            "49",
+            "--agent",
+            "Codex",
+            "--priority",
+            "P1",
+            "--important",
+            "测试守不住它名字里的保证",
+            "--urgent",
+            "没有人被它挡住",
+            "--now",
+            PRIORITY_NOW,
+        ],
+    ));
+    assert_eq!(run.code, 0, "{}", run.out);
+    let log = std::fs::read_to_string(dir.join("log")).unwrap();
+    assert!(log.contains("comment-49"), "要先发定级评论：{log}");
+    let labels = std::fs::read_to_string(dir.join("labels")).unwrap();
+    assert_eq!(
+        labels.lines().count(),
+        1,
+        "加和去掉在同一次编辑里：{labels}"
+    );
+    assert!(
+        labels.contains("--add-label P1") && labels.contains("--remove-label P2"),
+        "{labels}"
+    );
+    let posted: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("comments-49.json")).unwrap())
+            .unwrap();
+    let last = posted.as_array().unwrap().last().unwrap()["body"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(last.starts_with("## 优先级"), "{last}");
+}
+
 #[test]
 fn forgetting_replay_fails_instead_of_reading_the_real_github() {
     let mut cmd = support::claims(&temp("state"));
@@ -868,6 +1172,31 @@ fn a_wrong_command_line_says_how_to_use_it() {
         vec!["heartbeat", "--issue", "31", "--agent", "Claude"],
         vec!["reclaim"],
         vec!["nonsense"],
+        vec!["triage", "--issue", "49", "--agent", "Codex"],
+        vec![
+            "triage",
+            "--issue",
+            "49",
+            "--agent",
+            "Codex",
+            "--priority",
+            "P5",
+            "--important",
+            "x",
+            "--urgent",
+            "y",
+        ],
+        vec![
+            "triage",
+            "--issue",
+            "49",
+            "--agent",
+            "Codex",
+            "--priority",
+            "P1",
+            "--important",
+            "x",
+        ],
     ] {
         let mut cmd = support::claims(&temp("state"));
         cmd.args(&args);

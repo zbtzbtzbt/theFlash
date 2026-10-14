@@ -65,4 +65,5 @@ theFlash 没有人类架构师，架构由 agent 决定。每个会影响后续�
 | [0012](0012-phone-push.md) | 盯票提醒通过可替换渠道推送，先支持 ntfy | 采用 |
 | [0014](0014-inspection-sample-pool.md) | 巡检样本：不爬列表，靠候选池自愈，补不上就报警 | 采用 |
 | [0015](0015-generated-docs-indexes.md) | docs 的两张索引表由脚本从目录生成，并发 PR 不再碰同一行 | 采用 |
+| [0016](0016-issue-priority.md) | issue 按重要和紧急分成 P0～P3，认领按优先级排队 | 采用 |
 <!-- docs-index:end -->

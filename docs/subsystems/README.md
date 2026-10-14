@@ -16,6 +16,7 @@
 | 按大麦时钟提醒开售、轮询回流 | [盯票：开售提醒和回流提醒](damai-watch.md) |
 | 按 GitHub 事件和本地上限启动隔离的 agent 会话 | [调度程序](dispatch.md) |
 | 浏览器中的本机演出查询 | [本地演出查询界面](event-ui.md) |
+| 每个 issue 是 P0～P3 的哪一档，agent 按什么顺序挑 | [Issue 优先级](issue-priority.md) |
 | 机械核对 PR、审查记录和 CI，并用内核文件锁串行执行获准的合并。 | [合并闸门](merge-gate.md) |
 | 把盯票提醒推到手机 | [手机提醒（ntfy）](phone-push.md) |
 | 推 tag 发布 macOS 和 Linux 的程序 | [发布](release.md) |

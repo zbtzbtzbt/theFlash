@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
-# 认领租约：谁在做哪个 issue、改哪些模块、什么时候过期。开工前先用 list
-# 看一眼，再认领。格式和规则见 docs/subsystems/claim-lease.md，为什么这样
-# 见 docs/decisions/0008-claim-lease.md。
+# 认领租约：谁在做哪个 issue、改哪些模块、什么时候过期。开工前先用 queue
+# 看下一个该做哪个，再认领。租约的格式和规则见 docs/subsystems/claim-lease.md，
+# 优先级和队列见 docs/subsystems/issue-priority.md。
 #
+#   scripts/claims queue [--agent Codex]                    现在能开工的，按 P0～P3 排
+#   scripts/claims triage --issue 49 --agent Claude --priority P2 \
+#       --important "为什么重要或不重要" --urgent "为什么紧急或不紧急"
 #   scripts/claims list                                     进行中的认领
 #   scripts/claims list --json                              同上，给脚本读
 #   scripts/claims claim --issue 16 --agent Claude \

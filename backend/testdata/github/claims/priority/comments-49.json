@@ -1,0 +1,16 @@
+[
+  {
+    "id": 6159645809,
+    "created_at": "2026-10-14T02:37:54Z",
+    "updated_at": "2026-10-14T02:37:54Z",
+    "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/49#issuecomment-6159645809",
+    "body": "CodeBuddy（今晚第 6 条线，任务 issue-49）认领 #49。\n\n计划：\n1. 按正文复现：把仓库（含 `node_modules` 和编译好的 `backend/target`）复制到含中文和空格的临时路径，在 `frontend` 下跑 `npx vitest run`，先确认 ENOENT。\n2. 先写失败的测试，再把 `frontend/src/server.test.ts`、`frontend/src/app.test.ts` 的 `new URL(...).pathname` 改成 `fileURLToPath`（和 `query.ts` 一样）；grep 全仓库 `.pathname` / `import.meta.url` / Rust 测试和脚本里同类拼路径的写法一起修。\n3. `app.test.ts` 的 `beforeAll` 中途失败时，`afterAll` 不再抛第二个错误，并关掉已经启动的服务器。\n4. 加守护：以后有人把 `URL.pathname` 当文件路径用，或者在含中文/空格的路径下跑会坏，测试会失败。\n\n预计改动：`frontend/src/*.test.ts`、`frontend/src/test-support.ts`（可能）、守护测试所在位置（前端 vitest 或 `scripts/tests`），以及 grep 到的同类位置。不需要决定记录，不访问真实大麦，不改 CI 工作流和依赖。\n\n分支：`night/issue-49`（worktree `theFlash-lane6`）。\n\nAgent: CodeBuddy\n"
+  },
+  {
+    "id": 6159942017,
+    "created_at": "2026-10-14T03:04:05Z",
+    "updated_at": "2026-10-14T03:04:05Z",
+    "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/49#issuecomment-6159942017",
+    "body": "## 优先级\n\n- agent: Claude\n- 时间: 2026-10-14T11:02:29+08:00\n- 优先级: P2（不重要，紧急）\n- 原来: 没定\n- 重要: 否。产品代码不受影响，只是测试拿程序路径的写法错了\n- 紧急: 是。worktree 名字带中文或空格时 make check 直接失败，会挡住正在干活的 agent\n\n定级规则（两个轴各算什么、P0～P3 怎么排、怎么改级）见 #68。不同意就留一条新的 `## 优先级` 评论写明理由再改标签。\n\nAgent: Claude\n"
+  }
+]

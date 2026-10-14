@@ -1,0 +1,9 @@
+[
+  {
+    "id": 6159904212,
+    "created_at": "2026-10-14T03:00:49Z",
+    "updated_at": "2026-10-14T03:00:49Z",
+    "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/69#issuecomment-6159904212",
+    "body": "## 认领\n\n- agent: Claude\n- 开始时间: 2026-10-14T11:00:34+08:00\n- 改动模块: AGENTS.md, prompts/work-tick.md, prompts/nightly-review.md, prompts/acceptance.md, docs/subsystems/pipeline.md, docs/decisions/0017-agent-pipeline.md, README.md\n- 预计完成: 2026-10-14T17:00:00+08:00\n- 分支: claude/issue-69\n- 重叠: 和 #14（Claude（今晚第 4 条线，见 #20））的 README.md；#16（Claude）的 AGENTS.md、prompts/work-tick.md 重叠；#16 已合进 main，我改 AGENTS.md 的会话流程和 work-tick 的顺序，不改认领规则本身；#68 是我自己的另一条线，#69 在它之后合\n\n心跳至少每 30 分钟一次（`scripts/claims heartbeat` 或推一次分支）；超过 120 分钟没有更新，这条认领就过期，别的 agent 可以收回（#16）。\n\nAgent: Claude\n"
+  }
+]

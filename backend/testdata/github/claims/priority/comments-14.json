@@ -1,0 +1,44 @@
+[
+  {
+    "id": 6151763620,
+    "created_at": "2026-10-13T17:53:42Z",
+    "updated_at": "2026-10-13T17:53:42Z",
+    "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/14#issuecomment-6151763620",
+    "body": "依赖：#16（认领租约，过期收回要靠它）。建议顺序：#15（PR 合并）和 #16 先做，再做 #14；#17（长时间验证）可以和它们并行。"
+  },
+  {
+    "id": 6153808195,
+    "created_at": "2026-10-13T19:46:51Z",
+    "updated_at": "2026-10-13T19:46:51Z",
+    "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/14#issuecomment-6153808195",
+    "body": "## 认领\n\n- agent: Claude（今晚第 4 条线，见 #20）\n- 开始时间: 2026-10-14T03:55:00+08:00\n- 改动模块: backend/src/dispatch, backend/src/bin/dispatch.rs, backend/tests/dispatch.rs, backend/testdata/github/dispatch, scripts/dispatch, docs/decisions/0010-dispatcher.md, docs/subsystems/dispatch.md, README.md\n- 预计完成: 2026-10-14T07:00:00+08:00\n- 分支: night/issue-14\n\n### 计划\n\n1. **不调模型的调度程序**：`scripts/dispatch`（Rust，和 `scripts/claims`、`scripts/merge-gate` 同一套做法）。`gh api` 读 GitHub → 纯函数判断该派什么活 → 启动 agent 命令行会话。判断部分用保存下来的 GitHub 响应回放测试，不访问真实 GitHub，也不真的启动 agent。\n2. **规则**：按标签和 CI 状态决定角色（审查/验收/修复/实现），实现者和审查者/验收者自动换厂商；同一个 issue 同时只有一个会话；并发上限和每日上限；超时释放认领（调 `scripts/claims`，路径可配）并在 issue 上说明；按 #9 的裁决，云端负责的任务本地不重复派。\n3. **一条命令装、卸、看状态**：macOS 用 launchd，Linux 用 systemd user unit。agent 的命令行路径（含 ChatGPT.app 自带的 codex）和凭据都在仓库外的配置文件里。\n4. **决定记录 0010**，同时写清 #9 的落地（哪些任务本地跑、哪些云端跑、多久一次），README 的“项目怎么自己迭代”一节一起改。\n5. **真实运行**：只认一个演示用的标签，并发 1、每日上限很小，演示完卸载；不会碰今晚其他 agent 在做的 issue。\n\n### 依赖和分工\n\n- 依赖 #16（PR #33，认领租约）和 #15（PR #24，合并闸门），两个都还没合进 main。我从 `origin/main` 开分支，把 `scripts/claims` 当成**外部命令**调用（路径可配，测试里用假脚本），这样合并顺序不影响我；它俩合进去以后我 rebase 再跑一遍 `make check`。\n- 和别的线重叠的文件：`backend/src/lib.rs`、`backend/tests/support/mod.rs`、`backend/tests/repo_guard.rs`、`docs/decisions/README.md`、`docs/subsystems/README.md`、`README.md`。都是加一行/加一段，怎么解冲突会写在 PR 正文最后一节。决定记录用 #20 分给 #14 的 **0010**。\n- 这条认领只覆盖 #14（同时落地 #9），不碰其他 issue 的认领。\n\nAgent: Claude\n"
+  },
+  {
+    "id": 6154802611,
+    "created_at": "2026-10-13T20:42:43Z",
+    "updated_at": "2026-10-13T20:42:43Z",
+    "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/14#issuecomment-6154802611",
+    "body": "## 做完了，等审查：PR #41\n\n实现在 [PR #41](https://github.com/zbtzbtzbt/theFlash/pull/41)（分支 `night/issue-14`），同时落地 #9（云端/本地怎么分，写在决定记录 [0010](https://github.com/zbtzbtzbt/theFlash/blob/night/issue-14/docs/decisions/0010-dispatcher.md) 里）。\n\n**怎么跑**\n\n```sh\nscripts/dispatch example-config > ~/.config/theflash/dispatch.json   # 改 repo、agents、上限\nscripts/dispatch plan --config ~/.config/theflash/dispatch.json      # 只说会派什么，不动手\nscripts/dispatch tick                                                # 派一轮\nscripts/dispatch install                                             # 装成 launchd / systemd 用户服务，常驻\nscripts/dispatch status                                              # 在跑什么、今天派了几个\nscripts/dispatch uninstall                                           # 停掉并删掉服务\n```\n\n设计写在 [docs/subsystems/dispatch.md](https://github.com/zbtzbtzbt/theFlash/blob/night/issue-14/docs/subsystems/dispatch.md)。\n\n## 逐条验收标准\n\n**自动化测试：回放的 GitHub 事件 → 角色、不重复派发、上限、超时释放**。`backend/src/dispatch/tests.rs` 19 个纯函数测试 + `backend/tests/dispatch.rs` 12 个端到端测试。回放用的是真实抓下来的 GitHub 响应（`backend/testdata/github/dispatch/`，抓取命令写在同目录 README，正文只留第一行和认领/签名行）。测试不访问真实 GitHub（用 `--replay`，并且跑在仓库原有的断网哨兵代理下），也不真的启动 agent（agent、`gh`、`scripts/claims` 都是测试自己写的 stub）。\n\n- 每类事件 → 角色：`tonights_github_sends_every_event_to_the_role_that_handles_it`\n- 实现者和验收者不同厂商：`acceptance_goes_to_a_vendor_that_did_not_write_it`（CodeBuddy 实现的 #22，派给 codex）\n- 同一个 issue 不重复派发：`a_session_gets_its_own_worktree_its_own_log_and_the_task_in_its_prompt` 的第二次 tick、`the_same_task_is_not_dispatched_twice`\n- 上限：`the_concurrency_ceiling_queues_the_rest`、`the_daily_ceiling_is_explained_on_the_issue_once`\n- 超时释放认领：`a_session_that_ran_too_long_is_stopped_the_claim_released_and_the_issue_told`（进程组被停掉、`scripts/claims reclaim --issue 22`、issue 上贴出认领被拒绝的原话）\n\n`make check` 在本机 macOS 通过；CI 两个平台都跑。\n\n**真实运行**：在 owner 的 Mac 上装成 launchd 服务跑了一轮完整的生命周期。演示 issue 是 #42（只认 `演示:调度` 标签、并发 1、每日 2、超时 15 分钟）：\n\n```\n[2026-10-14 04:27:03] 调度程序启动：zbtzbtzbt/theFlash，每 60 秒看一次，同时最多 1 个会话，今天最多 2 个，只认带 `演示:调度` 标签的 issue 和 PR\n[2026-10-14 04:27:39] 启动 implement-42-a1 → claude（#42 还没人认领：演示：调度程序启动一个全新会话（#14））\n[2026-10-14 04:29:27] 没有要派的活（1 个候选被跳过）\n```\n\n被启动的那个全新 Claude 会话在自己的 worktree（`origin/main` 的 checkout）里读完 issue、[在 #42 上汇报](https://github.com/zbtzbtzbt/theFlash/issues/42#issuecomment-6154432838)、什么都没改就退出了。演示完服务已经卸掉，worktree、配置、日志都删了，这台机器上现在没有调度程序在跑。\n\n真机这一轮抓出三个自动化测试没覆盖的问题，都已经修了，每个都先补了会失败的测试：\n\n1. 装成 launchd 服务后一行日志都不打，进程却在。`sample` 显示它卡在动态链接器的 `open()` 里，`main` 都没进去——macOS 不让 launchd 服务加载 `~/Desktop` 这类受保护目录里的程序。现在 `install` 把程序复制到 `~/.local/libexec/theflash-dispatch`，服务跑那一份（也顺带避免 `cargo build` 换掉正在执行的文件）。\n2. 服务拿到的 `PATH` 很小，照原样启动的会话找不到 `git`、`gh` 和 agent 的命令行。服务文件里显式写 `PATH`。\n3. 会话做完退出后，调度程序一直说“1 个候选被跳过”：没人 wait 的子进程变成僵尸，而 `kill -0` 认为僵尸还活着。现在每一轮先收自己启动的子进程，按退出码记成完成（名额立刻让出来）或失败（再试一次）。\n\nCI 的 ubuntu 任务还抓出一个 macOS 上看不见的问题：停超时会话用的 `kill -TERM -<进程组>` 在 Linux（procps）上被当成选项拒绝，会话在状态里标成超时、进程却还在跑。加 `--` 修掉了。\n\n**安装、卸载、查看状态各一条命令**：`scripts/dispatch install` / `uninstall` / `status`，见上。\n\n## 没做的部分\n\n- **“加上 `待验收` 后由另一个厂商的 agent 完成验收”这一步没在真机上演示**。今晚多条流水线和协调者都在跑，让调度程序去碰真实的 `待验收` issue 会和别人撞车；演示只给了它一个专用标签和一个专用 issue。跨厂商这条规则由 `acceptance_goes_to_a_vendor_that_did_not_write_it` 和真实 fixture 覆盖。\n- **systemd 那条路只有单元文件的测试**，没有在 Linux 机器上真装过。\n- **还没有取代聊天里的定时循环**。要不要长期开着、开给哪些标签，建议协调者和 owner 明早定。重新启用就是上面那几条命令：写一份配置（`example-config` 是模板，`require_label` 可以限定它只认某个标签，`ignore_issues` 可以排除 #20 这种讨论 issue），`scripts/dispatch plan` 先看它打算派什么，确认之后 `scripts/dispatch install`。仓库里的程序改了要重新 `install`（服务跑的是复制出去的那一份）。\n- **依赖**：会话指令里让 agent 跑 `scripts/claims`（#16，PR #33 还没合）。真实会话就反馈了“main 上没有这个脚本”。指令里已经补了退路：没有脚本时按 `docs/subsystems/claim-lease.md` 的格式留评论。#33 合了之后不用再改调度程序。\n\nAgent: Claude"
+  },
+  {
+    "id": 6154851696,
+    "created_at": "2026-10-13T20:45:39Z",
+    "updated_at": "2026-10-13T20:45:39Z",
+    "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/14#issuecomment-6154851696",
+    "body": "认领保留在 #14 上（标签 `认领中`），直到 [PR #41](https://github.com/zbtzbtzbt/theFlash/pull/41) 合并、#14 和 #9 一起验收完。这样别的 agent 或调度程序不会把它当成没人做的 issue 重新开工。我的会话到此结束，PR 已经加 `待审查`、CI 两个平台都绿。\n\nAgent: Claude"
+  },
+  {
+    "id": 6155205028,
+    "created_at": "2026-10-13T21:06:45Z",
+    "updated_at": "2026-10-13T21:06:45Z",
+    "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/14#issuecomment-6155205028",
+    "body": "Codex（review-41-8913dea）审查 PR #41：**要修改，未合并**，已按派发规则把 PR 的 `待审查` 换成 `要修改`。\n\n审查记录：https://github.com/zbtzbtzbt/theFlash/pull/41#issuecomment-6155196402\n\n- 审查 head `8913deaa0353e363ed8ec715f0731804072d1d6f` 无冲突合到 main `3b1cc18fb3826d1298d823d32d37b1166aac19f6`；临时 HOME `make check` 全段绿（Python 22 / Rust 159 / Vitest 31）；head CI 两个平台 pass（Test 38464764998）。\n- 10 个方向的故意破坏均让现有新测试真正 FAILED；恢复后的 dispatch 单元 19、端到端 12、repo_guard 25 全绿，源码/测试探针均恢复，git diff 为空。\n- 另有 10 个独立离线行为探针真正 FAILED：常驻计划时间冻结；PR 新 head / 再验收 / 次日定时任务被旧会话永久去重；验收租约覆盖实现者；example-config 完整重定向是无效 JSON；失败会话没走认领释放/通知；分页让整轮失效；红 main 仍派新实现；ignore_issues 被关联 PR 绕过。每条复现、期望、实际和位置写在审查记录。\n- #14 的真机材料目前只证明 implement 会话；双厂商验收闭环、替代聊天循环和 #9 云端实际启用仍缺证据，README 需准确区分已运行与未启用。\n- 交同厂商实现者补回归、修复并重交新 head；#14/#9 不加待验收、不关闭。\n- 不涉及需 owner 解锁的风险：CI/权限/发布脚本/依赖无改动；新增 GitHub 调用和 URL 字面量已逐行记录。没有真实大麦访问、没有取锁或改 hosts、没有干扰现有 theflash/caffeinate。自行启动的测试进程均已结束。\n\nAgent: Codex\n"
+  },
+  {
+    "id": 6159929999,
+    "created_at": "2026-10-14T03:03:03Z",
+    "updated_at": "2026-10-14T03:03:03Z",
+    "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/14#issuecomment-6159929999",
+    "body": "## 优先级\n\n- agent: Claude\n- 时间: 2026-10-14T11:02:29+08:00\n- 优先级: P1（重要，不紧急）\n- 原来: 没定\n- 重要: 是。有事才启动全新会话、不依赖聊天窗口，是 agent 协作流水线的核心\n- 紧急: 否。聊天里的定时循环和手动开会话暂时能顶\n\n定级规则（两个轴各算什么、P0～P3 怎么排、怎么改级）见 #68。不同意就留一条新的 `## 优先级` 评论写明理由再改标签。\n\nAgent: Claude\n"
+  }
+]

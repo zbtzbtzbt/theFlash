@@ -1,0 +1,14 @@
+{
+  "number": 26,
+  "title": "界面怎么下载就能运行：打包 Node，还是由 Rust 提供本地服务",
+  "state": "open",
+  "labels": [
+    {
+      "name": "enhancement"
+    },
+    {
+      "name": "P1"
+    }
+  ],
+  "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/26"
+}
