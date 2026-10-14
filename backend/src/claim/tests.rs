@@ -111,6 +111,7 @@ fn prose_about_claiming_is_not_a_claim() {
         "我来做这个，认领了",
         "## 进度\n\n认领: Claude\n",
         "## 收回认领\n\n- 原认领: DemoAgent（u）\n",
+        "认领：\n我来做这个 issue，先看看要改哪里，等会儿用 scripts/claims 正式认领。\n\nAgent: Codex\n",
     ] {
         assert_eq!(
             lease::parse_claim(body, "u", at("2026-10-14T03:00:00+08:00")),
@@ -209,14 +210,15 @@ fn a_lease_expires_after_two_hours_of_silence() {
 
 #[test]
 fn a_heartbeat_or_a_push_pushes_expiry_back() {
-    let beat = "## 心跳\n\n- agent: DemoAgent\n- 进度: 在补测试\n\nAgent: DemoAgent\n";
+    let claim_msg = comment(DEMO_CLAIM, "2026-10-14T03:05:55+08:00");
+    let beat = format!(
+        "## 心跳\n\n- agent: DemoAgent\n- 认领: {}\n- 进度: 在补测试\n\nAgent: DemoAgent\n",
+        claim_msg.url
+    );
     let mut snapshot = Snapshot {
         issues: vec![issue(
             &[lease::CLAIM_LABEL],
-            vec![
-                comment(DEMO_CLAIM, "2026-10-14T03:05:55+08:00"),
-                comment(beat, "2026-10-14T04:30:00+08:00"),
-            ],
+            vec![claim_msg, comment(&beat, "2026-10-14T04:30:00+08:00")],
         )],
         pushes: BTreeMap::new(),
     };
@@ -251,21 +253,27 @@ fn a_heartbeat_or_a_push_pushes_expiry_back() {
 
 #[test]
 fn another_agents_comment_does_not_keep_a_lease_alive() {
+    let claim_msg = comment(DEMO_CLAIM, "2026-10-14T03:05:55+08:00");
+    let other_marked_beat = format!(
+        "## 心跳\n\n- agent: Codex\n- 认领: {}\n- 进度: 路过代报\n\nAgent: Codex\n",
+        claim_msg.url
+    );
     let board = board_of(issue(
         &[lease::CLAIM_LABEL],
         vec![
-            comment(DEMO_CLAIM, "2026-10-14T03:05:55+08:00"),
+            claim_msg,
             comment(
                 "审完了，合并了。\n\nAgent: Codex\n",
-                "2026-10-14T04:30:00+08:00",
+                "2026-10-14T04:20:00+08:00",
             ),
+            comment(&other_marked_beat, "2026-10-14T04:30:00+08:00"),
         ],
     ));
     let held = board.lease(31).unwrap();
     assert_eq!(
         held.last.at,
         at("2026-10-14T03:05:55+08:00"),
-        "别的 agent 的评论不算持有者的心跳"
+        "别的 agent 的评论和 ## 心跳都不算持有者的心跳"
     );
     assert_eq!(
         held.status(at("2026-10-14T05:06:00+08:00")),
@@ -381,6 +389,11 @@ fn a_stale_heartbeat_does_not_refresh_a_new_same_vendor_lease() {
                 "2026-10-14T06:10:00+08:00",
                 4,
             ),
+            comment_id(
+                "## 心跳\n\n- agent: DemoAgent\n- 进度: 没写认领链接的心跳\n",
+                "2026-10-14T06:15:00+08:00",
+                5,
+            ),
         ],
     ));
     let held = board.lease(31).expect("新租约仍在");
@@ -388,7 +401,7 @@ fn a_stale_heartbeat_does_not_refresh_a_new_same_vendor_lease() {
     assert_eq!(
         held.last.at,
         at("2026-10-14T06:09:00+08:00"),
-        "旧租约绑定的迟到心跳不能刷新同厂商的新会话"
+        "旧租约绑定的迟到心跳和没写认领链接的心跳都不能刷新同厂商的新会话"
     );
 }
 
@@ -573,6 +586,10 @@ fn the_comments_the_commands_post_read_back_as_what_they_are() {
         back.contains("DemoAgent") && back.contains("3 小时 4 分钟前"),
         "{back}"
     );
+    assert!(
+        !back.contains("已去掉"),
+        "收回评论在改标签前发出，不能提前声称已去掉标签：{back}"
+    );
 }
 
 #[test]
@@ -602,13 +619,29 @@ fn a_write_up_that_quotes_the_commands_is_a_report_not_a_claim() {
     for quoted in [
         "转一下它发的：\n\n> ## 认领\n> \n> - agent: DemoAgent\n> - 改动模块: docs/demo\n",
         "~~~\n## 认领\n\n- agent: DemoAgent\n- 改动模块: docs/demo\n~~~\n",
+        "贴一下别人发的认领给大家看：\n\n    ## 认领\n\n    - agent: DemoAgent\n    - 改动模块: docs/demo\n\nAgent: Codex\n",
+        "贴一下收回：\n\n    ## 收回认领\n\n    - 原认领: DemoAgent（u）\n\nAgent: Codex\n",
     ] {
         assert_eq!(
             lease::parse_claim(quoted, "u", at("2026-10-14T03:30:00+08:00")),
             None,
             "{quoted:?} 是引用，不是认领"
         );
+        assert!(
+            !lease::is_reclaim(quoted),
+            "{quoted:?} 里的缩进/围栏代码块不能算收回"
+        );
     }
+    assert_eq!(
+        lease::agent_trailer("说明：\n\n    Agent: DemoAgent\n\nAgent: Codex\n"),
+        Some("Codex".to_string()),
+        "4 空格缩进代码块里的 Agent: 签名不算"
+    );
+    assert_eq!(
+        lease::agent_trailer("说明：\n\n    Agent: DemoAgent\n"),
+        None,
+        "只有 4 空格缩进代码块里的 Agent: 签名不算"
+    );
 }
 
 #[test]
@@ -764,6 +797,50 @@ fn a_claim_whose_label_never_made_it_on_still_holds_the_issue() {
     let mut board = Board::default();
     board.include(&issue(&[], vec![]));
     assert!(board.leases.is_empty() && board.trouble.is_empty());
+}
+
+#[test]
+fn non_push_branch_activities_do_not_renew_a_lease() {
+    let dir = std::env::temp_dir().join(format!("claims-unit-activity-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("issues.json"),
+        serde_json::json!([{
+            "number": 31,
+            "title": "测试",
+            "labels": [{"name": lease::CLAIM_LABEL}]
+        }])
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("comments-31.json"),
+        serde_json::json!([{
+            "id": 1,
+            "created_at": "2026-10-13T19:05:55Z",
+            "html_url": "https://github.com/o/r/issues/31#issuecomment-1",
+            "body": DEMO_CLAIM
+        }])
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("branch-demo-claim-lease.json"),
+        serde_json::json!([
+            {"id": 10, "activity_type": "pr_merge", "timestamp": "2026-10-13T21:55:00Z"},
+            {"id": 11, "activity_type": "branch_deletion", "timestamp": "2026-10-13T22:00:00Z"}
+        ])
+        .to_string(),
+    )
+    .unwrap();
+    let snap = Snapshot::replay(&dir).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        !snap.pushes.contains_key("demo/claim-lease"),
+        "pr_merge 和 branch_deletion 不是持有者推送分支：{:?}",
+        snap.pushes
+    );
 }
 
 #[test]

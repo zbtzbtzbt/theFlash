@@ -33,6 +33,9 @@ pub const ASSIGNED_PREFIX: &str = "指派:";
 pub const CLAIM_MARKER: &str = "认领";
 pub const HEARTBEAT_MARKER: &str = "心跳";
 pub const RECLAIM_MARKER: &str = "收回认领";
+/// The heading of the comment a holder (or the dispatcher when a session
+/// ends) posts to release an active lease immediately (#87).
+pub const RELEASE_MARKER: &str = "交还认领";
 /// The heading of the comment an agent posts when its claim lost a race
 /// to an earlier one (#16).
 pub const YIELD_MARKER: &str = "让出认领";
@@ -96,10 +99,25 @@ pub struct Heartbeat {
 
 /// Reads a claim out of a comment body, or `None` when the comment is not
 /// one. A comment is a claim when a line of it is the `认领` heading on
-/// its own, so `## 收回认领` and prose about claiming are not claims.
+/// its own and it carries at least one claim field line (rather than only
+/// the trailing `Agent: <name>` signature on a prose comment, #92), so
+/// `## 收回认领` and prose starting with `认领：` are not claims.
 pub fn parse_claim(body: &str, url: &str, posted_at: DateTime<Utc>) -> Option<Claim> {
     let lines = said(body);
     if !lines.iter().any(|l| is_marker_line(l, CLAIM_MARKER)) {
+        return None;
+    }
+    let has_claim_field = lines
+        .iter()
+        .filter(|l| !is_marker_line(l, CLAIM_MARKER))
+        .any(|l| {
+            let trimmed = l.trim();
+            let has_bullet = trimmed.starts_with(['-', '*', '+']);
+            split_field(l).is_some_and(|(k, v)| {
+                !v.is_empty() && (has_bullet || !k.eq_ignore_ascii_case("agent"))
+            })
+        });
+    if !has_claim_field {
         return None;
     }
     let field = |keys: &[&str]| field(&lines, keys);
@@ -161,7 +179,39 @@ pub fn reclaimed_claim(body: &str) -> Option<String> {
     if !lines.iter().any(|l| is_marker_line(l, RECLAIM_MARKER)) {
         return None;
     }
-    let value = field(&lines, &["原认领", "认领"]);
+    extract_url(&field(&lines, &["原认领", "认领"]))
+}
+
+/// The `- 最后更新:` timestamp a `## 收回认领` comment says it judged
+/// expiry on (#89). If the holder posted a heartbeat or pushed after this
+/// timestamp and before the reclaim comment landed, the reclaim acted on
+/// a stale snapshot.
+pub fn reclaimed_last_update(body: &str) -> Option<DateTime<Utc>> {
+    let lines = said(body);
+    if !lines.iter().any(|l| is_marker_line(l, RECLAIM_MARKER)) {
+        return None;
+    }
+    let raw = field(&lines, &["最后更新"]);
+    let stamp = raw.split(['（', '(', ' ']).next().unwrap_or_default();
+    parse_time(stamp)
+}
+
+/// Whether a comment is a voluntary release (`## 交还认领`) posted by the
+/// holder or the dispatcher when a session ends (#87).
+pub fn is_release(body: &str) -> bool {
+    said(body).iter().any(|l| is_marker_line(l, RELEASE_MARKER))
+}
+
+/// The claim URL a `## 交还认领` comment ends (#87).
+pub fn released_claim(body: &str) -> Option<String> {
+    let lines = said(body);
+    if !lines.iter().any(|l| is_marker_line(l, RELEASE_MARKER)) {
+        return None;
+    }
+    extract_url(&field(&lines, &["认领", "原认领", "交还的认领"]))
+}
+
+fn extract_url(value: &str) -> Option<String> {
     let at = value.find("http")?;
     let url = value[at..]
         .trim_end_matches(|c: char| {
@@ -193,6 +243,8 @@ pub fn yielded_claim(body: &str) -> Option<String> {
 pub(super) fn said(body: &str) -> Vec<&str> {
     let mut out = Vec::new();
     let mut fence: Option<(char, usize)> = None;
+    let mut indented_code = false;
+    let mut prev_blank = true;
     for line in body.lines() {
         let trimmed = line.trim_start();
         match fence {
@@ -203,16 +255,31 @@ pub(super) fn said(body: &str) -> Vec<&str> {
                 let run = fence_run(trimmed, marker);
                 if run >= len && trimmed[run..].trim().is_empty() {
                     fence = None;
+                    prev_blank = true;
                 }
             }
-            None => match ['`', '~'].into_iter().find(|c| {
-                let run = fence_run(trimmed, *c);
-                run >= 3 && (*c != '`' || !trimmed[run..].contains('`'))
-            }) {
-                Some(marker) => fence = Some((marker, fence_run(trimmed, marker))),
-                None if trimmed.starts_with('>') => {}
-                None => out.push(line),
-            },
+            None => {
+                if trimmed.is_empty() {
+                    prev_blank = true;
+                    continue;
+                }
+                let indented = line.starts_with("    ") || line.starts_with('\t');
+                if indented && (prev_blank || indented_code) {
+                    indented_code = true;
+                    prev_blank = false;
+                    continue;
+                }
+                indented_code = false;
+                prev_blank = false;
+                match ['`', '~'].into_iter().find(|c| {
+                    let run = fence_run(trimmed, *c);
+                    run >= 3 && (*c != '`' || !trimmed[run..].contains('`'))
+                }) {
+                    Some(marker) => fence = Some((marker, fence_run(trimmed, marker))),
+                    None if trimmed.starts_with('>') => {}
+                    None => out.push(line),
+                }
+            }
         }
     }
     out

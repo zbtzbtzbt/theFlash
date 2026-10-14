@@ -68,7 +68,7 @@ fn claims(replay: &Path, now: &str, args: &[&str]) -> Run {
 }
 
 fn run(cmd: Command) -> Run {
-    let out = support::output_within(cmd, 30);
+    let out = support::output_within(cmd, 60);
     Run {
         out: format!(
             "{}{}",
@@ -595,31 +595,69 @@ if [ "$1" = api ]; then
   target=""
   for a in "$@"; do case "$a" in repos/*) target="$a";; esac; done
   case "$target" in
-    */issues\?*labels=*) cat "$D/issues.json" ;;
-    */issues\?*) cat "$D/open-issues.json" ;;
+    */issues\?*labels=*)
+      if [ -n "$CLAIMS_FAKE_GH_BOARD_BARRIER" ]; then
+        if [ ! -f "$D/listed.$PPID" ]; then
+          lock
+          body=$(cat "$D/issues.json")
+          : > "$D/listed.$PPID"
+          echo "board-arrive $PPID" >> "$D/log"
+          unlock
+          i=0
+          while [ "$(ls "$D" | grep -c '^listed\.')" -lt 2 ] && [ "$i" -lt 500 ]; do
+            sleep 0.02
+            i=$((i + 1))
+          done
+          printf '%s\n' "$body"
+          exit 0
+        else
+          # Wait until both processes have added their label in `issue edit`
+          # before either process reads the board in `confirm_board_overlap`.
+          i=0
+          while [ "$(ls "$D" | grep -c '^labelled\.')" -lt 2 ] && [ "$i" -lt 500 ]; do
+            sleep 0.02
+            i=$((i + 1))
+          done
+        fi
+      fi
+      lock; body=$(cat "$D/issues.json"); unlock
+      printf '%s\n' "$body" ;;
+    */issues\?*)
+      lock; body=$(cat "$D/open-issues.json"); unlock
+      printf '%s\n' "$body" ;;
     */comments*)
       n=$(printf '%s' "$target" | sed -e 's#.*/issues/##' -e 's#/comments.*##')
+      lock
       if [ -f "$D/comments-$n.json" ]; then body=$(cat "$D/comments-$n.json"); else body='[]'; fi
+      unlock
       # The answer is what the comments were when this process asked, so
       # both processes see the issue as free however the two runs
       # interleave after the barrier lets them go.
       if [ "$n" = "$CLAIMS_FAKE_GH_BARRIER" ] && [ ! -f "$D/arrived.$PPID" ]; then
         : > "$D/arrived.$PPID"
-        echo "arrive-$n $PPID" >> "$D/log"
+        lock; echo "arrive-$n $PPID" >> "$D/log"; unlock
         i=0
         while [ "$(ls "$D" | grep -c '^arrived\.')" -lt 2 ] && [ "$i" -lt 300 ]; do
-          sleep 0.1
+          sleep 0.05
           i=$((i + 1))
         done
       fi
-      echo "read-$n $PPID" >> "$D/log"
+      lock; echo "read-$n $PPID" >> "$D/log"; unlock
       printf '%s\n' "$body" ;;
     */activity*)
+      if [ -n "$CLAIMS_FAKE_GH_FAIL_ACTIVITY" ]; then
+        echo "$CLAIMS_FAKE_GH_FAIL_ACTIVITY" >&2
+        exit 1
+      fi
       b=$(printf '%s' "$target" | sed -e 's#.*refs/heads/##' -e 's#&.*##' -e 's#%2F#/#g' | tr '/' '-')
-      if [ -f "$D/branch-$b.json" ]; then cat "$D/branch-$b.json"; else echo '[]'; fi ;;
+      lock
+      if [ -f "$D/branch-$b.json" ]; then body=$(cat "$D/branch-$b.json"); else body='[]'; fi
+      unlock
+      printf '%s\n' "$body" ;;
     */issues/*)
       n=$(printf '%s' "$target" | sed 's#.*/issues/##')
-      cat "$D/issue-$n.json" ;;
+      lock; body=$(cat "$D/issue-$n.json"); unlock
+      printf '%s\n' "$body" ;;
     *) echo "fake gh: 没想到的请求 $target" >&2; exit 1 ;;
   esac
   exit 0
@@ -698,19 +736,37 @@ def apply_labels(issue):
         if a not in names:
             names.append(a)
     issue["labels"] = [{"name": x} for x in names]
+def write_json(path, obj):
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(obj, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
 p = os.path.join(d, f"issue-{num}.json")
 if os.path.exists(p):
-    data = json.load(open(p))
+    data = json.load(open(p, encoding="utf-8"))
     apply_labels(data)
-    json.dump(data, open(p, "w"), ensure_ascii=False, indent=2)
+    write_json(p, data)
 op = os.path.join(d, "open-issues.json")
 if os.path.exists(op):
-    items = json.load(open(op))
+    items = json.load(open(op, encoding="utf-8"))
     for item in items:
         if item.get("number") == num:
             apply_labels(item)
-    json.dump(items, open(op, "w"), ensure_ascii=False, indent=2)
+    write_json(op, items)
+ip = os.path.join(d, "issues.json")
+if os.path.exists(ip):
+    items = json.load(open(ip, encoding="utf-8"))
+    found = False
+    for item in items:
+        if item.get("number") == num:
+            apply_labels(item)
+            found = True
+    if not found and "认领中" in add and os.path.exists(p):
+        items.append(json.load(open(p, encoding="utf-8")))
+    items = [item for item in items if any(l["name"] == "认领中" for l in item.get("labels", []))]
+    write_json(ip, items)
 PY
+  : > "$D/labelled.$PPID"
   unlock
   exit 0
 fi
@@ -856,7 +912,7 @@ fn a_stale_reclaim_does_not_remove_a_new_leases_label() {
         let entry = entry.unwrap();
         std::fs::copy(entry.path(), dir.join(entry.file_name())).unwrap();
     }
-    let old_url = "https://github.com/zbtzbtzbt/theFlash/issues/31#issuecomment-6153109240";
+    let old_url = "https://github.com/zbtzbtzbt/theFlash/issues/31#issuecomment-6153061966";
     let mut before: Vec<serde_json::Value> =
         serde_json::from_str(&std::fs::read_to_string(dir.join("comments-31.json")).unwrap())
             .unwrap();
@@ -887,6 +943,7 @@ fn a_stale_reclaim_does_not_remove_a_new_leases_label() {
             "2026-10-14T06:10:00+08:00",
         ],
     );
+    cmd.env("CLAIMS_FAKE_GH_CREATED", "2026-10-13T22:10:00Z");
     cmd.env("CLAIMS_FAKE_GH_BEFORE_COMMENT", &injected);
     let run = run(cmd);
     assert_eq!(run.code, 0, "{}", run.out);
@@ -1632,4 +1689,521 @@ fn a_wrong_command_line_says_how_to_use_it() {
             run.out
         );
     }
+}
+
+#[test]
+fn an_indented_code_block_quoting_a_claim_does_not_claim_the_issue() {
+    // Issue #98 reproduction: a comment that pastes someone else's claim
+    // with 4-space indentation is a code block, not a claim.
+    let dir = temp("indented-claim");
+    for entry in std::fs::read_dir(fixtures()).unwrap() {
+        let entry = entry.unwrap();
+        std::fs::copy(entry.path(), dir.join(entry.file_name())).unwrap();
+    }
+    let comments = serde_json::json!([{
+        "id": 1,
+        "created_at": "2026-10-14T00:00:00Z",
+        "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/25#issuecomment-1",
+        "body": "贴一下别人发的认领给大家看：\n\n    ## 认领\n\n    - agent: DemoAgent\n    - 改动模块: docs/demo\n\nAgent: Codex\n"
+    }]);
+    std::fs::write(
+        dir.join("comments-25.json"),
+        serde_json::to_vec_pretty(&comments).unwrap(),
+    )
+    .unwrap();
+    let run = claims(
+        &dir,
+        "2026-10-14T08:10:00+08:00",
+        &[
+            "claim",
+            "--issue",
+            "25",
+            "--agent",
+            "Claude",
+            "--modules",
+            "docs/x",
+        ],
+    );
+    assert_eq!(
+        run.code, 0,
+        "4 空格缩进代码块里的认领是引用，不能占住 #25：\n{}",
+        run.out
+    );
+}
+
+#[test]
+fn a_claim_missing_a_field_can_be_replaced_or_reclaimed_after_expiry() {
+    // Issue #92 reproduction 1 & 2:
+    // (1) Author posts a claim with a typo in the field name (`负责目录`),
+    //     then posts a complete claim 5 minutes later; or after 120 minutes
+    //     another agent reclaims the incomplete claim.
+    // (2) Prose starting with `认领：` and no structured field does not lock
+    //     an unlabelled issue.
+    let dir = temp("missing-field");
+    for entry in std::fs::read_dir(fixtures()).unwrap() {
+        let entry = entry.unwrap();
+        std::fs::copy(entry.path(), dir.join(entry.file_name())).unwrap();
+    }
+    let u = "https://github.com/zbtzbtzbt/theFlash/issues/31#issuecomment-";
+    let only_broken = serde_json::json!([
+        {
+            "id": 1,
+            "created_at": "2026-10-14T00:00:00Z",
+            "html_url": format!("{u}1"),
+            "body": "## 认领\n\n- agent: Codex\n- 负责目录: docs/demo\n\nAgent: Codex\n"
+        }
+    ]);
+    std::fs::write(
+        dir.join("comments-31.json"),
+        serde_json::to_vec_pretty(&only_broken).unwrap(),
+    )
+    .unwrap();
+    // While fresh, another agent cannot reclaim it yet, and the error points
+    // to a real recovery path.
+    let early = claims(
+        &dir,
+        "2026-10-14T08:30:00+08:00",
+        &["reclaim", "--issue", "31", "--agent", "Claude"],
+    );
+    assert_eq!(early.code, 1, "{}", early.out);
+    // After 12 hours, the incomplete claim can be reclaimed.
+    let late_reclaim = claims(
+        &dir,
+        "2026-10-14T20:00:00+08:00",
+        &["reclaim", "--issue", "31", "--agent", "Claude"],
+    );
+    assert_eq!(
+        late_reclaim.code, 0,
+        "缺字段的认领超过 120 分钟没有更新后必须允许 reclaim：\n{}",
+        late_reclaim.out
+    );
+
+    // If the author follows up with a complete claim comment, the complete
+    // claim replaces the author's earlier incomplete one.
+    let followed_up = serde_json::json!([
+        {
+            "id": 1,
+            "created_at": "2026-10-14T00:00:00Z",
+            "html_url": format!("{u}1"),
+            "body": "## 认领\n\n- agent: Codex\n- 负责目录: docs/demo\n\nAgent: Codex\n"
+        },
+        {
+            "id": 2,
+            "created_at": "2026-10-14T00:05:00Z",
+            "html_url": format!("{u}2"),
+            "body": "## 认领\n\n- agent: Codex\n- 改动模块: docs/demo\n\n上一条字段名写错了，补一条。\n\nAgent: Codex\n"
+        }
+    ]);
+    std::fs::write(
+        dir.join("comments-31.json"),
+        serde_json::to_vec_pretty(&followed_up).unwrap(),
+    )
+    .unwrap();
+    let beat = claims(
+        &dir,
+        "2026-10-14T08:20:00+08:00",
+        &[
+            "heartbeat",
+            "--issue",
+            "31",
+            "--agent",
+            "Codex",
+            "--note",
+            "补完认领继续做",
+        ],
+    );
+    assert_eq!(
+        beat.code, 0,
+        "作者补发完整认领后，该认领生效、可以正常心跳：\n{}",
+        beat.out
+    );
+
+    // Reproduction 2: prose comment starting with `认领：` on #25.
+    let prose = serde_json::json!([{
+        "id": 1,
+        "created_at": "2026-10-14T00:00:00Z",
+        "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/25#issuecomment-1",
+        "body": "认领：\n我来做这个 issue，先看看要改哪里，等会儿用 scripts/claims 正式认领。\n\nAgent: Codex\n"
+    }]);
+    std::fs::write(
+        dir.join("comments-25.json"),
+        serde_json::to_vec_pretty(&prose).unwrap(),
+    )
+    .unwrap();
+    for who in ["Codex", "Claude"] {
+        let c = claims(
+            &dir,
+            "2026-10-14T20:00:00+08:00",
+            &[
+                "claim",
+                "--issue",
+                "25",
+                "--agent",
+                who,
+                "--modules",
+                "docs/x",
+            ],
+        );
+        assert_eq!(
+            c.code, 0,
+            "散文第一行写“认领：”但没有任何认领字段时不能锁死 #{who} 的认领：\n{}",
+            c.out
+        );
+    }
+}
+
+#[test]
+fn network_failure_reading_branch_activity_exits_two_instead_of_claiming_no_permission() {
+    // Issue #95 reproduction 1: network error from `gh api .../activity`
+    // must exit 2 ("问 GitHub 要 … 失败"), not exit 0/1 pretending push
+    // permissions are missing.
+    let dir = temp("net-fail");
+    for entry in std::fs::read_dir(fixtures()).unwrap() {
+        let entry = entry.unwrap();
+        std::fs::copy(entry.path(), dir.join(entry.file_name())).unwrap();
+    }
+    let mut list_cmd = claims_with_fake_gh(&dir, &["list", "--now", "2026-10-14T06:10:00+08:00"]);
+    list_cmd.env(
+        "CLAIMS_FAKE_GH_FAIL_ACTIVITY",
+        "error connecting to api.github.com",
+    );
+    let list_run = run(list_cmd);
+    assert_eq!(
+        list_run.code, 2,
+        "断网时 list 应该按取数据失败退出 2，不能把所有租约标成权限不足：\n{}",
+        list_run.out
+    );
+    assert!(
+        list_run.out.contains("问 GitHub 要") && !list_run.out.contains("gh auth status"),
+        "{}",
+        list_run.out
+    );
+
+    let mut reclaim_cmd = claims_with_fake_gh(
+        &dir,
+        &[
+            "reclaim",
+            "--issue",
+            "16",
+            "--agent",
+            "Codex",
+            "--now",
+            "2026-10-14T06:10:00+08:00",
+        ],
+    );
+    reclaim_cmd.env(
+        "CLAIMS_FAKE_GH_FAIL_ACTIVITY",
+        "error connecting to api.github.com",
+    );
+    let reclaim_run = run(reclaim_cmd);
+    assert_eq!(
+        reclaim_run.code, 2,
+        "断网时 reclaim 应该按取数据失败退出 2：\n{}",
+        reclaim_run.out
+    );
+}
+
+#[test]
+fn a_reclaim_that_races_with_a_fresh_heartbeat_does_not_end_the_lease() {
+    // Issue #89 reproduction: holder posts a heartbeat at 22:10:00Z just
+    // before reclaimer's reclaim comment lands at 22:10:05Z.
+    let dir = temp("reclaim-vs-heartbeat");
+    for entry in std::fs::read_dir(fixtures()).unwrap() {
+        let entry = entry.unwrap();
+        std::fs::copy(entry.path(), dir.join(entry.file_name())).unwrap();
+    }
+    let u = "https://github.com/zbtzbtzbt/theFlash/issues/31#issuecomment-";
+    let mut before: Vec<serde_json::Value> =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("comments-31.json")).unwrap())
+            .unwrap();
+    before.push(serde_json::json!({
+        "id": 900,
+        "created_at": "2026-10-13T22:10:00Z",
+        "html_url": format!("{u}900"),
+        "body": format!("## 心跳\n\n- agent: DemoAgent\n- 认领: {u}6153061966\n- 进度: 回来了\n\nAgent: DemoAgent\n")
+    }));
+    let injected = dir.join("heartbeat-lands-first.json");
+    std::fs::write(&injected, serde_json::to_vec_pretty(&before).unwrap()).unwrap();
+
+    let mut cmd = claims_with_fake_gh(
+        &dir,
+        &[
+            "reclaim",
+            "--issue",
+            "31",
+            "--agent",
+            "CodeBuddy",
+            "--now",
+            "2026-10-14T06:10:03+08:00",
+        ],
+    );
+    cmd.env("CLAIMS_FAKE_GH_BARRIER", "none")
+        .env("CLAIMS_FAKE_GH_CREATED", "2026-10-13T22:10:05Z")
+        .env("CLAIMS_FAKE_GH_BEFORE_COMMENT", &injected);
+    let reclaim_run = run(cmd);
+    assert_eq!(
+        reclaim_run.code, 1,
+        "收回前几秒持有者刚发了心跳，收回必须作废并以非 0 退出：\n{}",
+        reclaim_run.out
+    );
+    assert!(
+        !dir.join("labels").exists(),
+        "持有者刚心跳，不能去掉 认领中 标签"
+    );
+    let next_beat = claims(
+        &dir,
+        "2026-10-14T06:30:00+08:00",
+        &[
+            "heartbeat",
+            "--issue",
+            "31",
+            "--agent",
+            "DemoAgent",
+            "--note",
+            "继续做",
+        ],
+    );
+    assert_eq!(
+        next_beat.code, 0,
+        "持有者的租约不能被那条过期判断作废的收回结束：\n{}",
+        next_beat.out
+    );
+}
+
+#[test]
+fn two_agents_claiming_different_issues_with_the_same_module_at_once_do_not_both_succeed() {
+    // Issue #90 reproduction: two agents read the same board at the same
+    // moment and claim #25 and #26 for the same module `docs/race/shared.md`
+    // without `--overlap`.
+    let dir = temp("cross-issue-module-race");
+    for entry in std::fs::read_dir(fixtures()).unwrap() {
+        let entry = entry.unwrap();
+        std::fs::copy(entry.path(), dir.join(entry.file_name())).unwrap();
+    }
+    let mut issue_26: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("issue-25.json")).unwrap()).unwrap();
+    issue_26["number"] = serde_json::json!(26);
+    issue_26["html_url"] = serde_json::json!("https://github.com/zbtzbtzbt/theFlash/issues/26");
+    std::fs::write(
+        dir.join("issue-26.json"),
+        serde_json::to_vec_pretty(&issue_26).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(dir.join("comments-26.json"), "[]\n").unwrap();
+    let mut open: Vec<serde_json::Value> =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("open-issues.json")).unwrap())
+            .unwrap();
+    open.push(serde_json::json!({
+        "number": 26,
+        "title": "issue 26",
+        "state": "open",
+        "labels": [{"name": "P1"}],
+        "body": "",
+        "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/26"
+    }));
+    std::fs::write(
+        dir.join("open-issues.json"),
+        serde_json::to_vec_pretty(&open).unwrap(),
+    )
+    .unwrap();
+
+    let both: Vec<Run> = [("25", "Codex"), ("26", "CodeBuddy")]
+        .iter()
+        .map(|(issue, agent)| {
+            let mut cmd = claims_with_fake_gh(
+                &dir,
+                &[
+                    "claim",
+                    "--issue",
+                    issue,
+                    "--agent",
+                    agent,
+                    "--modules",
+                    "docs/race/shared.md",
+                    "--now",
+                    "2026-10-14T03:20:00+08:00",
+                ],
+            );
+            cmd.env("CLAIMS_FAKE_GH_BARRIER", "none")
+                .env("CLAIMS_FAKE_GH_BOARD_BARRIER", "1");
+            std::thread::spawn(move || run(cmd))
+        })
+        .collect::<Vec<_>>()
+        .into_iter()
+        .map(|t| t.join().unwrap())
+        .collect();
+
+    let winners: Vec<&Run> = both.iter().filter(|r| r.code == 0).collect();
+    let losers: Vec<&Run> = both.iter().filter(|r| r.code == 1).collect();
+    assert_eq!(
+        winners.len(),
+        1,
+        "同时认领不同 issue 但改同一模块且未写分工时，最多只能有一个成功：\n{}\n----\n{}",
+        both[0].out,
+        both[1].out
+    );
+    assert_eq!(losers.len(), 1);
+}
+
+#[test]
+fn an_old_session_whose_claim_was_reclaimed_cannot_refresh_a_new_same_vendor_session() {
+    // Issue #88 reproduction: S1 (Codex) claimed #31, expired, and was
+    // reclaimed; S2 (Codex) claimed #31. When S1 comes back with `--claim`
+    // pointing at S1's old URL, or when an unbound `## 心跳` is posted,
+    // S2's lease is not silently refreshed as S1's.
+    let dir = temp("same-vendor-session");
+    for entry in std::fs::read_dir(fixtures()).unwrap() {
+        let entry = entry.unwrap();
+        std::fs::copy(entry.path(), dir.join(entry.file_name())).unwrap();
+    }
+    let u = "https://github.com/zbtzbtzbt/theFlash/issues/31#issuecomment-";
+    let comments = serde_json::json!([
+        {
+            "id": 1,
+            "created_at": "2026-10-14T00:00:00Z",
+            "html_url": format!("{u}1"),
+            "body": "## 认领\n\n- agent: Codex\n- 改动模块: docs/demo\n"
+        },
+        {
+            "id": 2,
+            "created_at": "2026-10-14T02:05:00Z",
+            "html_url": format!("{u}2"),
+            "body": format!("## 收回认领\n\n- 原认领: Codex（{u}1）\n- 收回者: Claude\n")
+        },
+        {
+            "id": 3,
+            "created_at": "2026-10-14T02:06:00Z",
+            "html_url": format!("{u}3"),
+            "body": "## 认领\n\n- agent: Codex\n- 改动模块: docs/demo\n"
+        }
+    ]);
+    std::fs::write(
+        dir.join("comments-31.json"),
+        serde_json::to_vec_pretty(&comments).unwrap(),
+    )
+    .unwrap();
+
+    // S1 passes its own claim URL (`--claim <u1>`) and is refused because
+    // u1 was already reclaimed and u3 holds the issue now.
+    let s1_beat = claims(
+        &dir,
+        "2026-10-14T10:30:00+08:00",
+        &[
+            "heartbeat",
+            "--issue",
+            "31",
+            "--agent",
+            "Codex",
+            "--claim",
+            &format!("{u}1"),
+            "--note",
+            "S1 还在做",
+        ],
+    );
+    assert_eq!(
+        s1_beat.code, 1,
+        "旧会话 S1 拿着已被收回的认领 URL 心跳时必须被拒绝：\n{}",
+        s1_beat.out
+    );
+
+    // And when S1 tries to claim again, the refusal tells it another
+    // Codex session (`u3`) holds the lease rather than telling S1 to run
+    // heartbeat on its own lease.
+    let s1_claim = claims(
+        &dir,
+        "2026-10-14T10:30:00+08:00",
+        &[
+            "claim",
+            "--issue",
+            "31",
+            "--agent",
+            "Codex",
+            "--modules",
+            "docs/demo",
+        ],
+    );
+    assert_eq!(s1_claim.code, 1, "{}", s1_claim.out);
+    assert!(
+        s1_claim.out.contains(&format!("{u}3")) && s1_claim.out.contains("--claim"),
+        "同厂商认领拒绝要写出当前租约的认领 URL，区分同厂商的不同会话：\n{}",
+        s1_claim.out
+    );
+}
+
+#[test]
+fn a_holder_can_release_its_own_active_lease_immediately() {
+    // Issue #87 reproduction: right after a PR merges or a session finishes,
+    // the lease is still active (< 120 minutes). `claims release` ends the
+    // lease immediately without waiting 2 hours, freeing both the issue and
+    // its modules.
+    let dir = temp("release-active");
+    for entry in std::fs::read_dir(fixtures()).unwrap() {
+        let entry = entry.unwrap();
+        std::fs::copy(entry.path(), dir.join(entry.file_name())).unwrap();
+    }
+    let wrong_agent = claims(
+        &dir,
+        "2026-10-14T03:20:00+08:00",
+        &["release", "--issue", "16", "--agent", "Codex"],
+    );
+    assert_eq!(
+        wrong_agent.code, 1,
+        "不是持有者也不是 dispatcher 时不能主动释放别人的活跃租约：\n{}",
+        wrong_agent.out
+    );
+
+    let wrong_url = claims(
+        &dir,
+        "2026-10-14T03:20:00+08:00",
+        &[
+            "release",
+            "--issue",
+            "16",
+            "--agent",
+            "Claude",
+            "--claim",
+            "https://github.com/zbtzbtzbt/theFlash/issues/16#issuecomment-999",
+        ],
+    );
+    assert_eq!(
+        wrong_url.code, 1,
+        "--claim 不是当前持有的那条 URL 时必须拒绝：\n{}",
+        wrong_url.out
+    );
+
+    let rel = run(claims_with_fake_gh(
+        &dir,
+        &[
+            "release",
+            "--issue",
+            "16",
+            "--agent",
+            "Claude",
+            "--now",
+            "2026-10-14T03:20:00+08:00",
+        ],
+    ));
+    assert_eq!(rel.code, 0, "持有者应该能立即交还活跃租约：\n{}", rel.out);
+
+    // Immediately after release (still at 03:20, 100 minutes before expiry),
+    // another issue (#25) can claim `backend/src/claim/lease.rs` without
+    // `--overlap`.
+    let next = claims(
+        &dir,
+        "2026-10-14T03:21:00+08:00",
+        &[
+            "claim",
+            "--issue",
+            "25",
+            "--agent",
+            "Codex",
+            "--modules",
+            "backend/src/claim/lease.rs",
+        ],
+    );
+    assert_eq!(
+        next.code, 0,
+        "释放租约后模块立即空出来，不再需要 --overlap：\n{}",
+        next.out
+    );
 }

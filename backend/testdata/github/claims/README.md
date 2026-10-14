@@ -53,7 +53,7 @@
 
 `open-issues.json` 里只有一处改过：#7 的 `body` 换成了空串。#7 的正文在描述 `repo_guard` 要找的 Cookie 请求头，原文会让 `repo_guard` 报凭据（误报）；命令只从正文里读依赖行，#7 没有依赖行，所以空串和原文对测试是一样的。没有用白名单放过整个文件，是因为再取一份时，别的 issue 正文里真贴进来的请求头还要能被拦住。
 
-同时认领那条路径（`two_agents_claiming_at_the_same_moment_do_not_both_start`）把 `two-claims/` 复制到临时目录，由测试里的假 `gh` 边回答边追加评论，所以它不需要自己的一套数据。
+同时认领那条路径（`two_sessions_of_the_same_agent_claiming_at_the_same_moment_do_not_both_start`）把 `two-claims/` 复制到临时目录，由测试里的假 `gh` 边回答边追加评论，所以它不需要自己的一套数据。
 
 ## push-vs-commit/
 
