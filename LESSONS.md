@@ -1,4 +1,4 @@
-<!-- reviewed-through: 9dab817 (2026-10-14 14:06 +0800) -->
+<!-- reviewed-through: d490208 (2026-10-14 14:08 +0800) -->
 # 已合并工作的教训
 
 本项目的代码由 agent 编写、审查、合并和发布。每天夜里有一个复盘 agent 检查当天的 commit：哪些改动后来又被返工、哪些不该合并、哪些验证得太薄。学到的东西记在这里。改代码之前先读这份文件。
@@ -146,6 +146,10 @@
 - Seen 1× (2026-10-14)。
 
 ## 合并与关闭
+
+**流水线地图必须只有一份；work-tick 先收尾再开新活；开 issue 前先搜重复。**
+- Done right on 10-14: `d490208`（#69/#105）——`docs/subsystems/pipeline.md` 收拢各站与标签状态机；work-tick 重排（先分清 CI 没启动 vs 真红 → 返工 → 审查 → 验收 → 再认领）；正对当晚漏加待验收、重复账单 issue、绕过闸门等问题。
+- Seen 1× (2026-10-14)。
 
 **并行 PR 改同一函数的不同变量/语义时，文本不冲突也会把 main 编不过；合入前要在最新 main 上重编，不能只看 Git 无冲突。**
 - `e4f0590`（#73）在 `inspect::record` 里 `notes.push`；更早合入的 `d31600e`（#78）已删掉 `notes` 改成 `lost`。两边各自相对当时 main 绿，合起来 `cannot find value notes`（#129）。Done right on 10-14: `de4931d`——分开 lost（失败）与 notes（stderr 说明），并有破坏测试守住 stderr。
