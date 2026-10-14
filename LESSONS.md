@@ -1,4 +1,4 @@
-<!-- reviewed-through: 33ff51a (2026-10-14 18:35 +0800) -->
+<!-- reviewed-through: 233855c (2026-10-14 19:00 +0800) -->
 # 已合并工作的教训
 
 本项目的代码由 agent 编写、审查、合并和发布。每天夜里有一个复盘 agent 检查当天的 commit：哪些改动后来又被返工、哪些不该合并、哪些验证得太薄。学到的东西记在这里。改代码之前先读这份文件。
@@ -35,6 +35,11 @@
 （暂无）
 
 ## 用户的数据和设置
+
+**促销票档必须同时给出票面价、优惠说明和“是否享受以登录账号为准”；不能把部分账号折后价当成普票价。**
+- Done right on 10-14: `233855c`（#179/#182，经闸门）——`hasPromotion` 时用 `dashPrice` + `mktPromotionTips` 拼价格串；无促销一字不变；inspect 声明补字段；改动前 FAIL。
+- 怎么避免：票档 JSON 新增价格相关字段时对照真实促销 fixture；UI/watch/CLI 共用同一 `sku_price`。
+- Seen 1× (2026-10-14)。
 
 **从响应抄进报告 / issue / stderr 的每个字符串都要过报告脱敏；落盘 fixture 与 `repo_guard` 必须共用同一套凭据扫描。**
 - Done right on 10-14: `b4840a1`（#72/#158）——`redact::for_report` 覆盖报告/issue/stderr 出口；候选 fixture 脱敏不能代替这些出口。
@@ -143,6 +148,7 @@
 - Seen 3× (2026-10-14)。
 
 **以某个保证命名的测试，在保证被破坏时必须失败；只断言宽泛的退出码或“文字里有文件名”不算。**
+- #128：`record_says_when_the_page_it_saved_is_one_a_query_cannot_read` 只断言部分文案时，验收指出的 B3b/B4/B5（退出码、落盘文件、notes+lost、风控中断仍保留说明）破坏后仍全绿。Done right on 10-14: `c145bed`（#128/#181，经闸门）——三条跨路径断言；故意弄坏会红。
 - #113：`anything_that_stops_damai_access_ends_the_whole_inspection` 名字说守住停机，实际只打中 `read_page`；把 `read_tiers`/`read_home` 的 `stops_damai_access` 改回只认 `RiskControl` 后全绿。Done right on 10-14: `518e4df`（#113/#155，经闸门）——三出口×四种停机错误 + 首页停机后不再查票档；故意弄坏两处会红。
 - #53（PR #50 / `78b5a4e`）：docs 索引的三个格式守护（缺状态、标题编号、标题里的 `|`）被删掉后，`scripts/tests/test_docs_index.py` 仍全绿——测试只在索引未更新时跑 `--check`，没把破坏后的生成器再跑一遍。
 - #48（#30 / `a5b9169`）：状态样式颜色测试在 happy-dom 里对“有背景色”的断言永远过；删掉整条 `.not-yet-on-sale` 规则仍全绿。同 issue：`browser_event_json_preserves_cli_content` 名字说保留 CLI 内容，实际只比 `report` 字段。
