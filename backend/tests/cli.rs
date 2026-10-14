@@ -600,13 +600,48 @@ fn watch_reports_invalid_request_gap_configuration() {
     assert_invalid_request_gap_configuration(&["watch", "1077137031347"]);
 }
 
+// #83: `risk` only reads and clears this machine's breaker and never asks
+// damai.cn anything, so the request gap does not apply to it. A mistyped
+// THEFLASH_REQUEST_GAP_MS must not be what keeps the user from seeing or
+// clearing a breaker — the unattended validation that sets that variable
+// (0009) is exactly the environment a breaker shows up in. Same values as
+// the three commands above, which do send requests and still refuse.
 #[test]
-fn risk_reports_invalid_request_gap_configuration() {
-    for args in [
-        &["risk"][..],
-        &["risk", "resume"][..],
-        &["risk", "resume", "--yes"][..],
-    ] {
-        assert_invalid_request_gap_configuration(args);
+fn risk_works_with_a_mistyped_request_gap_because_it_sends_nothing() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let damai = MockDamai::start(&[]);
+    let values = ["bad", "86400001", "-1", "18446744073709551616", "", "1.5"]
+        .map(OsString::from)
+        .into_iter()
+        .chain([OsString::from_vec(vec![0xff])]);
+    for value in values {
+        for args in [
+            &["risk"][..],
+            &["risk", "resume"][..],
+            &["risk", "resume", "--yes"][..],
+        ] {
+            // A HOME of its own: these commands write the state directory.
+            let home = support::Home::new("risk-with-bad-gap");
+            let mut cmd = home.theflash(&damai.base_url());
+            cmd.args(args).env("THEFLASH_REQUEST_GAP_MS", &value);
+            let out = support::output_within(cmd, 10);
+            let said = format!("{}{}", stdout(&out), stderr(&out));
+            assert_eq!(
+                out.status.code(),
+                Some(0),
+                "{args:?} 在 THEFLASH_REQUEST_GAP_MS={value:?} 下没有照常执行：{said}"
+            );
+            assert!(
+                said.contains("没有大麦风控熔断"),
+                "{args:?} {value:?}：{said}"
+            );
+            assert!(
+                !said.contains("THEFLASH_REQUEST_GAP_MS"),
+                "{args:?} {value:?} 报了请求间隔的错：{said}"
+            );
+            assert!(damai.hits().is_empty(), "requests: {:?}", damai.hits());
+        }
     }
 }
