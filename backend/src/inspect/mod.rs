@@ -174,12 +174,46 @@ pub struct Report {
     /// revision at damai.cn — a path or a disk — but not a finished run
     /// either, so it is kept apart from `notes` and makes the run fail
     /// (#77).
-    pub unsaved: Vec<String>,
+    pub unsaved: Vec<Unsaved>,
     /// Anything else worth saying that is not a finding about damai.cn.
     pub notes: Vec<String>,
 }
 
+/// A result this run has in hand and could not write down on this
+/// machine. Which one it is decides what the report asks for: a sample
+/// set that did not reach the disk means the next run starts again from
+/// the samples this one was replacing, while a lost candidate response
+/// only means the change has to be fetched again before anyone can
+/// replay it. Answering both with "下一次巡检不会接着这次的样本走" sent
+/// whoever read the report to free a samples path that had just been
+/// written (#125).
+pub enum Unsaved {
+    /// The coverage this run worked out: which event covers each
+    /// situation next time (#77).
+    SampleSet(String),
+    /// One response behind a change, which only damai.cn has now (#77).
+    Candidate(String),
+}
+
+impl Unsaved {
+    /// The line the report prints for it, which already says what is
+    /// missing, where, and what to do about it.
+    fn line(&self) -> &str {
+        match self {
+            Unsaved::SampleSet(line) | Unsaved::Candidate(line) => line,
+        }
+    }
+}
+
 impl Report {
+    /// Whether the coverage this run worked out is gone, which is the one
+    /// loss that changes what the next run checks.
+    fn sample_set_unsaved(&self) -> bool {
+        self.unsaved
+            .iter()
+            .any(|u| matches!(u, Unsaved::SampleSet(_)))
+    }
+
     /// Whether an agent has to look at this run. A situation nothing
     /// covers any more counts: an inspection that quietly stops checking
     /// one of the five situations is the failure #39 was opened for. So
@@ -574,10 +608,7 @@ pub async fn run(client: &Client, opts: &Options) -> Result<Report, Error> {
     if !kept.is_empty()
         && let Err(e) = samples::save(&opts.samples_path, &kept, &at)
     {
-        report.unsaved.push(format!(
-            "样本没保存下来：{e}。这次定下来的样本没有留下，下一次巡检还是按上一次的样本跑；\
-             腾出这个路径，或者用 --samples 指一个能写的文件，再跑一次"
-        ));
+        report.unsaved.push(sample_set_lost(e));
     }
     Ok(report)
 }
@@ -806,15 +837,25 @@ async fn read_home(
     }
 }
 
+/// What a sample set that could not be written down costs: the coverage
+/// this run worked out is gone, so the next run starts again from the
+/// samples this one was replacing.
+fn sample_set_lost(why: String) -> Unsaved {
+    Unsaved::SampleSet(format!(
+        "样本没保存下来：{why}。这次定下来的样本没有留下，下一次巡检还是按上一次的样本跑；\
+         腾出这个路径，或者用 --samples 指一个能写的文件，再跑一次"
+    ))
+}
+
 /// What a candidate response that could not be written down costs: the
 /// change is still reported, but the bytes behind it stayed on damai.cn,
 /// and fetching them again costs another request from the one address
 /// every agent shares.
-fn candidate_lost(why: String) -> String {
-    format!(
+fn candidate_lost(why: String) -> Unsaved {
+    Unsaved::Candidate(format!(
         "候选响应没保存下来：{why}。发现的变化照常在下面，但这份响应没有留在本机，\
          要复现得按报告里的 inspect record 命令重新取一份"
-    )
+    ))
 }
 
 /// Why a response that was fetched is not on disk. The two are told
@@ -1125,7 +1166,7 @@ pub fn render(report: &Report) -> String {
         out.push_str(&format!("说明：{note}\n"));
     }
     for lost in &report.unsaved {
-        out.push_str(&format!("{lost}\n"));
+        out.push_str(&format!("{}\n", lost.line()));
     }
     for (category, why) in &report.uncovered {
         match why {
@@ -1226,11 +1267,20 @@ pub fn render(report: &Report) -> String {
     // damai.cn revision would send whoever reads this looking at the
     // wrong thing, and calling it nothing made a run that kept none of
     // its result exit 0 (#77).
+    // What the loss costs, which is not the same for both kinds: a
+    // report that said the samples were lost when they were written sent
+    // the next agent to free a path that was already fine (#125).
     if !report.unsaved.is_empty() {
         out.push_str(
-            "结论：这次的结果没全部保存下来（见上面那几行）。不是大麦改版，是跑巡检这台机器上的路径或磁盘；\
-             下一次巡检不会接着这次的样本走，修好之后再跑一次。\n",
+            "结论：这次的结果没全部保存下来（见上面那几行）。不是大麦改版，是跑巡检这台机器上的路径或磁盘；",
         );
+        if report.sample_set_unsaved() {
+            out.push_str("下一次巡检不会接着这次的样本走，修好之后再跑一次。\n");
+        } else {
+            out.push_str(
+                "这次定下来的样本写下来了，下一次巡检照常接着它走，缺的是能复现这次变化的那份响应。\n",
+            );
+        }
     }
     out
 }
@@ -1287,12 +1337,24 @@ pub fn issue_body(report: &Report) -> String {
         );
     }
     if !report.unsaved.is_empty() {
-        what_to_do.push_str(&format!(
+        what_to_do.push_str(
             "没保存下来的东西：这是跑巡检那台机器上的路径或磁盘，不是大麦改版。\
-             看报告里那几行说的是哪个位置（样本集在 `{}`），\
-             腾出这个路径或者换一个能写的，再跑一次巡检——这次定下来的样本没有留给下一次。\n\n",
-            report.samples_path.display()
-        ));
+             看报告里那几行说的是哪个位置，腾出这个路径或者换一个能写的。",
+        );
+        // Only a lost sample set makes the next run start over, and only
+        // then is the samples path the thing to fix (#125).
+        if report.sample_set_unsaved() {
+            what_to_do.push_str(&format!(
+                "样本集在 `{}`，再跑一次巡检——这次定下来的样本没有留给下一次。\n\n",
+                report.samples_path.display()
+            ));
+        } else {
+            what_to_do.push_str(&format!(
+                "这次定下来的样本已经写下来了（在 `{}`），下一次巡检照常接着它走，不用动它；\
+                 缺的是上面那份候选响应，按上面的 inspect record 重新取一份就能复现这次的变化。\n\n",
+                report.samples_path.display()
+            ));
+        }
     }
     format!(
         "{lead}\n\n```\n{}```\n\n{what_to_do}这条是 `theflash inspect` 自动写的。\n",
