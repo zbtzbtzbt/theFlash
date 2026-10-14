@@ -1,4 +1,4 @@
-<!-- reviewed-through: 2d9f628 (2026-10-14 15:43 +0800) -->
+<!-- reviewed-through: 518e4df (2026-10-14 15:45 +0800) -->
 # 已合并工作的教训
 
 本项目的代码由 agent 编写、审查、合并和发布。每天夜里有一个复盘 agent 检查当天的 commit：哪些改动后来又被返工、哪些不该合并、哪些验证得太薄。学到的东西记在这里。改代码之前先读这份文件。
@@ -131,6 +131,7 @@
 - Seen 2× (2026-10-14)。
 
 **以某个保证命名的测试，在保证被破坏时必须失败；只断言宽泛的退出码或“文字里有文件名”不算。**
+- #113：`anything_that_stops_damai_access_ends_the_whole_inspection` 名字说守住停机，实际只打中 `read_page`；把 `read_tiers`/`read_home` 的 `stops_damai_access` 改回只认 `RiskControl` 后全绿。Done right on 10-14: `518e4df`（#113/#155，经闸门）——三出口×四种停机错误 + 首页停机后不再查票档；故意弄坏两处会红。
 - #53（PR #50 / `78b5a4e`）：docs 索引的三个格式守护（缺状态、标题编号、标题里的 `|`）被删掉后，`scripts/tests/test_docs_index.py` 仍全绿——测试只在索引未更新时跑 `--check`，没把破坏后的生成器再跑一遍。
 - #48（#30 / `a5b9169`）：状态样式颜色测试在 happy-dom 里对“有背景色”的断言永远过；删掉整条 `.not-yet-on-sale` 规则仍全绿。同 issue：`browser_event_json_preserves_cli_content` 名字说保留 CLI 内容，实际只比 `report` 字段。
 - Done right on 10-14: `dabd956`（#48）——颜色看真实徽标相对无状态类的差、五种两两不同；`event-json` 用多份真实回放按页面字段拼回 CLI 逐字比；presentation 六个“未知”名都查。只改测试与文档。
