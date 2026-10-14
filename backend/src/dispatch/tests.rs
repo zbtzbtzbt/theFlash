@@ -1328,9 +1328,5 @@ fn an_expired_claim_is_offered_for_implement_like_claims_queue() {
         "过期认领应回到 implement 队列最前：{implements:?} / {:?}",
         plan.start
     );
-    assert!(
-        plan.start[0].why.contains("过期"),
-        "{}",
-        plan.start[0].why
-    );
+    assert!(plan.start[0].why.contains("过期"), "{}", plan.start[0].why);
 }
