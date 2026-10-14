@@ -1,6 +1,7 @@
 """The docs index tables are generated; nothing here touches the network or real配置."""
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -12,6 +13,11 @@ REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(SCRIPT.parent))
 # 索引漂移的修复提示。文档本身写得不对时不该出现它：重新生成一遍不会好，要作者改文件。
 from docs_index import FIX as REGENERATE  # noqa: E402
+
+BEGIN = '<!-- docs-index:begin -->'
+END = '<!-- docs-index:end -->'
+# 表格行里指向本目录某份文档的链接，例如 `| [0011](0011-damai-revision-inspection.md) | … |`。
+INDEX_ROW = re.compile(r'^\s*\|.*\]\((?P<target>[^)/]+\.md)\)')
 
 DECISIONS_README = """# 架构决定记录
 
@@ -93,6 +99,20 @@ class Fixture:
             DECISIONS_README.format(table=decisions_table), encoding='utf-8')
         (self.subsystems / 'README.md').write_text(
             SUBSYSTEMS_README.format(table=subsystems_table), encoding='utf-8')
+
+    def readme(self, which):
+        return (self.decisions if which == 'decisions' else self.subsystems) / 'README.md'
+
+    def append_below_the_table(self, which, text):
+        """在生成区之后追加正文，前言和生成区一个字节不动。"""
+        path = self.readme(which)
+        path.write_text(path.read_text(encoding='utf-8') + text, encoding='utf-8')
+
+    def insert_above_the_table(self, which, text):
+        """在 begin 标记之前插入正文。"""
+        path = self.readme(which)
+        original = path.read_text(encoding='utf-8')
+        path.write_text(original.replace(BEGIN, text + BEGIN, 1), encoding='utf-8')
 
     def decisions_index(self):
         return (self.decisions / 'README.md').read_text(encoding='utf-8')
@@ -217,6 +237,98 @@ class Write(unittest.TestCase):
         self.assertTrue(rows[0].startswith('| [0001]'), f'要按编号排序：{rows}')
 
 
+STALE_DECISION_ROW = '| [0002](0002-watch-timing.md) | 盯票的定时和轮询（旧标题） | 采用 |\n'
+STALE_SUBSYSTEM_ROW = '| 从大麦读场次 | [大麦演出信息查询](damai-event.md) |\n'
+
+
+class OutsideTheTable(unittest.TestCase):
+    """索引只在标记之间。生成区已经列了一份文档，区外再出现它就是第二份索引（#80）。
+
+    这正是 union 合并（`.gitattributes`，决定 0015）留下的样子：另一个分支把自己那一行
+    加在它当时的位置，合并后两边的行都保留，旧的那批落到 end 标记之后。`--check` 只比对
+    标记之间的内容，所以 PR #40 带着三行重复索引合进了 main 而检查全绿。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.fixture = Fixture(self.tmp.name)
+
+    def assert_check_reports(self, rel, row):
+        result = run(self.fixture.root, '--check')
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 1, f'生成区外的索引行必须让检查失败：{output}')
+        self.assertIn(rel, output, f'要说是哪份 README：{output}')
+        self.assertIn(row.strip(), output, f'要把区外那一行原样列出来：{output}')
+        self.assertIn(REGENERATE, output, f'这一类跑一次生成就修好，要给出命令：{output}')
+
+    def assert_write_removes(self, which, row, left=0):
+        """生成之后这一行只剩 `left` 处：表头在生成区里还有一份，旧的索引行一处都不剩。"""
+        self.assertEqual(run(self.fixture.root, '--write').returncode, 0, '生成要能收拾干净')
+        text = self.fixture.readme(which).read_text(encoding='utf-8')
+        self.assertEqual(text.count(row.strip()), left,
+                         f'生成区外的索引行要被删掉：{text}')
+        self.assertEqual(run(self.fixture.root, '--check').returncode, 0,
+                         '生成之后检查必须通过')
+
+    def test_a_decision_row_below_the_table_fails(self):
+        self.fixture.append_below_the_table('decisions', STALE_DECISION_ROW)
+        self.assert_check_reports('docs/decisions/README.md', STALE_DECISION_ROW)
+        self.assert_write_removes('decisions', STALE_DECISION_ROW)
+
+    def test_a_subsystem_row_below_the_table_fails(self):
+        self.fixture.append_below_the_table('subsystems', STALE_SUBSYSTEM_ROW)
+        self.assert_check_reports('docs/subsystems/README.md', STALE_SUBSYSTEM_ROW)
+        self.assert_write_removes('subsystems', STALE_SUBSYSTEM_ROW)
+
+    def test_a_row_above_the_table_fails(self):
+        self.fixture.insert_above_the_table('decisions', STALE_DECISION_ROW + '\n')
+        self.assert_check_reports('docs/decisions/README.md', STALE_DECISION_ROW)
+        self.assert_write_removes('decisions', STALE_DECISION_ROW)
+
+    def test_a_second_copy_of_the_header_below_the_table_fails(self):
+        header = '| 编号 | 标题 | 状态 |\n'
+        self.fixture.append_below_the_table('decisions', header)
+        self.assert_check_reports('docs/decisions/README.md', header)
+        self.assert_write_removes('decisions', header, left=1)
+
+    def test_the_whole_stale_table_below_the_table_is_removed(self):
+        # PR #40 合进来的就是这个样子：一整段旧表跟在 end 标记后面。
+        self.fixture.append_below_the_table(
+            'decisions',
+            STALE_DECISION_ROW
+            + '| [0001](0001-damai-event-data-source.md) | 演出信息从大麦详情页获取 | 采用 |\n')
+        self.assert_check_reports('docs/decisions/README.md', STALE_DECISION_ROW)
+        self.assert_write_removes('decisions', STALE_DECISION_ROW)
+        rows = [line for line in self.fixture.decisions_index().splitlines()
+                if line.startswith('| [')]
+        self.assertEqual(len(rows), 2, f'每份记录只剩索引里的那一行：{rows}')
+
+    def test_prose_and_unrelated_tables_around_the_table_are_kept(self):
+        # 正常的前言/后记：带链接的句子、指向记录的行内链接、和索引无关的表格，都要留着。
+        keep = ('\n## 后记\n\n'
+                '最新一条是 [0002](0002-watch-timing.md)，写法见 [前言](#架构决定记录)。\n\n'
+                '| 角色 | 读哪里 |\n| --- | --- |\n'
+                '| 实现者 | [代码规范](../code-standards.md) |\n')
+        self.fixture.append_below_the_table('decisions', keep)
+        result = run(self.fixture.root, '--check')
+        self.assertEqual(result.returncode, 0,
+                         f'前言后记不是索引行，不该报：{result.stdout}{result.stderr}')
+        before = self.fixture.decisions_index()
+        self.assertEqual(run(self.fixture.root, '--write').returncode, 0)
+        self.assertEqual(self.fixture.decisions_index(), before,
+                         '生成不能动标记以外的正文')
+
+    def test_two_begin_markers_are_reported(self):
+        # union 合并也可能把标记本身留下两份，那时「生成区」是哪一段就说不清了。
+        self.fixture.append_below_the_table('decisions', f'\n{BEGIN}\n')
+        for mode in ('--check', '--write'):
+            result = run(self.fixture.root, mode)
+            output = result.stdout + result.stderr
+            self.assertEqual(result.returncode, 1, f'{mode} 要拒绝重复的标记：{output}')
+            self.assertIn('docs-index:begin', output, f'{mode} 要说是哪对标记：{output}')
+
+
 class Malformed(unittest.TestCase):
     """文档本身写得不对，和索引漂移是两回事：漂移跑一下生成就好，这里要作者改文件。
 
@@ -287,6 +399,23 @@ class ThisRepo(unittest.TestCase):
                                 capture_output=True, text=True, cwd=os.sep)
         self.assertEqual(result.returncode, 0,
                          f'仓库里的索引和 docs/ 对不上：{result.stdout}{result.stderr}')
+
+    def test_no_index_row_sits_outside_the_generated_block(self):
+        """两张表各只有一份。这里的判断不走生成器，省得生成器的规则回归时一起失明（#80）。"""
+        for directory in ('decisions', 'subsystems'):
+            readme = REPO / 'docs' / directory / 'README.md'
+            found = []
+            inside = False
+            for number, line in enumerate(readme.read_text(encoding='utf-8').splitlines(), 1):
+                if line.strip() in (BEGIN, END):
+                    inside = line.strip() == BEGIN
+                    continue
+                row = INDEX_ROW.match(line)
+                if not inside and row and (readme.parent / row.group('target')).exists():
+                    found.append(f'第 {number} 行 {line.strip()}')
+            self.assertEqual(found, [],
+                             f'docs/{directory}/README.md 在生成区外还有索引行，'
+                             f'读者会看到两份索引：' + '；'.join(found))
 
     def test_every_decision_record_is_listed(self):
         listed = (REPO / 'docs' / 'decisions' / 'README.md').read_text(encoding='utf-8')

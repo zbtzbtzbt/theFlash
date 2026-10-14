@@ -4,6 +4,8 @@
 
 下面这张表由 [`scripts/docs_index.py`](../../scripts/docs_index.py) 从本目录的文件生成，不要手改：新增一份参考后跑 `make docs-index`，`make check` 会验证表和目录一致（[0015](../decisions/0015-generated-docs-indexes.md)）。表的第一列来自每份参考一级标题下面那行 `> 一句话`，第二列是它的标题。
 
+索引只在下面这对标记之间。标记以外再出现一行指向某份参考的表格行（rebase 或 union 合并容易留下），`make check` 会把它逐行报出来，跑一次 `make docs-index` 删掉；正文和与索引无关的表格不受影响（#80）。
+
 <!-- docs-index:begin -->
 | 子系统 | 参考 |
 | --- | --- |
@@ -19,15 +21,6 @@
 | 推 tag 发布 macOS 和 Linux 的程序 | [发布](release.md) |
 | Mac 上独立于终端的定时验证及 issue 摘要 | [launchd 验证任务](validation.md) |
 <!-- docs-index:end -->
-| 发现大麦改了页面或接口的结构 | [大麦改版巡检](damai-inspect.md) |
-| 谁在做哪个 issue、改哪些模块、认领什么时候过期 | [认领租约](claim-lease.md) |
-| 按大麦时钟提醒开售、轮询回流 | [盯票](damai-watch.md) |
-| 浏览器中的本机演出查询 | [本地演出查询界面](event-ui.md) |
-| 所有大麦请求的频率上限和跨进程风控熔断 | [大麦访问层](damai-access.md) |
-| 推 tag 发布 macOS 和 Linux 的程序 | [发布](release.md) |
-| Mac 上独立于终端的定时验证及 issue 摘要 | [验证任务](validation.md) |
-| 把盯票提醒推到手机 | [手机提醒（ntfy）](phone-push.md) |
-| 有事才启动一个全新 agent 会话 | [调度程序](dispatch.md) |
 
 ## 维护参考文档
 

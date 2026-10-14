@@ -46,6 +46,8 @@ theFlash 没有人类架构师，架构由 agent 决定。每个会影响后续�
 
 下面这张表由 [`scripts/docs_index.py`](../../scripts/docs_index.py) 从本目录的 `NNNN-*.md` 生成，不要手改：写完记录跑 `make docs-index`，`make check` 会验证表和目录一致（[0015](0015-generated-docs-indexes.md)）。标题取自记录的一级标题，状态取自它的 `- 状态：` 那一行。
 
+索引只在下面这对标记之间。标记以外再出现一行指向某份记录的表格行（rebase 或 union 合并容易留下），`make check` 会把它逐行报出来，跑一次 `make docs-index` 删掉；正文和与索引无关的表格不受影响（#80）。
+
 <!-- docs-index:begin -->
 | 编号 | 标题 | 状态 |
 | --- | --- | --- |
@@ -64,6 +66,3 @@ theFlash 没有人类架构师，架构由 agent 决定。每个会影响后续�
 | [0014](0014-inspection-sample-pool.md) | 巡检样本：不爬列表，靠候选池自愈，补不上就报警 | 采用 |
 | [0015](0015-generated-docs-indexes.md) | docs 的两张索引表由脚本从目录生成，并发 PR 不再碰同一行 | 采用 |
 <!-- docs-index:end -->
-| [0011](0011-damai-revision-inspection.md) | 改版巡检：声明程序依赖的字段路径，拿真实响应和它比 | 采用 |
-| [0012](0012-phone-push.md) | 可替换的盯票手机推送，先支持 ntfy | 采用 |
-| [0010](0010-dispatcher.md) | 有事才启动一个全新 agent 会话的常驻调度程序，混合部署 | 采用 |
