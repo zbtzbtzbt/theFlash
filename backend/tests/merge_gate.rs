@@ -594,3 +594,83 @@ fn the_base_fixture_is_the_pull_request_it_claims_to_be() {
     assert!(record.contains(HEAD), "{record}");
     assert!(record.contains(REVIEWED_MAIN), "{record}");
 }
+
+#[test]
+fn merging_marks_linked_issues_for_acceptance_and_posts_the_review_record() {
+    let case = Case::ready("handoff-issues");
+    case.edit("pull.json", |v| {
+        v["title"] = json!("damai: 访问层的 5 处缺陷一起修（#74，#70） (#19)");
+    });
+    let log = case.state().join("gh.log");
+    support::stub(
+        &case.state(),
+        "gh",
+        &format!("printf '%s\\n' \"$*\" >> '{}'\n", log.display()),
+    );
+    let out = support::merge_gate(&case.state())
+        .env("PATH", case.state().join("bin"))
+        .args(["merge", "--pr", "19", "--replay"])
+        .arg(&case.dir)
+        .output()
+        .unwrap();
+    let said = said(&out);
+    assert_eq!(out.status.code(), Some(0), "{said}");
+    let calls = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(
+        calls.contains("issue edit 74 --repo zbtzbtzbt/theFlash --add-label 待验收"),
+        "合并后没有给 #74 加 待验收：{calls}\n{said}"
+    );
+    assert!(
+        calls.contains("issue edit 70 --repo zbtzbtzbt/theFlash --add-label 待验收"),
+        "合并后没有给 #70 加 待验收：{calls}\n{said}"
+    );
+    assert!(
+        !calls.contains("issue edit 19 "),
+        "不该把 PR 自己的编号当成关联 issue：{calls}"
+    );
+    assert!(
+        calls.contains("issue comment 74 --repo zbtzbtzbt/theFlash --body")
+            && calls.contains(HEAD)
+            && calls.contains("issuecomment-6152100000"),
+        "合并后没有在 #74 上评论合入提交和审查记录链接：{calls}"
+    );
+    assert!(
+        calls.contains("issue comment 70 --repo zbtzbtzbt/theFlash --body"),
+        "合并后没有在 #70 上评论：{calls}"
+    );
+}
+
+#[test]
+fn label_failure_after_merge_keeps_exit_zero_and_prints_the_manual_command() {
+    let case = Case::ready("handoff-label-failure");
+    let log = case.state().join("gh.log");
+    support::stub(
+        &case.state(),
+        "gh",
+        &format!(
+            "printf '%s\\n' \"$*\" >> '{}'\n\
+             if [ \"$1\" = \"issue\" ] && [ \"$2\" = \"edit\" ]; then\n\
+               echo 'HTTP 502: Bad Gateway' >&2\n\
+               exit 1\n\
+             fi\n",
+            log.display()
+        ),
+    );
+    let out = support::merge_gate(&case.state())
+        .env("PATH", case.state().join("bin"))
+        .args(["merge", "--pr", "19", "--replay"])
+        .arg(&case.dir)
+        .output()
+        .unwrap();
+    let said = said(&out);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "加标签失败不应改变合并成功的退出码：{said}"
+    );
+    assert!(said.contains("已合并 PR #19"), "应报告 PR 已合并：{said}");
+    assert!(
+        said.contains("gh issue edit 3 --repo zbtzbtzbt/theFlash --add-label 待验收"),
+        "加标签失败应打印补标签的命令：{said}"
+    );
+}

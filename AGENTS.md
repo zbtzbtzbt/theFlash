@@ -72,7 +72,7 @@ theFlash 是大麦网（damai.cn）的抢票程序，一个 AI Native 项目：�
 1. 按 [code-standards 的“合并”](docs/code-standards.md#合并) 审：把 PR 拉下来合到当前 main 上，在结果上跑验收检查，故意弄坏它守护的代码，确认新测试会红。只读 diff 不算审查。
 2. 在 PR 上写一条审查记录评论，格式和字段见 [合并闸门](docs/subsystems/merge-gate.md#审查记录的格式)：被审查的 SHA、合到的 main、审查者、结论、跑了什么。记录写在合并之前，合并后补的记录不算。
 3. 合并：`scripts/merge-gate merge --pr <号>`（或 `scripts/merge-gate queue` 把所有能合的依次合入）。它会重新核对一遍，然后用 `--match-head-commit` 合并被审查的那个提交。被它拒绝时，拒绝信息里写了是哪一条不满足。
-4. 合并后给对应 issue 加 `待验收`。
+4. 合并闸门会自动给 PR 标题里的关联 issue 加 `待验收` 并留评论；确认一下标签已加上。
 5. 合并了或打回了，就按[会话流程第 10 步](#一次会话的流程)删掉自己的审查 worktree。下一轮再审时从最新 main 重新建。
 
 `scripts/merge-gate check --pr <号>` 只核对、不合并，实现者自己也可以跑，看看还差什么。

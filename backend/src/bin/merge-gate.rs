@@ -208,11 +208,43 @@ fn merge_locked(options: &Options, pr: u64) -> ExitCode {
         Ok(out) => {
             print!("{out}");
             println!("已合并 PR #{pr} 的 {}", &sha[..7.min(sha.len())]);
+            hand_off_issues(
+                options.repo(),
+                pr,
+                &snapshot.pull.title,
+                sha,
+                reviewer,
+                record_url,
+            );
             ExitCode::SUCCESS
         }
         Err(e) => {
             eprintln!("{e}");
             ExitCode::FAILURE
+        }
+    }
+}
+
+/// Hands every issue named in the pull request's title over to
+/// acceptance (`待验收`) and leaves the merged commit and review record
+/// on the issue (#102). A label or comment failure never turns a merged
+/// pull request into a failed command: the commit is already on main, so
+/// the caller gets exit 0 and the exact command to finish the handoff by
+/// hand.
+fn hand_off_issues(repo: &str, pr: u64, title: &str, sha: &str, reviewer: &str, record_url: &str) {
+    let comment = merge_gate::issue_merged_comment(pr, sha, reviewer, record_url);
+    for issue in merge_gate::issues_in_title(title, pr) {
+        match snapshot::add_issue_label(repo, issue, merge_gate::ACCEPT_LABEL) {
+            Ok(_) => println!("已给 #{issue} 加上 {}", merge_gate::ACCEPT_LABEL),
+            Err(e) => eprintln!(
+                "给 #{issue} 加 `{}` 标签失败：{e}；请手动补上：\
+                 gh issue edit {issue} --repo {repo} --add-label {}",
+                merge_gate::ACCEPT_LABEL,
+                merge_gate::ACCEPT_LABEL
+            ),
+        }
+        if let Err(e) = snapshot::comment_issue(repo, issue, &comment) {
+            eprintln!("在 #{issue} 上评论合并结果失败：{e}");
         }
     }
 }

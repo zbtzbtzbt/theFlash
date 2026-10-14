@@ -450,3 +450,30 @@ pub fn comment(repo: &str, number: u64, body: &str) -> Result<String, Error> {
         body,
     ])
 }
+
+/// Marks `issue` with `label` (such as `待验收`) after its pull request
+/// merges (#102).
+pub fn add_issue_label(repo: &str, issue: u64, label: &str) -> Result<String, Error> {
+    gh(&[
+        "issue",
+        "edit",
+        &issue.to_string(),
+        "--repo",
+        repo,
+        "--add-label",
+        label,
+    ])
+}
+
+/// Posts `body` as a comment on `issue` after its pull request merges (#102).
+pub fn comment_issue(repo: &str, issue: u64, body: &str) -> Result<String, Error> {
+    gh(&[
+        "issue",
+        "comment",
+        &issue.to_string(),
+        "--repo",
+        repo,
+        "--body",
+        body,
+    ])
+}

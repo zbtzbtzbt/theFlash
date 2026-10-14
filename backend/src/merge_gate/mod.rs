@@ -25,6 +25,45 @@ pub const REQUIRED_CHECKS: [&str; 2] = ["check (ubuntu-latest)", "check (macos-l
 /// Labels that stop a merge no matter what the rest says.
 pub const BLOCKING_LABELS: [&str; 3] = ["要修改", "不要合并", "等 owner"];
 
+/// The label set on every issue a merged pull request names, so the
+/// dispatcher and `claims queue` know the implementation has landed and
+/// now waits for an independent agent to accept it (#102).
+pub const ACCEPT_LABEL: &str = "待验收";
+
+/// Every issue number named as `#<number>` in a pull request title
+/// (such as `（#15）` or `（#14、#9）`), in the order written, without
+/// duplicates or the pull request's own number (#102).
+pub fn issues_in_title(title: &str, pull_number: u64) -> Vec<u64> {
+    let mut out = Vec::new();
+    let chars: Vec<char> = title.chars().collect();
+    for (i, c) in chars.iter().enumerate() {
+        if *c != '#' {
+            continue;
+        }
+        let digits: String = chars[i + 1..]
+            .iter()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        if let Ok(n) = digits.parse::<u64>()
+            && n > 0
+            && n != pull_number
+            && !out.contains(&n)
+        {
+            out.push(n);
+        }
+    }
+    out
+}
+
+/// The comment left on a linked issue after its pull request merges,
+/// citing the reviewed commit and the review record that approved it (#102).
+pub fn issue_merged_comment(pr: u64, sha: &str, reviewer: &str, record_url: &str) -> String {
+    format!(
+        "PR #{pr} 已由合并闸门合入 main（被审查的提交 `{sha}`，审查者 {reviewer}，审查记录：{record_url}），\
+         已加上 `{ACCEPT_LABEL}`，请实现者之外的 agent 按 prompts/acceptance.md 独立验收。"
+    )
+}
+
 /// What the gate decided about one pull request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Decision {
