@@ -1048,3 +1048,115 @@ fn record_takes_personal_data_out_and_refuses_what_it_cannot_clean() {
         "没说清为什么没保存：{stderr}"
     );
 }
+
+/// Everything that stops damai access ends the whole inspection, not just
+/// the event being read: risk control, the breaker another theFlash
+/// process wrote, a breaker that cannot be read, and — the one that
+/// matters most — risk control whose breaker could not be written, where
+/// nothing else is left to stop the next request (#70, #74). Reported as
+/// one event's failure, the run went on to read four more pages and three
+/// tier endpoints, and then called the slider challenge a missing sample.
+#[tokio::test]
+async fn anything_that_stops_damai_access_ends_the_whole_inspection() {
+    type Prepare = fn(&Path);
+    let breaker: Prepare = |dir| {
+        std::fs::write(
+            dir.join("risk-stop.json"),
+            "{\"at\":\"2026-10-14 01:02:03（北京时间）\",\
+             \"url\":\"https://detail.damai.cn/item.htm?id=1\",\
+             \"marker\":\"x5secdata\",\"by\":\"theflash test\",\"pid\":1}",
+        )
+        .unwrap()
+    };
+    let cases: [(&str, Prepare, usize); 4] = [
+        ("风控，熔断记下来了", |_| {}, 1),
+        (
+            "风控，但熔断写不进去",
+            // A directory where the breaker's temporary file goes: the
+            // write fails, while reading the breaker still works.
+            |dir| {
+                std::fs::create_dir(dir.join(format!("risk-stop.json.{}.tmp", std::process::id())))
+                    .unwrap()
+            },
+            1,
+        ),
+        ("别的进程写下的熔断", breaker, 0),
+        (
+            "读不懂的熔断状态",
+            |dir| std::fs::write(dir.join("risk-stop.json"), "{").unwrap(),
+            0,
+        ),
+    ];
+    for (what, prepare, want_hits) in cases {
+        let home = Home::new(&format!("stops-{}", want_hits));
+        let dir = home.path().join("state");
+        std::fs::create_dir_all(&dir).unwrap();
+        prepare(&dir);
+        // Whatever the run asks for, it gets the saved slider challenge.
+        let damai = support::MockDamai::start_bodies(vec![(
+            "/".to_string(),
+            support::fixture("risk_control.html"),
+        )]);
+        let gate = std::sync::Arc::new(
+            theflash::damai::Gate::new(
+                dir.clone(),
+                std::time::Duration::ZERO,
+                std::sync::Arc::new(theflash::damai::SystemClock::default()),
+                "theflash test".into(),
+            )
+            .unwrap(),
+        );
+        let client = theflash::damai::Client::with_gate(damai.base_url(), gate)
+            .unwrap()
+            .with_home(damai.base_url());
+        let opts = theflash::inspect::Options {
+            samples_path: home.path().join("inspect-samples.json"),
+            candidates_dir: None,
+            max_events: 8,
+            gap: std::time::Duration::ZERO,
+        };
+
+        let e = theflash::inspect::run(&client, &opts)
+            .await
+            .err()
+            .unwrap_or_else(|| panic!("{what}：巡检照常结束了"));
+        assert!(e.stops_damai_access(), "{what}：{e}");
+        assert_eq!(
+            damai.hits().len(),
+            want_hits,
+            "{what}：停下之后又请求了大麦 {:?}",
+            damai.hits()
+        );
+    }
+}
+
+/// What the agent running the inspection sees: the command stops, says
+/// the breaker is in effect, and sends nothing.
+#[test]
+fn an_inspection_under_a_breaker_stops_and_says_so() {
+    let home = Home::new("inspect-under-breaker");
+    let dir = home.samples_file().parent().unwrap().to_path_buf();
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("risk-stop.json"),
+        "{\"at\":\"2026-10-14 01:02:03（北京时间）\",\
+         \"url\":\"https://detail.damai.cn/item.htm?id=1\",\
+         \"marker\":\"x5secdata\",\"by\":\"theflash watch\",\"pid\":1}",
+    )
+    .unwrap();
+    let damai = support::MockDamai::start_bodies(unchanged_routes());
+    let out = run(&home, &damai, &[]);
+    let said = String::from_utf8_lossy(&out.stderr).into_owned();
+    let printed = stdout(&out);
+    assert_eq!(out.status.code(), Some(1), "{said}{printed}");
+    assert!(said.contains("风控熔断生效中"), "{said}");
+    // No report: the run stopped, so it has nothing to say about damai.cn's
+    // pages. A report here would be the breaker turned into "this sample
+    // could not be read", which is how #70 hid it.
+    assert_eq!(printed, "", "熔断生效，却照样出了一份巡检报告");
+    assert!(
+        damai.hits().is_empty(),
+        "熔断生效时巡检还在请求大麦：{:?}",
+        damai.hits()
+    );
+}

@@ -41,7 +41,7 @@ impl Client {
     /// state directory, which holds the risk-control breaker, cannot be
     /// used: theFlash does not request damai.cn without it.
     pub fn new(base: impl Into<String>) -> Result<Self, Error> {
-        Client::with_gate(base, Arc::new(Gate::for_user()?))
+        Client::with_gate(base, Gate::for_user()?)
     }
 
     pub fn with_gate(base: impl Into<String>, gate: Arc<Gate>) -> Result<Self, Error> {
@@ -49,6 +49,12 @@ impl Client {
             .user_agent(USER_AGENT)
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(20))
+            // Redirects are followed by hand in `send`, because reqwest
+            // follows them inside one `send()`: the next hop would leave
+            // without a slot of its own and without the breaker being
+            // checked, and a slider challenge redirected to is only
+            // visible in the Location it moved to (#74).
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|e| setup_error(&e))?;
         Ok(Client {
@@ -171,19 +177,12 @@ impl Client {
     /// monotonic clock, the request went out and the answer came back.
     pub async fn clock_reading(&self, item_id: u64) -> Result<ClockReading, Error> {
         let url = format!("{}/item.htm?id={item_id}", self.base);
-        let network = |e: reqwest::Error| Error::Network {
-            url: url.clone(),
-            reason: chain(&e),
-        };
-        self.gate.enter().await?;
-        let sent = Instant::now();
-        let resp = self.http.head(&url).send().await.map_err(network)?;
-        let received = Instant::now();
-        // A slider challenge answers a HEAD with a redirect to its own URL,
-        // so the marker is in the URL rather than a body.
-        if let Some(marker) = risk_control_marker(resp.url().as_str()) {
-            return Err(self.gate.trip(&url, marker));
-        }
+        let Answer {
+            resp,
+            sent,
+            received,
+            ..
+        } = self.send(reqwest::Method::HEAD, &url, None).await?;
         if !resp.status().is_success() {
             return Err(Error::Http {
                 url,
@@ -212,20 +211,15 @@ impl Client {
     }
 
     async fn get(&self, url: &str, referer: Option<&str>) -> Result<String, Error> {
-        let mut req = self.http.get(url);
-        if let Some(r) = referer {
-            req = req.header(reqwest::header::REFERER, r);
-        }
-        let network = |e: reqwest::Error| Error::Network {
-            url: url.to_string(),
+        let answer = self.send(reqwest::Method::GET, url, referer).await?;
+        let status = answer.resp.status();
+        let from = answer.url;
+        let body = answer.resp.text().await.map_err(|e| Error::Network {
+            url: from.clone(),
             reason: chain(&e),
-        };
-        self.gate.enter().await?;
-        let resp = req.send().await.map_err(network)?;
-        let status = resp.status();
-        let body = resp.text().await.map_err(network)?;
+        })?;
         if let Some(marker) = risk_control_marker(&body) {
-            return Err(self.gate.trip(url, marker));
+            return Err(self.gate.trip(&from, marker));
         }
         if !status.is_success() {
             return Err(Error::Http {
@@ -235,6 +229,84 @@ impl Client {
         }
         Ok(body)
     }
+
+    /// One request and the response to it, following damai.cn's redirects
+    /// by hand: every hop waits for its own slot and is refused while the
+    /// breaker is in effect, which is what reqwest's own following would
+    /// skip. A Location carrying a risk marker is the slider challenge
+    /// itself, so it records the breaker instead of being followed — on a
+    /// HEAD, and on a GET whose challenge page says nothing in its body,
+    /// that redirect is the only place the challenge can be seen (#74).
+    async fn send(
+        &self,
+        method: reqwest::Method,
+        url: &str,
+        referer: Option<&str>,
+    ) -> Result<Answer, Error> {
+        let mut at = url.to_string();
+        for _ in 0..=MAX_REDIRECTS {
+            let mut req = self.http.request(method.clone(), at.as_str());
+            if let Some(r) = referer {
+                req = req.header(reqwest::header::REFERER, r);
+            }
+            self.gate.enter().await?;
+            let sent = Instant::now();
+            let resp = req.send().await.map_err(|e| Error::Network {
+                url: at.clone(),
+                reason: chain(&e),
+            })?;
+            let received = Instant::now();
+            let Some(location) = redirect_target(&resp) else {
+                return Ok(Answer {
+                    resp,
+                    url: at,
+                    sent,
+                    received,
+                });
+            };
+            if let Some(marker) = risk_control_marker(&location) {
+                return Err(self.gate.trip(&at, marker));
+            }
+            at = location;
+        }
+        Err(Error::Network {
+            url: url.to_string(),
+            reason: format!("重定向超过 {MAX_REDIRECTS} 次，没有继续跟随"),
+        })
+    }
+}
+
+/// How many redirects one request may follow before theFlash stops. Each
+/// hop costs a slot, and damai.cn's own pages take at most one.
+const MAX_REDIRECTS: usize = 5;
+
+/// What one hop answered.
+struct Answer {
+    resp: reqwest::Response,
+    /// The URL this response came from, which is the last hop followed.
+    url: String,
+    sent: Instant,
+    received: Instant,
+}
+
+/// Where this response says to go next, as an absolute URL, or None when
+/// it is the answer itself. A Location that is not a URL at all is
+/// returned as it came, so a risk marker in it is still seen.
+fn redirect_target(resp: &reqwest::Response) -> Option<String> {
+    if !resp.status().is_redirection() {
+        return None;
+    }
+    let location = resp
+        .headers()
+        .get(reqwest::header::LOCATION)?
+        .to_str()
+        .ok()?;
+    Some(
+        resp.url()
+            .join(location)
+            .map(|u| u.to_string())
+            .unwrap_or_else(|_| location.to_string()),
+    )
 }
 
 /// The error with every cause under it, which is where reqwest says what

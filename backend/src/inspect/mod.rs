@@ -703,7 +703,13 @@ async fn read_page(
     *requests += 1;
     let html = match client.item_page(item_id).await {
         Ok(html) => html,
-        Err(e) if stops_the_run(&e) => return Err(e),
+        // Risk control, the breaker another theFlash process wrote, a
+        // breaker that could not be written and a breaker that cannot be
+        // read all end the whole run without a retry (the owner's rule);
+        // one event's network failure or unreadable page does not. All
+        // four are `stops_damai_access`, so a run cannot keep requesting
+        // because the breaker only failed to be recorded (#70).
+        Err(e) if e.stops_damai_access() => return Err(e),
         Err(e) => {
             return Ok(Fetched {
                 body: None,
@@ -733,7 +739,7 @@ async fn read_tiers(
     *requests += 1;
     let body = match client.tier_page(item_id, perform_id).await {
         Ok(body) => body,
-        Err(e) if stops_the_run(&e) => return Err(e),
+        Err(e) if e.stops_damai_access() => return Err(e),
         Err(e) => {
             return Ok(Fetched {
                 body: None,
@@ -757,17 +763,9 @@ async fn read_home(
     *requests += 1;
     match client.home_page().await {
         Ok(html) => Ok(Ok(samples::item_ids_on_home(&html))),
-        Err(e) if stops_the_run(&e) => Err(e),
+        Err(e) if e.stops_damai_access() => Err(e),
         Err(e) => Ok(Err(e.to_string())),
     }
-}
-
-/// Risk control ends the whole run without a retry (the owner's rule);
-/// one event's network failure or unreadable page does not. #4 replaces
-/// this with `Error::stops_damai_access`, which also covers the breaker
-/// other theFlash processes share.
-fn stops_the_run(e: &Error) -> bool {
-    matches!(e, Error::RiskControl(_))
 }
 
 fn write_candidate(

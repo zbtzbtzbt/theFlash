@@ -11,9 +11,15 @@
 
 mod support;
 
-use std::process::Output;
+use std::process::{Command, Output};
+use std::sync::Arc;
+use std::time::Duration;
 
-use support::{Home, MockDamai};
+use support::{Home, MockDamai, Reply};
+use theflash::damai::{Client, Error, Gate, MIN_REQUEST_GAP, SystemClock};
+
+const ITEM: u64 = 1086791513717;
+const SESSION: u64 = 286937789;
 
 fn out(o: &Output) -> String {
     format!(
@@ -252,6 +258,266 @@ fn every_request_of_one_query_waits_for_the_shared_rate_limit() {
             damai.hits()
         );
     }
+}
+
+/// The four requests theFlash sends to damai.cn. Each one has to go
+/// through the gate, redirects included.
+#[derive(Clone, Copy, Debug)]
+enum Exit {
+    ItemPage,
+    TierPage,
+    HomePage,
+    ClockReading,
+}
+
+impl Exit {
+    fn name(self) -> &'static str {
+        match self {
+            Exit::ItemPage => "详情页",
+            Exit::TierPage => "票档接口",
+            Exit::HomePage => "首页",
+            Exit::ClockReading => "读大麦时钟的 HEAD",
+        }
+    }
+
+    async fn call(self, client: &Client) -> Result<(), Error> {
+        match self {
+            Exit::ItemPage => client.item_page(ITEM).await.map(|_| ()),
+            Exit::TierPage => client.tier_page(ITEM, SESSION).await.map(|_| ()),
+            Exit::HomePage => client.home_page().await.map(|_| ()),
+            Exit::ClockReading => client.clock_reading(ITEM).await.map(|_| ()),
+        }
+    }
+}
+
+/// A client whose breaker lives in `home`, talking to `damai` and nowhere
+/// else: the home page is the same local server, as everywhere in these
+/// tests.
+fn client_at(home: &Home, damai: &MockDamai, gap: Duration) -> (Arc<Gate>, Client) {
+    let gate = Arc::new(
+        Gate::new(
+            home.state_dir(),
+            gap,
+            Arc::new(SystemClock::default()),
+            "theflash test".into(),
+        )
+        .unwrap(),
+    );
+    let client = Client::with_gate(damai.base_url(), gate.clone())
+        .unwrap()
+        .with_home(damai.base_url());
+    (gate, client)
+}
+
+/// damai.cn answers a request with a redirect to its slider challenge
+/// rather than with the challenge in the body of the page asked for. The
+/// hop after it must not be sent: it would leave without a slot and
+/// without the breaker being looked at, and a challenge that redirects to
+/// a page theFlash can read (an event that is gone) would go unrecorded
+/// altogether, leaving the next query free to ask again (#74).
+#[tokio::test]
+async fn a_redirect_to_the_slider_challenge_is_recorded_and_not_followed() {
+    for exit in [
+        Exit::ItemPage,
+        Exit::TierPage,
+        Exit::HomePage,
+        Exit::ClockReading,
+    ] {
+        let home = Home::new(&format!("redirect-challenge-{exit:?}"));
+        // Every request is sent to the challenge; the challenge itself
+        // replays an event that is gone, which says nothing about risk
+        // control in its body.
+        let damai = MockDamai::start_replies(vec![
+            (
+                "_____tmd_____".to_string(),
+                Reply::ok(support::fixture("item_not_found.html")),
+            ),
+            (
+                "/".to_string(),
+                Reply::redirect("/_____tmd_____/punish?x5secdata=sample"),
+            ),
+        ]);
+        let (gate, client) = client_at(&home, &damai, Duration::ZERO);
+
+        let e = exit
+            .call(&client)
+            .await
+            .expect_err(&format!("{}：滑块验证页被当成正常答复", exit.name()));
+        assert!(matches!(e, Error::RiskControl(_)), "{}：{e}", exit.name());
+        assert_eq!(
+            damai.hits().len(),
+            1,
+            "{}：跟着重定向又发了请求 {:?}",
+            exit.name(),
+            damai.hits()
+        );
+
+        let stop = gate
+            .stop()
+            .unwrap()
+            .unwrap_or_else(|| panic!("{}：熔断没有写下来", exit.name()));
+        assert_eq!(stop.marker, "_____tmd_____", "{}", exit.name());
+        assert!(
+            home.risk_stop_file().is_file(),
+            "{}：{} 不在",
+            exit.name(),
+            home.risk_stop_file().display()
+        );
+
+        // And the breaker it wrote stops the next request, which is the
+        // whole point of recording it.
+        let again = exit
+            .call(&client)
+            .await
+            .expect_err(&format!("{}：熔断之后还在放行", exit.name()));
+        assert!(
+            matches!(again, Error::RiskStopped(_)),
+            "{}: {again}",
+            exit.name()
+        );
+        assert_eq!(damai.hits().len(), 1, "{:?}", damai.hits());
+    }
+}
+
+/// An ordinary redirect is still followed — damai.cn moves a page and the
+/// query has to arrive — but each hop waits for its own slot, measured
+/// where it counts: when the request reaches the server.
+#[tokio::test]
+async fn an_ordinary_redirect_is_followed_one_slot_at_a_time() {
+    let home = Home::new("redirect-paced");
+    let damai = MockDamai::start_replies(vec![
+        (
+            "/item.htm?id=1086791513717&spm=moved".to_string(),
+            Reply::ok(support::fixture("item_on_sale.html")),
+        ),
+        (
+            "/item.htm?id=1086791513717".to_string(),
+            Reply::redirect("/item.htm?id=1086791513717&spm=moved"),
+        ),
+    ]);
+    let (_gate, client) = client_at(&home, &damai, MIN_REQUEST_GAP);
+
+    let html = client.item_page(ITEM).await.expect("重定向后没拿到页面");
+    assert!(html.contains("dataDefault"), "拿到的不是详情页");
+    assert_eq!(damai.hits().len(), 2, "{:?}", damai.hits());
+    let least = MIN_REQUEST_GAP.as_millis() as i64 - 50;
+    let gaps = damai.arrival_gaps_ms();
+    assert!(
+        gaps[0] >= least,
+        "重定向的下一跳只隔了 {} 毫秒（至少 {least}）：它没有排队{:?}",
+        gaps[0],
+        damai.hits()
+    );
+}
+
+/// Redirects that never arrive anywhere stop, instead of spending the
+/// whole run's requests on them.
+#[tokio::test]
+async fn a_redirect_that_never_lands_stops_after_a_few_hops() {
+    let home = Home::new("redirect-loop");
+    let mut routes: Vec<(String, Reply)> = (1..=6)
+        .map(|n| {
+            (
+                format!("/hop{n}"),
+                Reply::redirect(format!("/hop{}", n + 1)),
+            )
+        })
+        .collect();
+    routes.push(("/item.htm".to_string(), Reply::redirect("/hop1")));
+    let damai = MockDamai::start_replies(routes);
+    let (_gate, client) = client_at(&home, &damai, Duration::ZERO);
+
+    let e = client
+        .item_page(ITEM)
+        .await
+        .expect_err("一直重定向却说拿到了页面");
+    assert!(
+        e.to_string().contains("重定向超过"),
+        "没说是重定向停下的：{e}"
+    );
+    assert_eq!(
+        damai.hits().len(),
+        6,
+        "跟随的次数不是说好的那么多：{:?}",
+        damai.hits()
+    );
+}
+
+const TWO_CLIENTS_PROBE: &str = "two_default_clients_in_one_process_probe";
+
+/// Two default clients in one process, which is what a command that
+/// builds one for a query and one for a watch has. Ignored: the test
+/// below runs it in a process whose HOME is a temporary directory, so the
+/// breaker it builds is never the real user's.
+#[test]
+#[ignore = "run by two_default_clients_in_one_process_share_one_rate_limit"]
+fn two_default_clients_in_one_process_probe() {
+    let damai = on_sale();
+    let left = Client::new(damai.base_url()).expect("第一个默认客户端没建起来");
+    let right = Client::new(damai.base_url()).expect("第二个默认客户端没建起来");
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let (a, b) = rt.block_on(async { tokio::join!(left.item_page(ITEM), right.item_page(ITEM)) });
+    a.expect("第一个客户端的请求失败");
+    b.expect("第二个客户端的请求失败");
+    assert_eq!(damai.hits().len(), 2, "{:?}", damai.hits());
+    let least = MIN_REQUEST_GAP.as_millis() as i64 - 50;
+    let gaps = damai.arrival_gaps_ms();
+    assert!(
+        gaps[0] >= least,
+        "同一个进程里两个默认客户端的请求只隔了 {} 毫秒（至少 {least}）：\
+         它们各有一份预算，绕开了共用的频率上限",
+        gaps[0]
+    );
+}
+
+/// However many clients a process builds the default way, damai.cn sees
+/// one process's rate (#74). The probe above runs in a process of its
+/// own, because the gate every default client shares is built once per
+/// process and reads HOME.
+#[test]
+fn two_default_clients_in_one_process_share_one_rate_limit() {
+    let home = Home::new("two-default-clients");
+    let mut cmd = Command::new(std::env::current_exe().unwrap());
+    cmd.args(["--ignored", "--exact", TWO_CLIENTS_PROBE, "--nocapture"]);
+    // The same tripwire and empty state directory every test runs under,
+    // with a HOME of this test's own: the probe writes a breaker there.
+    support::offline(&mut cmd);
+    cmd.env("HOME", home.path());
+    cmd.env_remove("XDG_STATE_HOME");
+    let o = support::output_within(cmd, 60);
+    assert!(o.status.success(), "{}", out(&o));
+}
+
+/// The lock file an earlier run left behind opens for writing even after
+/// the directory has become read-only, and the breaker is a new file next
+/// to it: without really writing one, theFlash sends its requests and
+/// only finds out when risk control arrives (#74).
+#[test]
+fn a_state_directory_that_only_looks_writable_stops_queries_before_any_request() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = Home::new("read-only-state-dir");
+    let dir = home.state_dir();
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("risk-stop.lock"), b"").unwrap();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let writable_anyway = std::fs::write(dir.join("by-root"), b"").is_ok();
+    let damai = on_sale();
+    let o = run(&home, &damai.base_url(), &["event", "1086791513717"]);
+    let text = out(&o);
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    if writable_anyway {
+        eprintln!("跳过：这个用户（root？）连只读目录也能写，看不出区别");
+        return;
+    }
+    assert!(!o.status.success(), "只读的状态目录下照样查询了：{text}");
+    assert!(text.contains("读不到大麦风控熔断状态"), "{text}");
+    assert!(text.contains(&dir.display().to_string()), "{text}");
+    assert!(text.contains("已停止"), "{text}");
+    assert!(
+        damai.hits().is_empty(),
+        "熔断写不进去还在请求大麦：{:?}",
+        damai.hits()
+    );
 }
 
 #[test]
