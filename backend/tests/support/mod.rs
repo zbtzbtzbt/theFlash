@@ -287,6 +287,48 @@ impl Drop for Home {
     }
 }
 
+/// The dispatch binary with nothing to reach GitHub or an agent with:
+/// PATH is `home/bin`, which a test fills with the stubs it wants, so a
+/// test that forgets `--replay` fails instead of asking the real GitHub,
+/// and no session is ever started by a real agent command line. Every
+/// test that starts dispatch goes through here.
+pub fn dispatch(home: &std::path::Path) -> Command {
+    let mut c = Command::new(env!("CARGO_BIN_EXE_dispatch"));
+    std::fs::create_dir_all(home.join("bin")).unwrap();
+    c.env("PATH", home.join("bin"));
+    c.env("HOME", home);
+    offline(&mut c);
+    c
+}
+
+/// Writes an executable stub named `name` into the PATH `dispatch` uses,
+/// so a test sees what the dispatcher asked a `gh`, `scripts/claims` or
+/// agent command line to do, without any of them being real.
+pub fn stub(home: &std::path::Path, name: &str, script: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = home.join("bin").join(name);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
+/// Makes a real tool from this machine (`git`) reachable through the
+/// test's PATH, for the paths that genuinely need it.
+pub fn real_tool(home: &std::path::Path, name: &str) {
+    let out = Command::new("sh")
+        .arg("-c")
+        .arg(format!("command -v {name}"))
+        .output()
+        .unwrap();
+    let found = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    assert!(!found.is_empty(), "这台机器上找不到 {name}");
+    let link = home.join("bin").join(name);
+    std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+    let _ = std::fs::remove_file(&link);
+    std::os::unix::fs::symlink(found, link).unwrap();
+}
+
 /// Makes `cmd` unable to reach the real damai.cn or the real user's files:
 /// its proxies become a tripwire, and only this machine's addresses skip
 /// the proxy. A test that forgets THEFLASH_DAMAI_BASE_URL sends its request

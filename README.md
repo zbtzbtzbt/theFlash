@@ -16,6 +16,7 @@ theFlash 从架构设计到编码、测试、审查、发布，全部由 AI agen
 - **白天**：agent 按 [prompts/work-tick.md](prompts/work-tick.md) 定时跑一轮，优先修红的 CI，再发版、审 PR、处理 issue。每个改动都要带一个“没有它就会失败”的测试，并在 commit 正文写明跑了什么、没试什么。
 - **合并**：所有改动走 PR。另一个 agent 审查并在 PR 上写审查记录，再由 [合并闸门](docs/subsystems/merge-gate.md) 核对 CI、审查记录和被审查的提交对不对得上，全对上才合入，同一时间只合一个。闸门不调用模型。
 - **验收**：合并后给 issue 加上 `待验收` 标签，由第三个 agent 按 [prompts/acceptance.md](prompts/acceptance.md) 在真实环境里独立验证，通过才关闭。
+- **可选调度器**：[调度程序](docs/subsystems/dispatch.md) 可以按 GitHub 事件在本机启动独立 agent 会话；云端任务和跨厂商闭环仍需另行配置、验证。
 - **夜里**：复盘 agent 按 [prompts/nightly-review.md](prompts/nightly-review.md) 检查当天的 commit，把出错的地方写进 [LESSONS.md](LESSONS.md)。同一条教训出现在 3 个不同的日子，就升级进 [docs/code-standards.md](docs/code-standards.md)；能机械判断的规则写成 CI 检查或守护测试。
 - **CI**：每次 push 都在 Linux 和 macOS 上跑 `make check`。只有 CI 跑完并且是绿的 commit 才能发版。
 

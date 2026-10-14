@@ -1,0 +1,11 @@
+[
+  {
+    "number": 22,
+    "title": "block-damai-hosts.sh 写进 /etc/hosts 后没有撤销办法，在 owner 的 Mac 上跑会挡住浏览器验证",
+    "labels": [
+      {
+        "name": "验收未通过"
+      }
+    ]
+  }
+]

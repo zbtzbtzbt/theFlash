@@ -1,0 +1,238 @@
+[
+  {
+    "number": 38,
+    "title": "prompts: 判断 main 红不红只看 Test 工作流，被拒绝的 Release run 不算（#5）",
+    "labels": [
+      {
+        "name": "待审查"
+      }
+    ],
+    "pull_request": {
+      "url": "https://api.github.com/repos/zbtzbtzbt/theFlash/pulls/38"
+    }
+  },
+  {
+    "number": 37,
+    "title": "Linux 上没有 CA 证书时，提示是“网络请求失败（）：builder error…”，看不出要装 ca-certificates",
+    "labels": [
+      {
+        "name": "bug"
+      }
+    ]
+  },
+  {
+    "number": 36,
+    "title": "tests, scripts: 凭据跨行或写成函数参数、fixture 和配置里的大麦域名、绕开 support 启动程序，守护测试都会报出来（#21）",
+    "labels": [
+      {
+        "name": "待审查"
+      }
+    ],
+    "pull_request": {
+      "url": "https://api.github.com/repos/zbtzbtzbt/theFlash/pulls/36"
+    }
+  },
+  {
+    "number": 35,
+    "title": "frontend tests: 四类界面回归会触发测试失败（#30）",
+    "labels": [
+      {
+        "name": "待审查"
+      }
+    ],
+    "pull_request": {
+      "url": "https://api.github.com/repos/zbtzbtzbt/theFlash/pulls/35"
+    }
+  },
+  {
+    "number": 34,
+    "title": "前端和 Python 测试不在 make check 的死代理下，没有守护要求它们接上陷阱",
+    "labels": [
+      {
+        "name": "enhancement"
+      }
+    ]
+  },
+  {
+    "number": 33,
+    "title": "claim: 一条命令就能看到谁在做哪个 issue、改哪些模块、过期了没有（#16）",
+    "labels": [
+      {
+        "name": "待审查"
+      }
+    ],
+    "pull_request": {
+      "url": "https://api.github.com/repos/zbtzbtzbt/theFlash/pulls/33"
+    }
+  },
+  {
+    "number": 32,
+    "title": "watch: 开售和回流提醒可通过 ntfy 推到手机（#11）",
+    "labels": [],
+    "pull_request": {
+      "url": "https://api.github.com/repos/zbtzbtzbt/theFlash/pulls/32"
+    }
+  },
+  {
+    "number": 30,
+    "title": "浏览器界面的测试没有守住它们名字里的保证：界面显示和 CLI 不一致、去掉 Host 校验、断开后子进程不停，测试都不变红",
+    "labels": [
+      {
+        "name": "bug"
+      }
+    ]
+  },
+  {
+    "number": 28,
+    "title": "damai: 任何一个进程触发风控，其他进程也停下，所有请求共用一个频率上限（#4）",
+    "labels": [],
+    "pull_request": {
+      "url": "https://api.github.com/repos/zbtzbtzbt/theFlash/pulls/28"
+    }
+  },
+  {
+    "number": 26,
+    "title": "界面怎么下载就能运行：打包 Node，还是由 Rust 提供本地服务",
+    "labels": [
+      {
+        "name": "enhancement"
+      }
+    ]
+  },
+  {
+    "number": 25,
+    "title": "macOS 程序要不要做签名和公证（要花钱，需要 owner 裁决）",
+    "labels": [
+      {
+        "name": "question"
+      }
+    ]
+  },
+  {
+    "number": 24,
+    "title": "merge-gate: 合并只在 CI 绿、有独立审查记录、审查的就是这个提交时才发生（#15、#13）",
+    "labels": [
+      {
+        "name": "要修改"
+      }
+    ],
+    "pull_request": {
+      "url": "https://api.github.com/repos/zbtzbtzbt/theFlash/pulls/24"
+    }
+  },
+  {
+    "number": 23,
+    "title": "validation: 定时验证由 launchd 独立运行并自动评论结果（#17）",
+    "labels": [],
+    "pull_request": {
+      "url": "https://api.github.com/repos/zbtzbtzbt/theFlash/pulls/23"
+    }
+  },
+  {
+    "number": 21,
+    "title": "repo_guard 的凭据扫描和大麦域名清单有覆盖盲区",
+    "labels": [
+      {
+        "name": "enhancement"
+      }
+    ]
+  },
+  {
+    "number": 20,
+    "title": "今晚的并行开发：分工、决定记录编号和规则（2026-10-14 夜）",
+    "labels": []
+  },
+  {
+    "number": 17,
+    "title": "长时间真实验证和定时验证改成 launchd 任务，结果自动贴到 issue",
+    "labels": [
+      {
+        "name": "enhancement"
+      }
+    ]
+  },
+  {
+    "number": 16,
+    "title": "认领改成带过期时间的租约，并写明要改哪些模块",
+    "labels": [
+      {
+        "name": "enhancement"
+      },
+      {
+        "name": "认领中"
+      }
+    ]
+  },
+  {
+    "number": 15,
+    "title": "所有改动走 PR，由合并脚本按 CI 和独立审查记录合并，排队依次合入",
+    "labels": [
+      {
+        "name": "enhancement"
+      }
+    ]
+  },
+  {
+    "number": 14,
+    "title": "调度程序：有事才启动一个全新的 agent 会话，替代聊天窗口里的定时循环",
+    "labels": [
+      {
+        "name": "enhancement"
+      },
+      {
+        "name": "认领中"
+      }
+    ]
+  },
+  {
+    "number": 13,
+    "title": "流程: PR #12 在独立审查记录前已合并",
+    "labels": []
+  },
+  {
+    "number": 11,
+    "title": "盯票的开售和回流提醒也能推送到手机上",
+    "labels": [
+      {
+        "name": "enhancement"
+      }
+    ]
+  },
+  {
+    "number": 10,
+    "title": "大麦改版时第一时间发现：每天巡检真实页面结构，变了就自动开 issue",
+    "labels": [
+      {
+        "name": "enhancement"
+      }
+    ]
+  },
+  {
+    "number": 9,
+    "title": "让工作循环、验收、夜间复盘和改版巡检定时自动跑（需要 owner 裁决）",
+    "labels": []
+  },
+  {
+    "number": 8,
+    "title": "统计电脑版不卖的演出占多少，看清只在 App 卖的演出能不能拿到场次和票档",
+    "labels": [
+      {
+        "name": "enhancement"
+      }
+    ]
+  },
+  {
+    "number": 4,
+    "title": "所有访问大麦的请求共用一个频率上限，任何进程触发风控，其他进程也停止",
+    "labels": [
+      {
+        "name": "enhancement"
+      }
+    ]
+  },
+  {
+    "number": 2,
+    "title": "盯住一场演出，开售或有票时立刻提醒",
+    "labels": []
+  }
+]

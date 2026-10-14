@@ -2,6 +2,7 @@
 
 pub mod claim;
 pub mod damai;
+pub mod dispatch;
 pub mod inspect;
 pub mod merge_gate;
 pub mod presentation;
