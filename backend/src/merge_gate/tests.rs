@@ -349,6 +349,202 @@ fn a_sha_is_shortened_the_way_git_log_shows_it() {
     assert_eq!(short(""), "");
 }
 
+#[test]
+fn an_unaddressed_change_request_on_the_same_head_blocks_another_reviewers_pass() {
+    // PR #127 (#160): two independent reviewers (`GPT` and `Codex`) reviewed
+    // the same head `aa6a8cf2f72de427f7e9a631211705101232bdf3` on the same
+    // main `a9f06c92bfa4a4e7be6705b6faa89f9b1921690d`. One passed and one
+    // asked for changes (`要修改`). Whichever record arrived first, and even
+    // if the implementer (`Claude`) replies on the PR afterwards, the gate
+    // must refuse until either a new head is pushed or the reviewer who
+    // asked for changes (`Codex`) posts a newer `通过` on this head.
+    const PR127_HEAD: &str = "aa6a8cf2f72de427f7e9a631211705101232bdf3";
+    const PR127_MAIN: &str = "a9f06c92bfa4a4e7be6705b6faa89f9b1921690d";
+    const GPT_URL: &str = "https://github.com/zbtzbtzbt/theFlash/pull/127#issuecomment-6162457432";
+    const CODEX_URL: &str =
+        "https://github.com/zbtzbtzbt/theFlash/pull/127#issuecomment-6162458297";
+
+    let make_record = |reviewer: &str, verdict: &str, sha: &str, url: &str, time: &str| {
+        record::parse(
+            &format!(
+                "## 审查记录\n\n\
+                 - 被审查的 SHA: {sha}\n\
+                 - 合到的 main: {PR127_MAIN}\n\
+                 - 审查者: {reviewer}\n\
+                 - 结论: {verdict}\n\
+                 - 跑了什么: 临时 HOME 下完整 make check\n"
+            ),
+            url,
+            at(time),
+        )
+        .expect("审查记录应能解析")
+    };
+
+    let snapshot = |head: &str, commits: Vec<Commit>, records: Vec<ReviewRecord>| Snapshot {
+        pull: Pull {
+            number: 127,
+            state: "open".into(),
+            draft: false,
+            head_sha: head.into(),
+            base_ref: "main".into(),
+            title: "inspect: 只有样本文件真的换了人，报告才说“换掉了这一类原来的样本”（#79）"
+                .into(),
+            body: "修复 #79\n\nAgent: Claude\n".into(),
+            labels: Vec::new(),
+            mergeable: Some(true),
+        },
+        commits,
+        checks: Checks {
+            head_sha: head.into(),
+            runs: vec![
+                CheckRun {
+                    name: "check (ubuntu-latest)".into(),
+                    status: "completed".into(),
+                    conclusion: Some("success".into()),
+                },
+                CheckRun {
+                    name: "check (macos-latest)".into(),
+                    status: "completed".into(),
+                    conclusion: Some("success".into()),
+                },
+            ],
+        },
+        main_head: Commit {
+            sha: PR127_MAIN.into(),
+            committed_at: at("2026-10-14T06:20:00Z"),
+        },
+        records,
+    };
+
+    let base_commits = vec![Commit {
+        sha: PR127_HEAD.into(),
+        committed_at: at("2026-10-14T06:25:00Z"),
+    }];
+
+    // Case 1: GPT posts `通过` at 06:36:07Z, Codex posts `要修改` at 06:36:11Z.
+    let gpt_pass = make_record("GPT", "通过", PR127_HEAD, GPT_URL, "2026-10-14T06:36:07Z");
+    let codex_changes = make_record(
+        "Codex",
+        "要修改",
+        PR127_HEAD,
+        CODEX_URL,
+        "2026-10-14T06:36:11Z",
+    );
+    let d1 = decide(&snapshot(
+        PR127_HEAD,
+        base_commits.clone(),
+        vec![gpt_pass.clone(), codex_changes.clone()],
+    ));
+    assert_eq!(
+        d1,
+        Decision::Refuse(Refusal::VerdictNotPassed {
+            reviewer: "Codex".into(),
+            url: CODEX_URL.into(),
+            said: "要修改".into(),
+        })
+    );
+
+    // Case 2 (reverse order): Codex posts `要修改` first, then GPT posts `通过` on the same head.
+    let codex_first = make_record(
+        "Codex",
+        "要修改",
+        PR127_HEAD,
+        CODEX_URL,
+        "2026-10-14T06:36:07Z",
+    );
+    let gpt_second = make_record("GPT", "通过", PR127_HEAD, GPT_URL, "2026-10-14T06:36:11Z");
+    let d2 = decide(&snapshot(
+        PR127_HEAD,
+        base_commits.clone(),
+        vec![codex_first.clone(), gpt_second.clone()],
+    ));
+    assert_eq!(
+        d2,
+        Decision::Refuse(Refusal::VerdictNotPassed {
+            reviewer: "Codex".into(),
+            url: CODEX_URL.into(),
+            said: "要修改".into(),
+        }),
+        "先到的 要修改 不能被另一个审查者后到的 通过 覆盖：{d2:?}"
+    );
+
+    // Case 3: Implementer (`Claude`) posts after Codex's `要修改` (even if formatted as a record)
+    // while GPT has `通过` -> still refused with Codex's `要修改`.
+    let impl_record = make_record(
+        "Claude",
+        "通过",
+        PR127_HEAD,
+        "https://github.com/zbtzbtzbt/theFlash/pull/127#issuecomment-6162813725",
+        "2026-10-14T07:01:19Z",
+    );
+    let d3 = decide(&snapshot(
+        PR127_HEAD,
+        base_commits.clone(),
+        vec![gpt_pass.clone(), codex_changes.clone(), impl_record],
+    ));
+    assert_eq!(
+        d3,
+        Decision::Refuse(Refusal::VerdictNotPassed {
+            reviewer: "Codex".into(),
+            url: CODEX_URL.into(),
+            said: "要修改".into(),
+        }),
+        "实现者自己的评论或记录不能解锁另一个审查者的 要修改：{d3:?}"
+    );
+
+    // Case 4: Cleared by the same reviewer (`Codex`, even with lane suffix) posting a newer `通过` on the same head.
+    let codex_repass_url = "https://github.com/zbtzbtzbt/theFlash/pull/127#issuecomment-6162900000";
+    let codex_repass = make_record(
+        "codex（复审）",
+        "通过",
+        PR127_HEAD,
+        codex_repass_url,
+        "2026-10-14T07:10:00Z",
+    );
+    let d4 = decide(&snapshot(
+        PR127_HEAD,
+        base_commits.clone(),
+        vec![gpt_pass, codex_changes.clone(), codex_repass],
+    ));
+    assert_eq!(
+        d4,
+        Decision::Merge {
+            sha: PR127_HEAD.into(),
+            reviewer: "codex（复审）".into(),
+            record_url: codex_repass_url.into(),
+        }
+    );
+
+    // Case 5: Cleared by pushing a new head `H2` and getting an independent `通过` on `H2`.
+    let new_head = "a3e3f8d000000000000000000000000000000000";
+    let gpt_on_new_url = "https://github.com/zbtzbtzbt/theFlash/pull/127#issuecomment-6162950000";
+    let gpt_on_new = make_record(
+        "GPT",
+        "通过",
+        new_head,
+        gpt_on_new_url,
+        "2026-10-14T07:15:00Z",
+    );
+    let mut commits_with_new = base_commits;
+    commits_with_new.push(Commit {
+        sha: new_head.into(),
+        committed_at: at("2026-10-14T07:05:00Z"),
+    });
+    let d5 = decide(&snapshot(
+        new_head,
+        commits_with_new,
+        vec![codex_changes, gpt_on_new],
+    ));
+    assert_eq!(
+        d5,
+        Decision::Merge {
+            sha: new_head.into(),
+            reviewer: "GPT".into(),
+            record_url: gpt_on_new_url.into(),
+        }
+    );
+}
+
 // ---- answers that came back in pages ----
 
 #[test]

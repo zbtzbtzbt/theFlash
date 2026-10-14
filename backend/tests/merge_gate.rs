@@ -466,6 +466,202 @@ fn the_newest_record_has_the_last_word() {
 }
 
 #[test]
+fn a_change_request_from_another_reviewer_on_the_same_head_stops_the_merge() {
+    // PR #127 (#160): GPT and Codex reviewed the same head in parallel; one
+    // wrote `结论: 通过` and the other wrote `结论: 要修改`. Neither arrival
+    // order nor an implementer reply on the same head may let the merge
+    // through; only a new `通过` from the reviewer who asked for changes or
+    // a new reviewed head clears it.
+    let gpt_url = "https://github.com/zbtzbtzbt/theFlash/pull/127#issuecomment-6162457684";
+    let codex_url = "https://github.com/zbtzbtzbt/theFlash/pull/127#issuecomment-6162458297";
+
+    // Implementer is Claude (so both GPT and Codex are independent reviewers).
+    let setup_pr127 = |name: &str| {
+        let case = Case::ready(name);
+        case.edit("pull.json", |v| {
+            let body = v["body"]
+                .as_str()
+                .unwrap()
+                .replace("Agent: Codex", "Agent: Claude");
+            v["body"] = json!(body);
+        });
+        case
+    };
+
+    // Case 1 (exact PR #127 order): GPT posts `通过` at 06:36:07Z, Codex posts `要修改` at 06:36:11Z.
+    let case1 = setup_pr127("parallel-pass-then-changes");
+    case1.edit("comments.json", |v| {
+        let template = v[1].clone();
+        let mut gpt = template.clone();
+        gpt["created_at"] = json!("2026-10-14T06:36:07Z");
+        gpt["html_url"] = json!(gpt_url);
+        gpt["body"] = json!(
+            template["body"]
+                .as_str()
+                .unwrap()
+                .replace("- 审查者: Claude", "- 审查者: GPT")
+        );
+        let mut codex = template;
+        codex["created_at"] = json!("2026-10-14T06:36:11Z");
+        codex["html_url"] = json!(codex_url);
+        codex["body"] = json!(
+            codex["body"]
+                .as_str()
+                .unwrap()
+                .replace("- 审查者: Claude", "- 审查者: Codex")
+                .replace("- 结论: 通过", "- 结论: 要修改")
+        );
+        let arr = v.as_array_mut().unwrap();
+        arr.truncate(1);
+        arr.push(gpt);
+        arr.push(codex);
+    });
+    let out1 = case1.check();
+    refused(&out1, "要修改");
+    assert!(
+        said(&out1).contains("Codex"),
+        "应点名审查者 Codex：{}",
+        said(&out1)
+    );
+    assert!(
+        said(&out1).contains(codex_url),
+        "应给出要修改记录链接：{}",
+        said(&out1)
+    );
+
+    // Case 2 (reverse order): Codex posts `要修改` at 06:36:07Z, then GPT posts `通过` at 06:36:11Z.
+    let case2 = setup_pr127("parallel-changes-then-pass");
+    case2.edit("comments.json", |v| {
+        let template = v[1].clone();
+        let mut codex = template.clone();
+        codex["created_at"] = json!("2026-10-14T06:36:07Z");
+        codex["html_url"] = json!(codex_url);
+        codex["body"] = json!(
+            template["body"]
+                .as_str()
+                .unwrap()
+                .replace("- 审查者: Claude", "- 审查者: Codex")
+                .replace("- 结论: 通过", "- 结论: 要修改")
+        );
+        let mut gpt = template;
+        gpt["created_at"] = json!("2026-10-14T06:36:11Z");
+        gpt["html_url"] = json!(gpt_url);
+        gpt["body"] = json!(
+            gpt["body"]
+                .as_str()
+                .unwrap()
+                .replace("- 审查者: Claude", "- 审查者: GPT")
+        );
+        let arr = v.as_array_mut().unwrap();
+        arr.truncate(1);
+        arr.push(codex);
+        arr.push(gpt);
+    });
+    let out2 = case2.check();
+    refused(&out2, "要修改");
+    assert!(
+        said(&out2).contains("Codex"),
+        "应点名审查者 Codex：{}",
+        said(&out2)
+    );
+    assert!(
+        said(&out2).contains(codex_url),
+        "应给出要修改记录链接：{}",
+        said(&out2)
+    );
+
+    // Case 3 (implementer comment after Codex's `要修改`): Claude replies on the PR (both prose
+    // and a self-review block) after Codex's `要修改` while GPT has `通过` -> still refused.
+    case1.edit("comments.json", |v| {
+        let mut reply = v[1].clone();
+        reply["created_at"] = json!("2026-10-14T06:40:00Z");
+        reply["html_url"] =
+            json!("https://github.com/zbtzbtzbt/theFlash/pull/127#issuecomment-6162600000");
+        reply["body"] = json!("已回复 Codex 的审查意见。\n\nAgent: Claude\n");
+        let mut self_rec = v[1].clone();
+        self_rec["created_at"] = json!("2026-10-14T06:41:00Z");
+        self_rec["html_url"] =
+            json!("https://github.com/zbtzbtzbt/theFlash/pull/127#issuecomment-6162600001");
+        self_rec["body"] = json!(
+            self_rec["body"]
+                .as_str()
+                .unwrap()
+                .replace("- 审查者: GPT", "- 审查者: Claude")
+        );
+        let arr = v.as_array_mut().unwrap();
+        arr.push(reply);
+        arr.push(self_rec);
+    });
+    let out3 = case1.check();
+    refused(&out3, "要修改");
+    assert!(said(&out3).contains("Codex"), "{}", said(&out3));
+    assert!(said(&out3).contains(codex_url), "{}", said(&out3));
+
+    // Case 4 (cleared by same reviewer): Codex posts a newer `通过` on the same head -> ready.
+    case2.edit("comments.json", |v| {
+        let mut codex_pass = v[1].clone();
+        codex_pass["created_at"] = json!("2026-10-14T06:50:00Z");
+        codex_pass["html_url"] =
+            json!("https://github.com/zbtzbtzbt/theFlash/pull/127#issuecomment-6162900000");
+        codex_pass["body"] = json!(
+            codex_pass["body"]
+                .as_str()
+                .unwrap()
+                .replace("- 结论: 要修改", "- 结论: 通过")
+        );
+        v.as_array_mut().unwrap().push(codex_pass);
+    });
+    ready(&case2.check());
+
+    // Case 5 (cleared by new head): Codex asked for changes on H1, implementer pushes H2,
+    // and GPT passes H2 -> ready.
+    let case5 = setup_pr127("parallel-cleared-by-new-head");
+    let newer = "2222222222222222222222222222222222222222";
+    case5.edit("commits.json", |v| {
+        let mut extra = v[0].clone();
+        extra["sha"] = json!(newer);
+        extra["commit"]["committer"]["date"] = json!("2026-10-14T06:45:00Z");
+        extra["commit"]["message"] = json!("inspect: 按 Codex 审查意见排除未读样本（#79）");
+        v.as_array_mut().unwrap().push(extra);
+    });
+    case5.edit("pull.json", |v| v["head"]["sha"] = json!(newer));
+    case5.edit("check-runs.json", |v| {
+        for run in v["check_runs"].as_array_mut().unwrap() {
+            run["head_sha"] = json!(newer);
+        }
+    });
+    case5.edit("comments.json", |v| {
+        let template = v[1].clone();
+        let mut codex_old = template.clone();
+        codex_old["created_at"] = json!("2026-10-14T06:36:11Z");
+        codex_old["html_url"] = json!(codex_url);
+        codex_old["body"] = json!(
+            template["body"]
+                .as_str()
+                .unwrap()
+                .replace("- 审查者: Claude", "- 审查者: Codex")
+                .replace("- 结论: 通过", "- 结论: 要修改")
+        );
+        let mut gpt_new = template;
+        gpt_new["created_at"] = json!("2026-10-14T06:55:00Z");
+        gpt_new["html_url"] =
+            json!("https://github.com/zbtzbtzbt/theFlash/pull/127#issuecomment-6162950000");
+        gpt_new["body"] = json!(
+            gpt_new["body"]
+                .as_str()
+                .unwrap()
+                .replace(HEAD, newer)
+                .replace("- 审查者: Claude", "- 审查者: GPT")
+        );
+        let arr = v.as_array_mut().unwrap();
+        arr.truncate(1);
+        arr.push(codex_old);
+        arr.push(gpt_new);
+    });
+    ready(&case5.check());
+}
+
+#[test]
 fn the_record_format_tonights_dispatched_reviewers_write_is_read() {
     // The review task #20 dispatches writes `被审查的提交：<sha>` with a
     // full-width colon. It says the same thing as `被审查的 SHA`, and a

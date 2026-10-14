@@ -200,8 +200,8 @@ impl std::fmt::Display for Refusal {
                 said,
             } => write!(
                 f,
-                "最新的审查记录的结论不是“通过”，写的是“{said}”（审查者 {reviewer}）：{url}。\
-                 改好以后请审查者写一条新的记录，结论那一行只写“通过”",
+                "审查者 {reviewer} 在这个提交上的最新审查记录结论不是“通过”，写的是“{said}”：{url}。\
+                 改好以后推新提交重新审查，或请 {reviewer} 写一条新的记录，结论那一行只写“通过”",
             ),
             Refusal::ReviewerIsImplementer { agent, url } => write!(
                 f,
@@ -296,35 +296,22 @@ pub fn decide(s: &Snapshot) -> Decision {
     let Some(implementer) = record::agent_trailer(&s.pull.body) else {
         return Decision::Refuse(R::NoImplementerTrailer);
     };
-    // The last record posted wins: a reviewer who posts a second record
-    // after a fix has the final word.
-    let Some(rec) = s
-        .records
-        .iter()
-        .max_by(|a, b| a.posted_at.cmp(&b.posted_at))
-    else {
+    if s.records.is_empty() {
         return Decision::Refuse(R::NoReviewRecord);
-    };
-    if let Some(missing) = rec.missing_field() {
-        return Decision::Refuse(R::MalformedRecord {
-            url: rec.url.clone(),
-            missing: missing.to_string(),
-        });
     }
-    if rec.verdict == Verdict::NotPassed {
-        return Decision::Refuse(R::VerdictNotPassed {
-            reviewer: rec.reviewer.clone(),
-            url: rec.url.clone(),
-            said: rec.verdict_said.clone(),
-        });
-    }
-    if same_agent(&rec.reviewer, &implementer) {
-        return Decision::Refuse(R::ReviewerIsImplementer {
-            agent: implementer,
-            url: rec.url.clone(),
-        });
-    }
-    if rec.reviewed_sha != s.pull.head_sha {
+    let on_head = latest_records_on_head(s);
+    if on_head.is_empty() {
+        let rec = s
+            .records
+            .iter()
+            .max_by(|a, b| a.posted_at.cmp(&b.posted_at))
+            .unwrap();
+        if let Some(missing) = rec.missing_field() {
+            return Decision::Refuse(R::MalformedRecord {
+                url: rec.url.clone(),
+                missing: missing.to_string(),
+            });
+        }
         // The reviewed commit still being one of this pull request's
         // commits means the implementer pushed on top of it after the
         // review. A reviewed sha this pull request never had is a record
@@ -343,6 +330,55 @@ pub fn decide(s: &Snapshot) -> Decision {
             },
         });
     }
+    // Every reviewer who reviewed the current head has their own latest
+    // record on it (#160). If any reviewer's latest record on this head is
+    // not a pass, another reviewer's pass cannot override it: either a new
+    // head is pushed or the reviewer who asked for changes posts a newer
+    // passing record on this head.
+    for rec in on_head.iter().rev() {
+        if rec.verdict == Verdict::NotPassed
+            && !rec.verdict_said.is_empty()
+            && !rec.reviewer.is_empty()
+            && record::is_sha(&rec.reviewed_sha)
+        {
+            return Decision::Refuse(R::VerdictNotPassed {
+                reviewer: rec.reviewer.clone(),
+                url: rec.url.clone(),
+                said: rec.verdict_said.clone(),
+            });
+        }
+        if let Some(missing) = rec.missing_field() {
+            return Decision::Refuse(R::MalformedRecord {
+                url: rec.url.clone(),
+                missing: missing.to_string(),
+            });
+        }
+        if rec.verdict == Verdict::NotPassed {
+            return Decision::Refuse(R::VerdictNotPassed {
+                reviewer: rec.reviewer.clone(),
+                url: rec.url.clone(),
+                said: rec.verdict_said.clone(),
+            });
+        }
+    }
+    let independent: Vec<&ReviewRecord> = on_head
+        .iter()
+        .copied()
+        .filter(|r| !same_agent(&r.reviewer, &implementer))
+        .collect();
+    let Some(rec) = independent
+        .iter()
+        .rev()
+        .find(|r| r.reviewed_main == s.main_head.sha)
+        .or_else(|| independent.last())
+        .copied()
+    else {
+        let rec = on_head.last().unwrap();
+        return Decision::Refuse(R::ReviewerIsImplementer {
+            agent: implementer,
+            url: rec.url.clone(),
+        });
+    };
     if s.checks.head_sha != rec.reviewed_sha {
         return Decision::Refuse(R::ChecksForOtherCommit {
             checked: s.checks.head_sha.clone(),
@@ -376,18 +412,59 @@ pub fn decide(s: &Snapshot) -> Decision {
     }
 }
 
+/// Review records that apply to the pull request's current head, grouped by
+/// reviewer (`agent_key`) so each reviewer has their own latest word on this
+/// commit (#160). A reviewer who asked for changes and later posted `通过` on
+/// the same head clears their own objection; another reviewer's `通过` (or a
+/// comment from the implementer) never overwrites it.
+fn latest_records_on_head(s: &Snapshot) -> Vec<&ReviewRecord> {
+    let head = &s.pull.head_sha;
+    let head_committed_at = s
+        .commits
+        .iter()
+        .find(|c| &c.sha == head)
+        .map(|c| c.committed_at);
+    let mut on_head: Vec<&ReviewRecord> = s
+        .records
+        .iter()
+        .filter(|r| {
+            if &r.reviewed_sha == head {
+                return true;
+            }
+            if record::is_sha(&r.reviewed_sha) {
+                return false;
+            }
+            if !r.reviewed_sha.is_empty() {
+                return head.starts_with(&r.reviewed_sha);
+            }
+            head_committed_at.is_none_or(|t| r.posted_at >= t)
+        })
+        .collect();
+    on_head.sort_by_key(|r| r.posted_at);
+    let mut latest: Vec<&ReviewRecord> = Vec::new();
+    for rec in on_head {
+        let key = agent_key(&rec.reviewer);
+        if !key.is_empty() {
+            latest.retain(|prev| agent_key(&prev.reviewer) != key);
+        }
+        latest.push(rec);
+    }
+    latest
+}
+
 /// Agent names are compared the way agents write them: `claude` and
 /// `Claude` are the same agent, `Claude (lane 4)` is still Claude.
 fn same_agent(a: &str, b: &str) -> bool {
-    fn key(s: &str) -> String {
-        s.trim()
-            .to_lowercase()
-            .chars()
-            .take_while(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
-            .collect()
-    }
-    let (a, b) = (key(a), key(b));
+    let (a, b) = (agent_key(a), agent_key(b));
     !a.is_empty() && a == b
+}
+
+fn agent_key(s: &str) -> String {
+    s.trim()
+        .to_lowercase()
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
+        .collect()
 }
 
 /// The CI side: every required job present, finished, and green.
