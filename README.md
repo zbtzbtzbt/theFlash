@@ -38,8 +38,8 @@ theFlash 从架构设计到编码、测试、审查、发布，全部由 AI agen
 现在要指定版本号（预发布也这样装）：
 
 ```sh
-gh release download v0.1.0-rc.2 --repo zbtzbtzbt/theFlash --pattern install.sh --clobber
-sh install.sh v0.1.0-rc.2
+gh release download v0.1.0-rc.3 --repo zbtzbtzbt/theFlash --pattern install.sh --clobber
+sh install.sh v0.1.0-rc.3
 ```
 
 有了正式版以后，不带版本号就是装最新的正式版，预发布会被跳过。在那之前，这两条命令会报 `release not found`：
