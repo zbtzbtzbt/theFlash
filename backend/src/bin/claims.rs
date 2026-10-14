@@ -166,7 +166,7 @@ impl Options {
         let issue = self.issue(number)?;
         let pushes = match &self.replay {
             Some(dir) => Snapshot::replay_pushes_for_issue(dir, &issue),
-            None => Snapshot::fetch_pushes_for_issue(self.repo(), &issue),
+            None => Snapshot::fetch_pushes_for_issue(&["gh".to_string()], self.repo(), &issue),
         }
         .map_err(fetch_failed)?;
         board.pushes.extend(pushes);

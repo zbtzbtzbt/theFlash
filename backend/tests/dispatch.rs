@@ -1171,6 +1171,34 @@ fn implement_matches_claims_queue_across_push_unreadable_and_url_bound_lease_cas
             now: "2026-10-14T11:12:00+08:00",
             alter: Some("reclaim"),
         },
+        Case {
+            name: "boundary-120m",
+            numbers: &[14, 58],
+            vendors: &["claude", "codex"],
+            now: "2026-10-14T15:00:00+08:00",
+            alter: Some("boundary-120m"),
+        },
+        Case {
+            name: "boundary-119m59s",
+            numbers: &[14, 58],
+            vendors: &["claude", "codex"],
+            now: "2026-10-14T15:00:00+08:00",
+            alter: Some("boundary-119m59s"),
+        },
+        Case {
+            name: "fullwidth-assigned-colon",
+            numbers: &[53, 58],
+            vendors: &["claude"],
+            now: "2026-10-14T11:12:00+08:00",
+            alter: Some("fullwidth-colon"),
+        },
+        Case {
+            name: "hyphen-suffixed-assignee",
+            numbers: &[53, 58],
+            vendors: &["codex"],
+            now: "2026-10-14T11:12:00+08:00",
+            alter: Some("suffixed-assignee"),
+        },
     ];
 
     for case in &cases {
@@ -1190,11 +1218,24 @@ fn implement_matches_claims_queue_across_push_unreadable_and_url_bound_lease_cas
                 std::fs::copy(&path, replay.join(path.file_name().unwrap())).unwrap();
             }
         }
-        let selected: Vec<serde_json::Value> = opened
+        let mut selected: Vec<serde_json::Value> = opened
             .iter()
             .filter(|i| numbers.contains(&i["number"].as_u64().unwrap()))
             .cloned()
             .collect();
+        if alter == Some("fullwidth-colon") {
+            for item in &mut selected {
+                if item["number"] == 53 {
+                    item["labels"] = serde_json::json!([{"name": "P0"}, {"name": "指派：codex"}]);
+                }
+            }
+        } else if alter == Some("suffixed-assignee") {
+            for item in &mut selected {
+                if item["number"] == 53 {
+                    item["labels"] = serde_json::json!([{"name": "P0"}, {"name": "指派:codex-2"}]);
+                }
+            }
+        }
         let selected_claimed: Vec<serde_json::Value> = claimed
             .iter()
             .filter(|i| numbers.contains(&i["number"].as_u64().unwrap()))
@@ -1218,6 +1259,20 @@ fn implement_matches_claims_queue_across_push_unreadable_and_url_bound_lease_cas
         match alter {
             Some("no-push") => {
                 let _ = std::fs::remove_file(replay.join("branch-night-issue-14.json"));
+            }
+            Some("boundary-120m" | "boundary-119m59s") => {
+                let _ = std::fs::remove_file(replay.join("branch-night-issue-14.json"));
+                let created_at = if alter == Some("boundary-120m") {
+                    "2026-10-14T05:00:00Z"
+                } else {
+                    "2026-10-14T05:00:01Z"
+                };
+                comments[0]["created_at"] = serde_json::json!(created_at);
+                std::fs::write(
+                    replay.join("comments-14.json"),
+                    serde_json::to_string(&comments[..1]).unwrap(),
+                )
+                .unwrap();
             }
             Some("empty") => {
                 std::fs::write(replay.join("comments-14.json"), "[]").unwrap();
@@ -1349,4 +1404,174 @@ fn implement_matches_claims_queue_across_push_unreadable_and_url_bound_lease_cas
             "用例 {name}：dispatch implement ({actual:?}) != claims queue next ({expected:?})"
         );
     }
+}
+
+#[test]
+fn branch_activity_network_failure_stops_dispatch_like_claims_queue_while_403_marks_push_unreadable()
+ {
+    // Issue #170 reproduction: #40 is P1 + 认领中 with an expired claim on
+    // branch `night/issue-40`, and #41 is P2.
+    // - When `gh api .../activity` fails with a network error, both
+    //   `claims queue` and `dispatch plan` must exit 2 and refuse to
+    //   dispatch #41 on partial data.
+    // - When `gh api .../activity` returns 403 (no push access), both
+    //   treat #40's push time as unreadable and offer #41 next.
+    let home = Home::new("activity-error-parity");
+    let data = home.path().join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    let issue_40 = serde_json::json!({
+        "number": 40,
+        "title": "expired-p1",
+        "labels": [{"name": "P1"}, {"name": "认领中"}],
+        "body": "",
+    });
+    let issue_41 = serde_json::json!({
+        "number": 41,
+        "title": "fresh-p2",
+        "labels": [{"name": "P2"}],
+        "body": "",
+    });
+    std::fs::write(
+        data.join("open-issues.json"),
+        serde_json::to_string(&vec![&issue_40, &issue_41]).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        data.join("claimed-issues.json"),
+        serde_json::to_string(&vec![&issue_40]).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        data.join("comments-40.json"),
+        serde_json::to_string(&serde_json::json!([{
+            "id": 1001,
+            "created_at": "2026-10-14T03:00:00Z",
+            "html_url": "https://github.com/zbtzbtzbt/theFlash/issues/40#issuecomment-1001",
+            "body": "## 认领\n- agent: Claude\n- 改动模块: backend/src/dispatch\n- 分支: night/issue-40\nAgent: Claude",
+        }]))
+        .unwrap(),
+    )
+    .unwrap();
+    std::fs::write(data.join("comments-41.json"), "[]").unwrap();
+    std::fs::write(data.join("pulls.json"), "[]").unwrap();
+    std::fs::copy(
+        PathBuf::from(fixtures("night")).join("main-test-runs.json"),
+        data.join("main-test-runs.json"),
+    )
+    .unwrap();
+
+    real_tool(home.path(), "cat");
+    stub(
+        home.path(),
+        "gh",
+        &format!(
+            "case \"$*\" in\n\
+             *issues*labels=*) cat '{dir}/claimed-issues.json' ;;\n\
+             *issues/40/comments*) cat '{dir}/comments-40.json' ;;\n\
+             *issues/41/comments*) cat '{dir}/comments-41.json' ;;\n\
+             *issues\\?state=open*) cat '{dir}/open-issues.json' ;;\n\
+             *pulls\\?state=open*) cat '{dir}/pulls.json' ;;\n\
+             *runs\\?branch=main*) cat '{dir}/main-test-runs.json' ;;\n\
+             *activity*) echo \"$FAKE_GH_ACTIVITY_ERR\" >&2; exit 1 ;;\n\
+             *) echo '[]' ;;\n\
+             esac",
+            dir = data.display()
+        ),
+    );
+
+    let config = home.config(serde_json::json!({
+        "max_sessions": 1,
+        "max_sessions_per_day": 10,
+        "cloud_roles": [],
+        "require_label": "",
+        "ignore_issues": [],
+        "agents": {
+            "claude": { "command": ["agent-claude"], "prompt": "argv" },
+        },
+        "vendor_order": ["claude"],
+    }));
+    let now = "2026-10-14T16:00:00+08:00";
+
+    // 1. Network failure on `activity`: both exit 2 and mention the failed request.
+    let mut q_net = support::claims(home.path());
+    q_net
+        .env("PATH", home.path().join("bin"))
+        .env("FAKE_GH_ACTIVITY_ERR", "error connecting to api.github.com")
+        .args(["queue", "--json", "--agent", "claude", "--now", now]);
+    let q_net_out = output_within(q_net, 60);
+    let q_net_text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&q_net_out.stdout),
+        String::from_utf8_lossy(&q_net_out.stderr)
+    );
+    assert_eq!(q_net_out.status.code(), Some(2), "{q_net_text}");
+    assert!(
+        q_net_text.contains("activity?ref=refs/heads/night%2Fissue-40")
+            && q_net_text.contains("error connecting to api.github.com"),
+        "{q_net_text}"
+    );
+
+    let mut d_net = dispatch(home.path());
+    d_net
+        .env("FAKE_GH_ACTIVITY_ERR", "error connecting to api.github.com")
+        .args([
+            "plan",
+            "--config",
+            &config.display().to_string(),
+            "--now",
+            now,
+        ]);
+    let d_net_out = output_within(d_net, 60);
+    let d_net_text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&d_net_out.stdout),
+        String::from_utf8_lossy(&d_net_out.stderr)
+    );
+    assert_eq!(
+        d_net_out.status.code(),
+        Some(2),
+        "activity 断网时 dispatch plan 必须像 claims queue 一样退出 2，不能去派 #41：\n{d_net_text}"
+    );
+    assert!(
+        d_net_text.contains("activity?ref=refs/heads/night%2Fissue-40")
+            && d_net_text.contains("error connecting to api.github.com")
+            && !d_net_text.contains("implement-41"),
+        "{d_net_text}"
+    );
+
+    // 2. 403 permission error on `activity`: both treat #40's push time as
+    //    unreadable (lease stays held) and offer #41 as the next implement.
+    let perm_err = "gh: Must have push access to repository (HTTP 403)";
+    let mut q_perm = support::claims(home.path());
+    q_perm
+        .env("PATH", home.path().join("bin"))
+        .env("FAKE_GH_ACTIVITY_ERR", perm_err)
+        .args(["queue", "--json", "--agent", "claude", "--now", now]);
+    let q_perm_out = output_within(q_perm, 60);
+    assert!(
+        q_perm_out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&q_perm_out.stderr)
+    );
+    let q_json: serde_json::Value = serde_json::from_slice(&q_perm_out.stdout).unwrap();
+    assert_eq!(q_json["next"], 41, "{q_json:#}");
+
+    let mut d_perm = dispatch(home.path());
+    d_perm.env("FAKE_GH_ACTIVITY_ERR", perm_err).args([
+        "plan",
+        "--json",
+        "--config",
+        &config.display().to_string(),
+        "--now",
+        now,
+    ]);
+    let d_perm_out = output_within(d_perm, 60);
+    let d_perm_text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&d_perm_out.stdout),
+        String::from_utf8_lossy(&d_perm_out.stderr)
+    );
+    assert_eq!(d_perm_out.status.code(), Some(0), "{d_perm_text}");
+    let d_json: serde_json::Value = serde_json::from_str(d_perm_text.trim()).unwrap();
+    assert_eq!(d_json["start"][0]["issue"], 41, "{d_json:#}");
 }

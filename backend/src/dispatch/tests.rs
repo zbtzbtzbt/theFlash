@@ -1298,24 +1298,112 @@ fn an_assignee_whose_vendor_is_not_configured_is_not_handed_to_least_busy() {
 }
 
 #[test]
-fn an_expired_claim_is_offered_for_implement_like_claims_queue() {
-    // #14 still has 认领中, but its claim has been silent past expiry.
-    // claims queue offers it (with a reclaim note); dispatch must too (#103).
-    let mut fourteen = raw_issue(14, &["P1", "认领中"], "");
-    fourteen.agent = Some("Claude".to_string());
-    fourteen.lease_alive_at = Some(at("2026-10-13T19:46:51Z"));
-    let snapshot = Snapshot {
-        issues: vec![fourteen, raw_issue(58, &["P1"], "")],
+fn assigned_label_parsing_matches_claim_lease_rules() {
+    // #170: `claim::lease::assigned_agent` only accepts half-width `指派:`,
+    // and `claim::lease::same_agent` compares the full agent key rather
+    // than prefix-matching `codex-2` as `codex`.
+    let only = |vendor: &str| {
+        let mut agents = BTreeMap::new();
+        agents.insert(
+            vendor.to_string(),
+            Agent {
+                command: vec!["true".to_string()],
+                prompt: PromptStyle::Argv,
+            },
+        );
+        Config {
+            agents,
+            vendor_order: vec![vendor.to_string()],
+            max_sessions: 1,
+            cloud_roles: Vec::new(),
+            ..Config::default()
+        }
+    };
+
+    let fullwidth = Snapshot {
+        issues: vec![
+            raw_issue(62, &["P0", "指派：codex"], ""),
+            raw_issue(63, &["P1"], ""),
+        ],
         pulls: Vec::new(),
         main_checks: MainChecks::Green,
         main_run: None,
     };
     let plan = decide(
-        &snapshot,
+        &fullwidth,
         &State::default(),
-        &config(),
-        at("2026-10-14T15:00:00+08:00"),
+        &only("claude"),
+        at("2026-10-14T16:00:00+08:00"),
     );
+    assert_eq!(
+        plan.start.iter().map(|t| t.issue).collect::<Vec<_>>(),
+        vec![Some(62)],
+        "全角冒号 `指派：codex` 在 claims 里不算指派，dispatch 也应派 P0 #62：{:?}",
+        plan.start
+    );
+
+    let suffixed = Snapshot {
+        issues: vec![
+            raw_issue(62, &["P0", "指派:codex-2"], ""),
+            raw_issue(63, &["P1"], ""),
+        ],
+        pulls: Vec::new(),
+        main_checks: MainChecks::Green,
+        main_run: None,
+    };
+    let plan = decide(
+        &suffixed,
+        &State::default(),
+        &only("codex"),
+        at("2026-10-14T16:00:00+08:00"),
+    );
+    assert_eq!(
+        plan.start.iter().map(|t| t.issue).collect::<Vec<_>>(),
+        vec![Some(63)],
+        "`指派:codex-2` 不是 `codex`，只配 codex 时应跳过 #62 派 #63：{:?}",
+        plan.start
+    );
+    assert!(
+        skipped(&plan, "implement-62-a1").contains("codex-2"),
+        "{}",
+        skipped(&plan, "implement-62-a1")
+    );
+}
+
+#[test]
+fn an_expired_claim_is_offered_for_implement_like_claims_queue() {
+    // #14 still has 认领中, but its claim has been silent past expiry.
+    // claims queue offers it (with a reclaim note); dispatch must too (#103).
+    // And (#170):
+    // 1. Exactly 120 minutes ago is expired; 119 minutes 59 seconds ago is
+    //    still alive (changing `<` to `<=` in `claim_lease_is_live` must fail).
+    // 2. An expired claim's `implement` goes to `least_busy`, not back to
+    //    the old holder `issue.agent` (changing `assigned` to `known` in
+    //    the expired branch must fail).
+    let now = at("2026-10-14T15:00:00+08:00");
+    let mut claude_ran = running(
+        "implement-1-a1",
+        Some(1),
+        "claude",
+        "2026-10-14T09:00:00+08:00",
+    );
+    claude_ran.finished_at = Some(at("2026-10-14T09:30:00+08:00"));
+    claude_ran.outcome = Some(Outcome::Done);
+    let state = State {
+        sessions: vec![claude_ran],
+        ..State::default()
+    };
+
+    let mut exact_120m = raw_issue(14, &["P1", "认领中"], "");
+    exact_120m.agent = Some("Claude".to_string());
+    exact_120m.lease_alive_at = Some(at("2026-10-14T13:00:00+08:00"));
+    let snapshot = Snapshot {
+        issues: vec![exact_120m, raw_issue(58, &["P1"], "")],
+        pulls: Vec::new(),
+        main_checks: MainChecks::Green,
+        main_run: None,
+    };
+    let plan = decide(&snapshot, &state, &config(), now);
     let implements: Vec<u64> = plan
         .start
         .iter()
@@ -1325,10 +1413,37 @@ fn an_expired_claim_is_offered_for_implement_like_claims_queue() {
     assert_eq!(
         implements.first().copied(),
         Some(14),
-        "过期认领应回到 implement 队列最前：{implements:?} / {:?}",
+        "恰好 120 分钟前的认领已过期，应回到 implement 队列最前：{implements:?} / {:?}",
         plan.start
     );
     assert!(plan.start[0].why.contains("过期"), "{}", plan.start[0].why);
+    assert_eq!(
+        plan.start[0].vendor, "codex",
+        "过期租约的 implement 应交给 least_busy（codex），而不是原认领者 claude：{:?}",
+        plan.start[0]
+    );
+
+    let mut alive_119m59s = raw_issue(14, &["P1", "认领中"], "");
+    alive_119m59s.agent = Some("Claude".to_string());
+    alive_119m59s.lease_alive_at = Some(at("2026-10-14T13:00:01+08:00"));
+    let snapshot_alive = Snapshot {
+        issues: vec![alive_119m59s, raw_issue(58, &["P1"], "")],
+        pulls: Vec::new(),
+        main_checks: MainChecks::Green,
+        main_run: None,
+    };
+    let plan_alive = decide(&snapshot_alive, &state, &config(), now);
+    let implements_alive: Vec<u64> = plan_alive
+        .start
+        .iter()
+        .filter(|t| t.role == Role::Implement)
+        .filter_map(|t| t.issue)
+        .collect();
+    assert_eq!(
+        implements_alive,
+        vec![58],
+        "119 分 59 秒前的认领还活着，不能当已过期重派 #14：{implements_alive:?}"
+    );
 }
 
 #[test]

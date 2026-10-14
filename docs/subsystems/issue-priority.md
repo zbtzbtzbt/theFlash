@@ -123,7 +123,7 @@ scripts/claims claim --issue 49 --agent Claude --modules frontend/src \
 ## 和别的子系统的关系
 
 - [认领租约](claim-lease.md)：队列用它的看板判断谁在做；认领评论多了一个可选字段 `不按顺序`，租约的解析不读它。
-- 调度程序（#14）读 `queue --json` 的 `next` 和 `ready` 决定派什么活，读 `waiting` 里的 `等裁决` 汇总给 owner。
+- [调度程序](dispatch.md)（#14）直接复用 `claim::priority`、`claim::read_lease` 和分支推送读取函数，按与 `queue` 相同的规则决定派什么新活并跳过 `等裁决`。
 - 合并之后审查者要给 issue 加 `待验收`（[AGENTS.md](../../AGENTS.md#审查和合并)）。漏加的话，已经做完的 issue 会以原来的优先级出现在队列里，像是没人做过；看到这种情况，先查 `git log origin/main` 有没有提到它的 commit。
 
 ## 验证

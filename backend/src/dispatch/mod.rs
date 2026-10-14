@@ -680,29 +680,32 @@ fn vendor_of(signature: Option<&str>, config: &Config) -> Option<String> {
         .find(|v| signature == *v || signature.starts_with(v.as_str()))
 }
 
-/// The vendor an `指派:<agent>` label names. Returns the assignee even when
-/// that vendor has no command line in this config: `build` then skips with
-/// `NoAgent` instead of treating the issue as unassigned and handing it to
+/// The vendor an `指派:<agent>` label names, parsed with the same
+/// [`crate::claim::lease::assigned_agent`] and [`crate::claim::lease::same_agent`]
+/// rules `claims` uses (#170). Returns the assignee even when that vendor
+/// has no command line in this config: `build` then skips with `NoAgent`
+/// instead of treating the issue as unassigned and handing it to
 /// `least_busy` (#103).
 fn assigned_vendor(labels: &[String], config: &Config) -> Option<String> {
-    for label in labels {
-        if let Some(name) = label
-            .strip_prefix("指派:")
-            .or_else(|| label.strip_prefix("指派："))
-        {
-            let name = name.trim();
-            if name.is_empty() {
-                continue;
-            }
-            return Some(vendor_of(Some(name), config).unwrap_or_else(|| {
-                name.to_lowercase()
+    let assignee = crate::claim::lease::assigned_agent(labels)?;
+    Some(
+        config
+            .vendors()
+            .into_iter()
+            .find(|v| crate::claim::lease::same_agent(&assignee, v))
+            .unwrap_or_else(|| {
+                let key: String = assignee
+                    .to_lowercase()
                     .chars()
                     .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
-                    .collect()
-            }));
-        }
-    }
-    None
+                    .collect();
+                if key.is_empty() {
+                    assignee.to_lowercase()
+                } else {
+                    key
+                }
+            }),
+    )
 }
 
 /// Puts one `implement` candidate into the priority-ordered fresh list, or
