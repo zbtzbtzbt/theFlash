@@ -4,8 +4,9 @@
 //! has to be told exactly what changed.
 //!
 //! No test here reaches the real damai.cn or GitHub: the replay server
-//! stands in for both detail.damai.cn and the home page, and opening an
-//! issue is only reachable with `--open-issue`, which no test passes.
+//! stands in for both detail.damai.cn and the home page, and the one test
+//! that passes `--open-issue` runs with a `gh` of its own first on PATH,
+//! which answers out of a made-up repository and records what it was asked.
 
 mod support;
 
@@ -2049,4 +2050,114 @@ fn an_inspection_under_a_breaker_stops_and_says_so() {
         "熔断生效时巡检还在请求大麦：{:?}",
         damai.hits()
     );
+}
+
+/// A `gh` of this test's own, first on PATH, standing in for a repository
+/// with 101 open issues: the 100 newest are other people's, and the oldest
+/// one is the inspection's, marked. It answers `issue list` with at most
+/// `--limit` of them, the way GitHub does, and appends one line per call
+/// to `$FAKE_GH_LOG`, so a test can tell what the run asked for. It never
+/// reaches the network.
+fn fake_gh_with_an_old_inspection_issue(home: &Home, open_issues: u32) -> PathBuf {
+    let log = home.path().join("gh-calls.log");
+    support::stub(
+        home.path(),
+        "gh",
+        &format!(
+            r#"PATH=/usr/bin:/bin
+export PATH
+limit=0
+prev=
+for a in "$@"; do
+  if [ "$prev" = "--limit" ]; then limit=$a; fi
+  prev=$a
+done
+others=$(({open_issues} - 1))
+case "$1 $2" in
+  "issue list")
+    echo "list limit=$limit" >> "$FAKE_GH_LOG"
+    i=0
+    number=$(({open_issues} + 100))
+    printf '['
+    while [ "$i" -lt "$others" ] && [ "$i" -lt "$limit" ]; do
+      if [ "$i" -gt 0 ]; then printf ','; fi
+      printf '{{"number":%s,"title":"别的事","body":"和巡检无关"}}' "$number"
+      number=$((number - 1))
+      i=$((i + 1))
+    done
+    if [ "$i" -lt "$limit" ]; then
+      if [ "$i" -gt 0 ]; then printf ','; fi
+      printf '{{"number":7,"title":"大麦改版巡检发现变化","body":"上一次的报告\\n\\n{marker}\\n"}}'
+    fi
+    printf ']'
+    ;;
+  "issue comment")
+    echo "comment $3" >> "$FAKE_GH_LOG"
+    echo "https://github.com/probe/offline/issues/$3#issuecomment-1"
+    ;;
+  "issue create")
+    echo "create" >> "$FAKE_GH_LOG"
+    echo "https://github.com/probe/offline/issues/999"
+    ;;
+  *)
+    echo "fake gh: 没想到的命令 $*" >&2
+    exit 1
+    ;;
+esac"#,
+            marker = theflash::inspect::tracker::MARKER,
+        ),
+    );
+    log
+}
+
+/// What #76 asks for: the inspection's own issue is the oldest of 101 open
+/// ones, so a single `gh issue list --limit 100` does not reach it. The run
+/// used to take that for "nobody has opened one" and open a second issue —
+/// and the next run, and the one after that, would do it again. It has to
+/// keep asking until the list it gets back is no longer cut off.
+#[test]
+fn the_inspections_own_issue_is_found_even_past_the_first_hundred() {
+    let home = Home::new("open-issue-past-100");
+    let log = fake_gh_with_an_old_inspection_issue(&home, 101);
+    let routes = changed(unchanged_routes(), "dataId=286937788", |body| {
+        body.replace("\"frontEndStatus\":\"2\"", "\"frontEndStatus\":\"777\"")
+    });
+    let damai = support::MockDamai::start_bodies(routes);
+    let mut cmd = home.theflash(&damai.base_url());
+    cmd.env("PATH", home.path().join("bin"));
+    cmd.env("FAKE_GH_LOG", &log);
+    cmd.args([
+        "inspect",
+        "--gap",
+        "0",
+        "--open-issue",
+        "--repo",
+        "probe/offline",
+    ]);
+    let out = support::output_within(cmd, 60);
+    let text = stdout(&out);
+    let said = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(text.contains("没见过的票档状态码：777"), "{text}{said}");
+    let calls = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(
+        !calls.contains("create"),
+        "又开了一个巡检 issue，已经有一个 open 着了：{calls}\n{text}{said}"
+    );
+    assert!(
+        calls.contains("comment 7"),
+        "没在已有的 issue #7 上追加评论：{calls}\n{text}{said}"
+    );
+    assert!(
+        text.contains("在已有的 issue #7 上追加了评论"),
+        "{text}{said}"
+    );
+    // The first list is one page; the second has to ask for more, or the
+    // issue past it stays invisible.
+    let limits: Vec<&str> = calls.lines().filter(|l| l.starts_with("list ")).collect();
+    assert_eq!(limits.first().copied(), Some("list limit=100"), "{calls}");
+    assert!(
+        limits.len() >= 2 && limits[1..].iter().any(|l| *l != "list limit=100"),
+        "只问了一次 open issue，没有要第二页：{calls}"
+    );
+    assert_eq!(out.status.code(), Some(1), "{text}{said}");
 }

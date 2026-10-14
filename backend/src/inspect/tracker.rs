@@ -103,21 +103,61 @@ impl Gh {
         }
         (self.run)(&full)
     }
-}
 
-impl Tracker for Gh {
-    fn open_issues(&self) -> Result<Vec<Issue>, String> {
+    fn list_open_issues(&self, limit: usize) -> Result<Vec<Issue>, String> {
+        let limit = limit.to_string();
         let out = self.call(&[
             "issue",
             "list",
             "--state",
             "open",
             "--limit",
-            "100",
+            &limit,
             "--json",
             "number,title,body",
         ])?;
         serde_json::from_str(&out).map_err(|e| format!("看不懂 gh issue list 的输出：{e}"))
+    }
+}
+
+/// What the first `issue list` asks for. GitHub's own page size, and more
+/// open issues than this repository has had on any day so far, so one call
+/// is normally the whole answer.
+const FIRST_LIMIT: usize = 100;
+
+/// Where asking for a longer list stops being worth it. A repository with
+/// this many open issues says nothing about theFlash; the ceiling is here
+/// so a `gh` that keeps answering with a full list cannot keep this loop
+/// going forever.
+const LIMIT_CEILING: usize = 51_200;
+
+impl Tracker for Gh {
+    /// Every open issue, which takes more than one call once the
+    /// repository has more of them than a list can hold: `gh issue list`
+    /// answers with at most `--limit` issues and says nothing about what
+    /// it left out, so a list exactly that long may be cut off. The
+    /// inspection's own issue is the oldest thing it is looking for — by
+    /// the time a repository has a hundred open issues, that issue has
+    /// long dropped off the first page — so a run that reads one page
+    /// takes "not in this page" for "nobody has opened one" and opens a
+    /// second one, every day (#76). Asking again for twice as many stops
+    /// as soon as a list comes back short, which is the only answer that
+    /// means "this is all of them".
+    fn open_issues(&self) -> Result<Vec<Issue>, String> {
+        let mut limit = FIRST_LIMIT;
+        loop {
+            let issues = self.list_open_issues(limit)?;
+            if issues.len() < limit {
+                return Ok(issues);
+            }
+            if limit >= LIMIT_CEILING {
+                return Err(format!(
+                    "这个仓库的 open issue 超过 {limit} 条，读不完就无法确认巡检自己的 issue 在不在，\
+                     不开新 issue 以免重复：先关掉一些 open issue，或手工找到带 {MARKER} 的那个"
+                ));
+            }
+            limit *= 2;
+        }
     }
 
     fn create(&self, title: &str, body: &str) -> Result<String, String> {
@@ -293,6 +333,148 @@ mod tests {
         assert!(
             issues.iter().all(|i| !i.body.contains(MARKER)),
             "录下来的 issue 里不该有巡检自己的标记"
+        );
+    }
+
+    /// `open` open issues, newest first, cut to `limit` the way
+    /// `gh issue list` cuts its answer. The oldest is the inspection's own
+    /// when `marked`: that is where it ends up once a repository has more
+    /// open issues than a list holds.
+    fn open_issue_list(open: u64, limit: usize, marked: bool) -> String {
+        let issues: Vec<String> = (1..=open)
+            .rev()
+            .take(limit)
+            .map(|number| {
+                let body = if marked && number == 1 {
+                    format!("上一次的报告\\n\\n{MARKER}\\n")
+                } else {
+                    "和巡检无关".to_string()
+                };
+                format!(r#"{{"number":{number},"title":"第 {number} 个","body":"{body}"}}"#)
+            })
+            .collect();
+        format!("[{}]", issues.join(","))
+    }
+
+    fn limit_in(args: &[&str]) -> usize {
+        args.iter()
+            .position(|a| *a == "--limit")
+            .and_then(|i| args.get(i + 1))
+            .and_then(|v| v.parse().ok())
+            .unwrap_or_else(|| panic!("argv 里没有 --limit：{args:?}"))
+    }
+
+    /// Every `--limit` the runs asked `issue list` for, in order.
+    fn limits_asked(seen: &Mutex<Vec<Vec<String>>>) -> Vec<usize> {
+        seen.lock()
+            .unwrap()
+            .iter()
+            .filter(|args| args.get(1).map(String::as_str) == Some("list"))
+            .map(|args| {
+                let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
+                limit_in(&borrowed)
+            })
+            .collect()
+    }
+
+    fn calls(seen: &Mutex<Vec<Vec<String>>>) -> Vec<String> {
+        seen.lock()
+            .unwrap()
+            .iter()
+            .map(|args| args[..2].join(" "))
+            .collect()
+    }
+
+    fn recording() -> &'static Mutex<Vec<Vec<String>>> {
+        Box::leak(Box::new(Mutex::new(Vec::new())))
+    }
+
+    /// A `gh` over a repository of `open` open issues, which records what
+    /// it was asked and never reaches GitHub.
+    fn gh_over(open: u64, marked: bool, seen: &'static Mutex<Vec<Vec<String>>>) -> Gh {
+        Gh::with_runner(
+            None,
+            Box::new(move |args| {
+                seen.lock()
+                    .unwrap()
+                    .push(args.iter().map(|a| a.to_string()).collect());
+                match args.get(1).copied() {
+                    Some("list") => Ok(open_issue_list(open, limit_in(args), marked)),
+                    Some("comment") => Ok(format!(
+                        "https://github.com/o/r/issues/{}#issuecomment-1",
+                        args[2]
+                    )),
+                    Some("create") => Ok("https://github.com/o/r/issues/999\n".into()),
+                    other => Err(format!("没想到的命令 {other:?}")),
+                }
+            }),
+        )
+    }
+
+    /// #76: with 101 open issues, the inspection's own is the one that
+    /// falls off a 100-issue list, so a run that reads one list opened a
+    /// second issue — and would again the next day. A list that came back
+    /// exactly as long as it asked for may be cut off, so the run asks for
+    /// a longer one until it is not.
+    #[test]
+    fn the_inspections_own_issue_is_found_past_the_end_of_the_first_list() {
+        let seen = recording();
+        let gh = gh_over(101, true, seen);
+        assert_eq!(
+            post(&gh, "标题", "正文").unwrap(),
+            Posted::Commented {
+                number: 1,
+                url: "https://github.com/o/r/issues/1#issuecomment-1".into()
+            }
+        );
+        assert_eq!(limits_asked(seen), [100, 200]);
+        assert_eq!(calls(seen), ["issue list", "issue list", "issue comment"]);
+    }
+
+    /// Exactly one full list and nothing of the inspection's in it: the
+    /// run asks once more, hears a shorter answer, and only then opens an
+    /// issue. Without the second ask it could not tell this from #76.
+    #[test]
+    fn a_full_list_with_no_issue_of_its_own_is_asked_about_once_more() {
+        let seen = recording();
+        let gh = gh_over(100, false, seen);
+        assert!(matches!(
+            post(&gh, "标题", "正文").unwrap(),
+            Posted::Created { .. }
+        ));
+        assert_eq!(limits_asked(seen), [100, 200]);
+        assert_eq!(calls(seen), ["issue list", "issue list", "issue create"]);
+    }
+
+    /// A `gh` that answers every ask with a full list — the repository
+    /// really has that many, or gh is broken — must not keep the run
+    /// asking forever, and must not end in a duplicate issue either. The
+    /// stand-in refuses to answer past the ceiling, so a run without one
+    /// fails here instead of hanging the test binary.
+    #[test]
+    fn a_gh_that_never_runs_out_of_issues_stops_instead_of_asking_forever() {
+        let seen = recording();
+        let gh = Gh::with_runner(
+            None,
+            Box::new(move |args| {
+                seen.lock()
+                    .unwrap()
+                    .push(args.iter().map(|a| a.to_string()).collect());
+                let limit = limit_in(args);
+                if limit > LIMIT_CEILING {
+                    return Err(format!("巡检问到了 {limit} 条，比上限还多"));
+                }
+                Ok(open_issue_list(limit as u64, limit, false))
+            }),
+        );
+        let e = post(&gh, "标题", "正文").unwrap_err();
+        assert!(e.contains("读不完"), "{e}");
+        assert!(!calls(seen).contains(&"issue create".to_string()), "{e}");
+        assert_eq!(
+            *limits_asked(seen).last().unwrap(),
+            LIMIT_CEILING,
+            "问到头的那一次不是上限：{:?}",
+            limits_asked(seen)
         );
     }
 
