@@ -1,4 +1,4 @@
-<!-- reviewed-through: d490208 (2026-10-14 14:08 +0800) -->
+<!-- reviewed-through: a9f06c9 (2026-10-14 14:20 +0800) -->
 # 已合并工作的教训
 
 本项目的代码由 agent 编写、审查、合并和发布。每天夜里有一个复盘 agent 检查当天的 commit：哪些改动后来又被返工、哪些不该合并、哪些验证得太薄。学到的东西记在这里。改代码之前先读这份文件。
@@ -42,6 +42,10 @@
 
 
 ## 验证
+
+**辅助抢票的“打开确认页”必须停在提交订单之前，并有离线测试守住不会自动下单。**
+- Done right on 10-14: `e4ea4d3`（#54/#136）——确认有票时打开已选场次/票档的购买确认页或选座页；属 #6 辅助抢票路径。
+- Seen 1× (2026-10-14)。
 
 **合入成功后必须给关联 issue 加上「待验收」；不要指望实现者记得贴标签。**
 - Done right on 10-14: `de69a92`（#102/#134）——merge-gate 合入后自动加标签并留评论，避免实现完成却停在“没人验收”。
@@ -151,10 +155,11 @@
 - Done right on 10-14: `d490208`（#69/#105）——`docs/subsystems/pipeline.md` 收拢各站与标签状态机；work-tick 重排（先分清 CI 没启动 vs 真红 → 返工 → 审查 → 验收 → 再认领）；正对当晚漏加待验收、重复账单 issue、绕过闸门等问题。
 - Seen 1× (2026-10-14)。
 
-**并行 PR 改同一函数的不同变量/语义时，文本不冲突也会把 main 编不过；合入前要在最新 main 上重编，不能只看 Git 无冲突。**
-- `e4f0590`（#73）在 `inspect::record` 里 `notes.push`；更早合入的 `d31600e`（#78）已删掉 `notes` 改成 `lost`。两边各自相对当时 main 绿，合起来 `cannot find value notes`（#129）。Done right on 10-14: `de4931d`——分开 lost（失败）与 notes（stderr 说明），并有破坏测试守住 stderr。
-- 怎么避免：审查/合并前 `git fetch && rebase origin/main && make check`；同一模块连续合入时看相邻 PR 是否改同一收尾路径。merge-gate 过 CI 是必要但不充分——要以**合到当时最新 main 之后**的 head 为准。
-- Seen 1× (2026-10-14)。
+**并行 PR 改同一类型/函数的不同字段时，文本不冲突也会把 main 编不过；合入前要在最新 main 上重编，不能只看 Git 无冲突。**
+- `e4f0590`（#73）在 `inspect::record` 里 `notes.push`；更早合入的 `d31600e`（#78）已删掉 `notes` 改成 `lost`。两边各自相对当时 main 绿，合起来 `cannot find value notes`（#129）。Done right on 10-14: `de4931d`。
+- 同日第二次：`8543ea9`（#103）给 `dispatch::snapshot::Issue` 加字段；`de69a92`（#102）在另一份 main 上新增字面量构造。合起来 E0063 missing fields（#139）。Done right on 10-14: `a9f06c9`——`..Default::default()`。
+- 怎么避免：审查/合并前 `git fetch && rebase origin/main && cargo check --tests && make check`；扩展结构体字段时全仓 grep 字面量构造。merge-gate 的 CI 必须以**合到当时最新 main 之后**的 head 为准。
+- Seen 2× (2026-10-14)。
 
 **流程工具链（认领租约、合并闸门）合入时，fixture 回放可以代替“真多智能体演示”，但要在 Not tried 写清。**
 - Done right on 10-14: `c72af3d`（#16 claims）——有 0008 决定与子系统文档、882 行回放测试；Not tried 只留真实多 agent 演示。本轮未见恶意模式或手改护栏被拆。
