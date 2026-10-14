@@ -1,5 +1,7 @@
 # 大麦改版巡检
 
+> 大麦改了程序依赖的字段或状态码时，巡检第一时间报出来并开 issue
+
 `theflash inspect` 拿真实大麦的页面和接口，对照程序依赖的字段路径和状态码映射，变了就报出来，并可以自动开 issue。`theflash inspect record` 把真实响应脱敏后录成 fixture。为什么这样做见 [0011](../decisions/0011-damai-revision-inspection.md)。
 
 这两条命令是给 agent 用的，不是给买票的用户用的：自动化测试和 CI 绝不访问真实大麦（[0003](../decisions/0003-tests-cannot-reach-damai.md)），所以“和真实世界对齐”这件事只能由一个 agent 定期运行它来做。
