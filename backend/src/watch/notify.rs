@@ -54,18 +54,10 @@ pub(crate) fn open_browser(url: &str) -> Result<(), String> {
         .stderr(Stdio::null())
         .spawn()
         .map_err(|e| e.to_string())?;
-    for _ in 0..150 {
-        match child.try_wait() {
-            Ok(Some(status)) if status.success() => return Ok(()),
-            Ok(Some(status)) => {
-                return Err(format!("启动器退出码 {}", status.code().unwrap_or(-1)));
-            }
-            Err(e) => return Err(e.to_string()),
-            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(10)),
-        }
+    let status = child.wait().map_err(|e| e.to_string())?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("启动器退出码 {}", status.code().unwrap_or(-1)))
     }
-    std::thread::spawn(move || {
-        let _ = child.wait();
-    });
-    Ok(())
 }

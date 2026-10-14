@@ -303,10 +303,17 @@ fn watch_hands_off_the_selected_tier_to_the_browser_and_no_open_skips_it() {
     let damai = on_sale();
     let home = support::Home::new("watch-handoff");
     let opened_log = home.path().join("opened.txt");
+    // Open the log file before sleeping so `opened_log.exists()` is already
+    // true while the file is still 0 bytes, and sleep past the old 1.5 s / 2 s
+    // wall-clock deadlines (#148): `watch` must wait for the launcher to
+    // finish before reporting the handoff line on stdout.
     let browser = support::stub(
         home.path(),
         "fake-browser",
-        &format!("printf '%s\\n' \"$1\" >> '{}'", opened_log.display()),
+        &format!(
+            "exec >> '{}'\nsleep 2.2\nprintf '%s\\n' \"$1\"",
+            opened_log.display()
+        ),
     );
 
     let mut command = home.theflash(&damai.base_url());
@@ -349,10 +356,6 @@ fn watch_hands_off_the_selected_tier_to_the_browser_and_no_open_skips_it() {
     let (status, stdout, stderr) = watch.interrupt();
     assert!(status.success(), "{status:?} {stderr}");
     assert!(stdout.contains("开售前检查："), "{stdout}");
-    let deadline = Instant::now() + Duration::from_secs(2);
-    while !opened_log.exists() && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(20));
-    }
     let launched = std::fs::read_to_string(&opened_log).unwrap_or_default();
     let urls: Vec<&str> = launched.lines().collect();
     assert_eq!(urls.len(), 1, "浏览器应当只被拉起一次：{launched}");
@@ -473,10 +476,6 @@ fn watch_hands_off_the_selected_tier_to_the_browser_and_no_open_skips_it() {
         !stdout_seat.contains("2 张"),
         "选座购票不应宣称已预设 2 张：{stdout_seat}"
     );
-    let deadline_seat = Instant::now() + Duration::from_secs(2);
-    while !opened_log.exists() && Instant::now() < deadline_seat {
-        std::thread::sleep(Duration::from_millis(20));
-    }
     let seat_url = std::fs::read_to_string(&opened_log).unwrap_or_default();
     assert!(
         seat_url.starts_with("https://m.damai.cn/app/dmfe/select-seat-biz/kylin.html?")
