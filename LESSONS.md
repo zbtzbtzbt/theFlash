@@ -1,4 +1,4 @@
-<!-- reviewed-through: ddd0c5e (2026-10-14 12:00 +0800) -->
+<!-- reviewed-through: 1d787d9 (2026-10-14 12:20 +0800) -->
 # 已合并工作的教训
 
 本项目的代码由 agent 编写、审查、合并和发布。每天夜里有一个复盘 agent 检查当天的 commit：哪些改动后来又被返工、哪些不该合并、哪些验证得太薄。学到的东西记在这里。改代码之前先读这份文件。
@@ -76,6 +76,11 @@
 
 ## 并发与测试
 
+**测试里的假 sleep / 让出不能用“空转一次就够”的假设；忙机器上要用会真正让出的短 sleep 或注入调度。**
+- #101 / `1d787d9`：`Fake.sleep` 的 `time.sleep(0)` 在忙 macOS runner 上不保证切换到管道读线程。
+- 怎么避免：时序测试用注入延迟复现，断言不要靠“跑得够快”；Seen 升级条件见 code-standards 时序节。
+- Seen 1× (2026-10-14)。
+
 **并行 PR 不要手改同一张生成出来的索引表；表应由文件生成，check 守护过期。**
 - #45：当晚多次因 `docs/decisions/README.md` / `docs/subsystems/README.md` 把 PR 打回。`78b5a4e` 做成 `make docs-index` + `--check`。
 - Done right on 10-14: `78b5a4e` ——但同改动留下 #53 的假阳性测试，生成器对了、测试没钉住。
@@ -99,7 +104,7 @@
 - Seen 1× (2026-10-14)。
 
 **main 红着不要往上叠新功能。**
-- `ddd0c5e` 合入后 [Test 38509196670](https://github.com/zbtzbtzbt/theFlash/actions/runs/38509196670) macOS 红、Ubuntu 绿：`test_inhibitor_start_failure_drains_output_and_stops_child`（监督循环不停）。已开修复 issue；下一轮勿叠功能。
+- `ddd0c5e` 合入后 [Test 38509196670](https://github.com/zbtzbtzbt/theFlash/actions/runs/38509196670) macOS 红：`test_inhibitor_start_failure…`。Done right on 10-14: `1d787d9`（#101）——假 `sleep` 用 `time.sleep(0.001)` 真正让出，避免忙 runner 上空转到上限；生产代码未改。issue 仍待验收。
 - Done right on 10-14: `f12b84d` 专修 `f56b3c0` 引入后暴露的 Ubuntu 红，不叠功能。合入后仍等该 commit 的 Test 双平台绿再继续发版。
 - Seen 1× (2026-10-14)。
 
