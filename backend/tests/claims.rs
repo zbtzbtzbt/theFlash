@@ -625,6 +625,10 @@ if [ "$1" = api ]; then
   exit 0
 fi
 if [ "$1" = issue ] && [ "$2" = comment ]; then
+  if [ -n "$CLAIMS_FAKE_GH_FAIL_COMMENT" ]; then
+    echo "fake gh: 发评论失败" >&2
+    exit 1
+  fi
   n="$3"
   body=""
   while [ $# -gt 0 ]; do
@@ -652,12 +656,61 @@ if [ "$1" = issue ] && [ "$2" = comment ]; then
   mv "$f.new" "$f"
   echo "comment-$n $PPID $id" >> "$D/log"
   unlock
+  if [ "$n" = "$CLAIMS_FAKE_GH_COMMENT_BARRIER" ] && [ ! -f "$D/commented.$PPID" ]; then
+    : > "$D/commented.$PPID"
+    i=0
+    while [ "$(ls "$D" | grep -c '^commented\.')" -lt 2 ] && [ "$i" -lt 300 ]; do
+      sleep 0.1
+      i=$((i + 1))
+    done
+  fi
   echo "$url"
   exit 0
 fi
 if [ "$1" = issue ] && [ "$2" = edit ]; then
+  n="$3"
   lock
-  echo "label $3 $*" >> "$D/labels"
+  echo "label $n $*" >> "$D/labels"
+  echo "label-$n $PPID $*" >> "$D/log"
+  partial=0
+  if [ -n "$CLAIMS_FAKE_GH_PARTIAL_EDIT" ] && [ ! -f "$D/partial-done.$n" ]; then
+    : > "$D/partial-done.$n"
+    partial=1
+  fi
+  python3 - "$D" "$n" "$partial" "$@" <<'PY'
+import json, os, sys
+d, num, partial = sys.argv[1], int(sys.argv[2]), sys.argv[3] == "1"
+args = sys.argv[4:]
+add, rem = [], []
+i = 0
+while i < len(args):
+    if args[i] == "--add-label" and i + 1 < len(args):
+        add.append(args[i + 1]); i += 2
+    elif args[i] == "--remove-label" and i + 1 < len(args):
+        if not partial:
+            rem.append(args[i + 1])
+        i += 2
+    else:
+        i += 1
+def apply_labels(issue):
+    names = [l["name"] for l in issue.get("labels", []) if l["name"] not in rem]
+    for a in add:
+        if a not in names:
+            names.append(a)
+    issue["labels"] = [{"name": x} for x in names]
+p = os.path.join(d, f"issue-{num}.json")
+if os.path.exists(p):
+    data = json.load(open(p))
+    apply_labels(data)
+    json.dump(data, open(p, "w"), ensure_ascii=False, indent=2)
+op = os.path.join(d, "open-issues.json")
+if os.path.exists(op):
+    items = json.load(open(op))
+    for item in items:
+        if item.get("number") == num:
+            apply_labels(item)
+    json.dump(items, open(op, "w"), ensure_ascii=False, indent=2)
+PY
   unlock
   exit 0
 fi
@@ -1027,6 +1080,122 @@ fn claiming_what_waits_for_the_owner_or_for_another_issue_is_refused() {
         "{}",
         blocked.out
     );
+
+    // #37 carries P3 and 待验收 in open-issues.json. Even when it is the
+    // only issue in the snapshot (or when --out-of-order is passed),
+    // claiming an issue that is already awaiting acceptance is refused.
+    let dir = temp("awaiting-acceptance");
+    for entry in std::fs::read_dir(priority_fixtures()).unwrap() {
+        let entry = entry.unwrap();
+        std::fs::copy(entry.path(), dir.join(entry.file_name())).unwrap();
+    }
+    std::fs::write(dir.join("issues.json"), "[]\n").unwrap();
+    let open: Vec<serde_json::Value> =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("open-issues.json")).unwrap())
+            .unwrap();
+    let thirty_seven: Vec<serde_json::Value> =
+        open.into_iter().filter(|i| i["number"] == 37).collect();
+    std::fs::write(
+        dir.join("open-issues.json"),
+        serde_json::to_vec_pretty(&thirty_seven).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("issue-37.json"),
+        serde_json::to_vec_pretty(&thirty_seven[0]).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(dir.join("comments-37.json"), "[]\n").unwrap();
+    let acceptance = claims(
+        &dir,
+        PRIORITY_NOW,
+        &[
+            "claim",
+            "--issue",
+            "37",
+            "--agent",
+            "Codex",
+            "--modules",
+            "docs/somewhere",
+        ],
+    );
+    assert_eq!(acceptance.code, 1, "{}", acceptance.out);
+    assert!(acceptance.out.contains("待验收"), "{}", acceptance.out);
+    let acceptance = claims(
+        &dir,
+        PRIORITY_NOW,
+        &[
+            "claim",
+            "--issue",
+            "37",
+            "--agent",
+            "Codex",
+            "--modules",
+            "docs/somewhere",
+            "--out-of-order",
+            "我想再做一遍",
+        ],
+    );
+    assert_eq!(
+        acceptance.code, 1,
+        "待验收的不能靠 --out-of-order 绕过：{}",
+        acceptance.out
+    );
+}
+
+#[test]
+fn a_dependency_inside_a_four_backtick_fenced_example_does_not_block_an_issue() {
+    let dir = temp("fenced-dep");
+    for entry in std::fs::read_dir(priority_fixtures()).unwrap() {
+        let entry = entry.unwrap();
+        std::fs::copy(entry.path(), dir.join(entry.file_name())).unwrap();
+    }
+    std::fs::write(dir.join("issues.json"), "[]\n").unwrap();
+    let open: Vec<serde_json::Value> =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("open-issues.json")).unwrap())
+            .unwrap();
+    let subset: Vec<serde_json::Value> = open
+        .into_iter()
+        .filter(|i| i["number"] == 4 || i["number"] == 54)
+        .map(|mut i| {
+            if i["number"] == 54 {
+                i["body"] = serde_json::json!("````markdown\n```\n依赖：#4\n```\n````\n");
+            }
+            i
+        })
+        .collect();
+    std::fs::write(
+        dir.join("open-issues.json"),
+        serde_json::to_vec_pretty(&subset).unwrap(),
+    )
+    .unwrap();
+    let q = claims(&dir, PRIORITY_NOW, &["queue", "--json"]);
+    assert_eq!(q.code, 0, "{}", q.out);
+    let parsed: serde_json::Value = serde_json::from_str(q.out.trim()).expect(&q.out);
+    let ready: Vec<u64> = parsed["ready"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["issue"].as_u64().unwrap())
+        .collect();
+    assert!(
+        ready.contains(&54),
+        "四反引号代码块里的三反引号示例不能把 #54 挡进 waiting：{parsed:#}"
+    );
+    let claim = claims(
+        &dir,
+        PRIORITY_NOW,
+        &[
+            "claim",
+            "--issue",
+            "54",
+            "--agent",
+            "Codex",
+            "--modules",
+            "docs/somewhere",
+        ],
+    );
+    assert_eq!(claim.code, 0, "{}", claim.out);
 }
 
 #[test]
@@ -1110,7 +1279,7 @@ fn triage_posts_its_comment_before_it_swaps_the_labels_in_one_edit() {
         let entry = entry.unwrap();
         std::fs::copy(entry.path(), dir.join(entry.file_name())).unwrap();
     }
-    let run = run(claims_with_fake_gh(
+    let run_ok = run(claims_with_fake_gh(
         &dir,
         &[
             "triage",
@@ -1128,9 +1297,12 @@ fn triage_posts_its_comment_before_it_swaps_the_labels_in_one_edit() {
             PRIORITY_NOW,
         ],
     ));
-    assert_eq!(run.code, 0, "{}", run.out);
+    assert_eq!(run_ok.code, 0, "{}", run_ok.out);
     let log = std::fs::read_to_string(dir.join("log")).unwrap();
-    assert!(log.contains("comment-49"), "要先发定级评论：{log}");
+    assert!(
+        position(&log, "comment-49") < position(&log, "label-49"),
+        "定级评论必须在改标签之前发出：\n{log}"
+    );
     let labels = std::fs::read_to_string(dir.join("labels")).unwrap();
     assert_eq!(
         labels.lines().count(),
@@ -1149,6 +1321,258 @@ fn triage_posts_its_comment_before_it_swaps_the_labels_in_one_edit() {
         .unwrap()
         .to_string();
     assert!(last.starts_with("## 优先级"), "{last}");
+
+    let fail_dir = temp("triage-comment-fails");
+    for entry in std::fs::read_dir(priority_fixtures()).unwrap() {
+        let entry = entry.unwrap();
+        std::fs::copy(entry.path(), fail_dir.join(entry.file_name())).unwrap();
+    }
+    let mut cmd = claims_with_fake_gh(
+        &fail_dir,
+        &[
+            "triage",
+            "--issue",
+            "49",
+            "--agent",
+            "Codex",
+            "--priority",
+            "P1",
+            "--important",
+            "测试守不住它名字里的保证",
+            "--urgent",
+            "没有人被它挡住",
+            "--now",
+            PRIORITY_NOW,
+        ],
+    );
+    cmd.env("CLAIMS_FAKE_GH_FAIL_COMMENT", "1");
+    let failed = run(cmd);
+    assert_eq!(failed.code, 2, "{}", failed.out);
+    assert!(
+        !fail_dir.join("labels").exists(),
+        "发评论失败时不能先去改标签"
+    );
+}
+
+#[test]
+fn triage_removes_lowercase_or_multiple_existing_priority_labels() {
+    let dir = temp("triage-lowercase");
+    for entry in std::fs::read_dir(priority_fixtures()).unwrap() {
+        let entry = entry.unwrap();
+        std::fs::copy(entry.path(), dir.join(entry.file_name())).unwrap();
+    }
+    let set_labels = |dir: &Path, names: &[&str]| {
+        let labels: Vec<serde_json::Value> = names
+            .iter()
+            .map(|n| serde_json::json!({"name": n}))
+            .collect();
+        let mut issue: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("issue-49.json")).unwrap())
+                .unwrap();
+        issue["labels"] = serde_json::Value::Array(labels.clone());
+        std::fs::write(
+            dir.join("issue-49.json"),
+            serde_json::to_vec_pretty(&issue).unwrap(),
+        )
+        .unwrap();
+        let mut open: Vec<serde_json::Value> =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("open-issues.json")).unwrap())
+                .unwrap();
+        for item in &mut open {
+            if item["number"] == 49 {
+                item["labels"] = serde_json::Value::Array(labels.clone());
+            }
+        }
+        std::fs::write(
+            dir.join("open-issues.json"),
+            serde_json::to_vec_pretty(&open).unwrap(),
+        )
+        .unwrap();
+    };
+    set_labels(&dir, &["bug", "p2"]);
+
+    let preview = claims(
+        &dir,
+        PRIORITY_NOW,
+        &[
+            "triage",
+            "--issue",
+            "49",
+            "--agent",
+            "Codex",
+            "--priority",
+            "P1",
+            "--important",
+            "测试可信度",
+            "--urgent",
+            "没有截止点",
+        ],
+    );
+    assert_eq!(preview.code, 0, "{}", preview.out);
+    assert!(
+        preview.out.contains("要改的标签：加上 P1，去掉 p2"),
+        "小写 p2 也要被列进删除列表：\n{}",
+        preview.out
+    );
+
+    let write_run = run(claims_with_fake_gh(
+        &dir,
+        &[
+            "triage",
+            "--issue",
+            "49",
+            "--agent",
+            "Codex",
+            "--priority",
+            "P1",
+            "--important",
+            "测试可信度",
+            "--urgent",
+            "没有截止点",
+            "--now",
+            PRIORITY_NOW,
+        ],
+    ));
+    assert_eq!(write_run.code, 0, "{}", write_run.out);
+    let after: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("issue-49.json")).unwrap()).unwrap();
+    let names: Vec<&str> = after["labels"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, vec!["bug", "P1"], "旧的小写 p2 必须被删掉");
+}
+
+#[test]
+fn two_agents_triaging_at_the_same_moment_leave_one_priority_label() {
+    let dir = temp("triage-race");
+    for entry in std::fs::read_dir(priority_fixtures()).unwrap() {
+        let entry = entry.unwrap();
+        std::fs::copy(entry.path(), dir.join(entry.file_name())).unwrap();
+    }
+    let labels = serde_json::json!([{"name": "bug"}, {"name": "P1"}]);
+    let mut issue: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("issue-49.json")).unwrap()).unwrap();
+    issue["labels"] = labels.clone();
+    std::fs::write(
+        dir.join("issue-49.json"),
+        serde_json::to_vec_pretty(&issue).unwrap(),
+    )
+    .unwrap();
+    let mut open: Vec<serde_json::Value> =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("open-issues.json")).unwrap())
+            .unwrap();
+    for item in &mut open {
+        if item["number"] == 49 {
+            item["labels"] = labels.clone();
+        }
+    }
+    std::fs::write(
+        dir.join("open-issues.json"),
+        serde_json::to_vec_pretty(&open).unwrap(),
+    )
+    .unwrap();
+
+    let both: Vec<Run> = ["P0", "P2"]
+        .iter()
+        .map(|prio| {
+            let mut cmd = claims_with_fake_gh(
+                &dir,
+                &[
+                    "triage",
+                    "--issue",
+                    "49",
+                    "--agent",
+                    "Codex",
+                    "--priority",
+                    prio,
+                    "--important",
+                    "审查探针",
+                    "--urgent",
+                    "审查探针",
+                    "--now",
+                    PRIORITY_NOW,
+                ],
+            );
+            cmd.env("CLAIMS_FAKE_GH_COMMENT_BARRIER", "49");
+            std::thread::spawn(move || run(cmd))
+        })
+        .collect::<Vec<_>>()
+        .into_iter()
+        .map(|t| t.join().unwrap())
+        .collect();
+
+    let winners: Vec<&Run> = both.iter().filter(|r| r.code == 0).collect();
+    let losers: Vec<&Run> = both.iter().filter(|r| r.code == 1).collect();
+    assert_eq!(
+        winners.len(),
+        1,
+        "并发定级同一个 issue，只能有一个成功：\n{}\n----\n{}",
+        both[0].out,
+        both[1].out
+    );
+    assert_eq!(losers.len(), 1);
+    let after: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("issue-49.json")).unwrap()).unwrap();
+    let names: Vec<String> = after["labels"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l["name"].as_str().unwrap().to_string())
+        .collect();
+    assert!(
+        matches!(
+            theflash::claim::priority::level(&names),
+            theflash::claim::priority::Level::Set(_)
+        ),
+        "并发定级结束后，issue 上必须只有一个优先级标签，不能留下两个：{names:?}"
+    );
+
+    // Partial label edit (gh issue edit applies --add-label but drops
+    // --remove-label on the first call) is caught and cleaned up on
+    // read-back before triage reports success.
+    let partial_dir = temp("triage-partial");
+    for entry in std::fs::read_dir(priority_fixtures()).unwrap() {
+        let entry = entry.unwrap();
+        std::fs::copy(entry.path(), partial_dir.join(entry.file_name())).unwrap();
+    }
+    let mut cmd = claims_with_fake_gh(
+        &partial_dir,
+        &[
+            "triage",
+            "--issue",
+            "49",
+            "--agent",
+            "Codex",
+            "--priority",
+            "P1",
+            "--important",
+            "审查探针",
+            "--urgent",
+            "审查探针",
+            "--now",
+            PRIORITY_NOW,
+        ],
+    );
+    cmd.env("CLAIMS_FAKE_GH_PARTIAL_EDIT", "1");
+    let repaired = run(cmd);
+    assert_eq!(repaired.code, 0, "{}", repaired.out);
+    let after: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(partial_dir.join("issue-49.json")).unwrap())
+            .unwrap();
+    let names: Vec<&str> = after["labels"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        names,
+        vec!["bug", "P1"],
+        "第一次编辑漏删旧标签时，写后核对要把残留的 P2 清掉"
+    );
 }
 
 #[test]

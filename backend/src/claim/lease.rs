@@ -190,20 +190,25 @@ pub fn yielded_claim(body: &str) -> Option<String> {
 /// heartbeat and hand-back comments (the demo record on issue #31 quotes
 /// all three). Reading a quote as the thing it quotes would let a report
 /// claim an issue, or resurrect a lease that was handed back hours ago.
-fn said(body: &str) -> Vec<&str> {
+pub(super) fn said(body: &str) -> Vec<&str> {
     let mut out = Vec::new();
     let mut fence: Option<(char, usize)> = None;
     for line in body.lines() {
         let trimmed = line.trim_start();
         match fence {
             // Inside a fence until a run of the same character at least
-            // as long as the one that opened it (CommonMark).
+            // as long as the one that opened it, with no info string
+            // after the closing markers (CommonMark).
             Some((marker, len)) => {
-                if fence_run(trimmed, marker) >= len {
+                let run = fence_run(trimmed, marker);
+                if run >= len && trimmed[run..].trim().is_empty() {
                     fence = None;
                 }
             }
-            None => match ['`', '~'].into_iter().find(|c| fence_run(trimmed, *c) >= 3) {
+            None => match ['`', '~'].into_iter().find(|c| {
+                let run = fence_run(trimmed, *c);
+                run >= 3 && (*c != '`' || !trimmed[run..].contains('`'))
+            }) {
                 Some(marker) => fence = Some((marker, fence_run(trimmed, marker))),
                 None if trimmed.starts_with('>') => {}
                 None => out.push(line),
@@ -310,7 +315,7 @@ pub fn parse_time(value: &str) -> Option<DateTime<Utc>> {
 }
 
 /// The value of the first of `keys` these lines have a field for.
-fn field(lines: &[&str], keys: &[&str]) -> String {
+pub(super) fn field(lines: &[&str], keys: &[&str]) -> String {
     lines
         .iter()
         .filter_map(|l| split_field(l))
@@ -321,7 +326,7 @@ fn field(lines: &[&str], keys: &[&str]) -> String {
 
 /// `marker` on a line of its own, with or without `#` heading markers,
 /// bold markers or a trailing colon.
-fn is_marker_line(line: &str, marker: &str) -> bool {
+pub(super) fn is_marker_line(line: &str, marker: &str) -> bool {
     let t = line
         .trim()
         .trim_start_matches('#')
