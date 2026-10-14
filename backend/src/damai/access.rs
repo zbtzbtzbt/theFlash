@@ -152,6 +152,24 @@ impl Gate {
         Ok(gate)
     }
 
+    /// The gate for the commands that only read or clear the breaker and
+    /// never ask damai.cn anything: `theflash risk` and its two `resume`
+    /// forms. They need the state directory, not the pacing, so the gap
+    /// they are given is never waited out — a gate of its own is no second
+    /// request budget (#74), because this one lets no request out.
+    /// THEFLASH_REQUEST_GAP_MS is deliberately not read here: the
+    /// unattended validation that sets it (0009) is the environment a
+    /// breaker turns up in, and a mistyped value there must not be what
+    /// keeps the user from seeing or clearing it (#83).
+    pub fn for_breaker_only() -> Result<Gate, Error> {
+        Gate::new(
+            state_dir()?,
+            MIN_REQUEST_GAP,
+            Arc::new(SystemClock::default()),
+            running_command(),
+        )
+    }
+
     /// Fails now rather than at the first request: a state directory this
     /// user cannot write is a reason to stop, never a reason to assume no
     /// risk control happened.

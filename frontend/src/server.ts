@@ -109,7 +109,14 @@ function statusFor(code: string): number {
     case "risk-control":
     case "risk-stopped":
       return 403;
+    // All three are this machine's own state, settings or missing
+    // packages, not damai being unreachable: a breaker file that cannot be
+    // read, a mistyped THEFLASH_REQUEST_GAP_MS, and a client that cannot
+    // be built at all (no CA certificates). No request went out for any of
+    // them, so the default 502 "网络不可用" would be wrong (#51, #83).
     case "risk-state":
+    case "invalid-config":
+    case "setup":
       return 500;
     default:
       return 502;

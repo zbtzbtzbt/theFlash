@@ -67,6 +67,8 @@ reqwest 默认会自己跟随重定向：下一跳在同一次 `send()` 里发�
 | `theflash risk resume` | 打印这次风控，不解除 | 没有熔断 0，熔断生效 2 |
 | `theflash risk resume --yes` | 解除熔断，打印清掉的是哪一条，并提醒只有 owner 看过才该这么做。状态文件读不懂时也删掉它（它正是挡住查询的东西），并说明“原来记的是哪一次风控已经没了” | 0 |
 
+这三条命令只读写本机的熔断状态，一个大麦请求都不发，所以它们走 `Gate::for_breaker_only`：只要状态目录，不读 `THEFLASH_REQUEST_GAP_MS`。无人值守验证（[0009](../decisions/0009-launchd-validation.md)）正是设置这个变量的环境，也正是熔断会出现的地方；变量写错时还能看到熔断、解除熔断（#83）。要发请求的 `event` / `event-json` / `watch` 仍然按上面[失败时的行为](#失败时的行为)停下。
+
 ## 失败时的行为
 
 | 情况 | 行为 |
@@ -76,7 +78,7 @@ reqwest 默认会自己跟随重定向：下一跳在同一次 `send()` 里发�
 | 状态文件内容不是它该有的样子（空、截断、缺字段） | 请求不发出，报告读不到熔断状态、已停止，并给出文件路径 |
 | 风控发生但熔断写不进去 | 本进程照样停止，并明确说“别的 theFlash 进程不会自动停下，请手动停掉并报告 owner” |
 | `HOME` 没设置 | 停下并说明，不猜测状态目录 |
-| `THEFLASH_REQUEST_GAP_MS` 无效（不是整数、超出范围或非 UTF-8） | `Gate::for_user` 返回 `InvalidConfig`，退出码 1，不发请求；`event`、`event-json`、`watch`、`risk`（含两个 `resume` 用法）的提示相同 |
+| `THEFLASH_REQUEST_GAP_MS` 无效（不是整数、超出范围或非 UTF-8） | `Gate::for_user` 返回 `InvalidConfig`，退出码 1，不发请求；`event`、`event-json`、`watch` 的提示相同。`risk`（含两个 `resume` 用法）不受影响，见下面的[命令](#命令) |
 
 ## 频率上限的范围
 
@@ -89,10 +91,10 @@ reqwest 默认会自己跟随重定向：下一跳在同一次 `send()` 里发�
 ## 验证
 
 - `make check`。
-- `cd backend && cargo test --test cli invalid_request_gap_configuration`：四个入口覆盖错误类型、提示、退出码和零请求，`risk` 同时覆盖查看、`resume`、`resume --yes`；`event-json` 的错误码见[查询失败契约](damai-event.md#失败时的行为)。
+- `cd backend && cargo test --test cli request_gap`：`event`、`event-json`、`watch` 三个入口覆盖错误类型、提示、退出码和零请求；`risk`（查看、`resume`、`resume --yes`）用同一批无效值确认照常执行、退出 0、提示里不出现这个变量。`event-json` 的错误码见[查询失败契约](damai-event.md#失败时的行为)。
 - [`backend/src/damai/access.rs`](../../backend/src/damai/access.rs) 的单元测试：两个平台的状态目录位置（包括 `XDG_STATE_HOME` 不是绝对路径时忽略）、用注入的虚拟时钟检查并发调用方共用一个频率上限、`THEFLASH_REQUEST_GAP_MS` 只能把间隔调大且无效值被拒、一个客户端写的熔断挡住另一个客户端、损坏的状态文件不被当成“没有熔断”、状态目录建不了时停下、风控标记识别（只用 `testdata/damai/risk_control.html` 回放）。
 - [`backend/src/damai/access.rs`](../../backend/src/damai/access.rs) 里 #74 的两条：晚醒来的调用方不会把攒下的时隙一起放完（虚拟时钟直接跳到 1000 毫秒，按 1000 / 1299 / 1300 毫秒数放行数）；只读目录里留着的旧锁文件不算“可以写”。
 - [`backend/tests/access.rs`](../../backend/tests/access.rs) 里 #74 的四条：重定向到滑块验证页时四个出口都记熔断且不跟过去（下一跳回放“演出不存在”，所以跟过去就会漏记）；普通重定向每一跳都排队；一直重定向会停下；一个进程里两个默认 `Client` 共用一份预算（在自己的进程里跑，HOME 是临时目录）；只读状态目录下一个请求都不发。
-- [`backend/tests/access.rs`](../../backend/tests/access.rs)：两个独立的 `theflash` 进程共用一个临时 HOME，一个收到回放的风控页后，另一个（以及 `watch` 和界面用的 `event-json`）的下一次请求不发出；`theflash risk` / `resume` / `resume --yes` 的行为；状态文件损坏和目录不可写时停止并说明原因；一次查询的 4 个请求确实被频率上限隔开。
+- [`backend/tests/access.rs`](../../backend/tests/access.rs)：两个独立的 `theflash` 进程共用一个临时 HOME，一个收到回放的风控页后，另一个（以及 `watch` 和界面用的 `event-json`）的下一次请求不发出；`theflash risk` / `resume` / `resume --yes` 的行为，包括 `THEFLASH_REQUEST_GAP_MS` 写错时熔断照样看得到、解除得了，而同一环境里的 `event` 仍然停下；状态文件损坏和目录不可写时停止并说明原因；一次查询的 4 个请求确实被频率上限隔开。
 - [`frontend/src/server.test.ts`](../../frontend/src/server.test.ts)：界面在熔断生效时返回 `risk-stopped`，重启服务也一样；状态文件损坏时返回 `risk-state`。测试都在临时 HOME 下跑，不碰真实状态目录，也不访问真实大麦。
 - 真实环境：用 `theflash event` 查一场真实演出，确认正常查询不受影响。**绝不为了验证熔断去故意触发真实风控**，风控路径只用保存下来的响应回放。

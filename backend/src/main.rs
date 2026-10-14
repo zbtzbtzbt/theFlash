@@ -369,9 +369,11 @@ async fn inspect_record(args: &[&str]) -> ExitCode {
 
 /// The risk-control breaker every theFlash process shares. It never clears
 /// itself: the owner decides what to do after risk control, so clearing it
-/// is a command the user runs on purpose.
+/// is a command the user runs on purpose. It reads and writes this
+/// machine's state only, so it asks the access layer for the state
+/// directory alone and not for the request pacing (#83).
 fn risk_command(args: &[&str]) -> ExitCode {
-    let gate = match damai::Gate::for_user() {
+    let gate = match damai::Gate::for_breaker_only() {
         Ok(g) => g,
         Err(e) => {
             eprintln!("{e}");

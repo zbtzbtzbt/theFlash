@@ -86,12 +86,22 @@
 
 CA 证书和 HTTP 客户端这两种失败发生在 [`Client::new`](../../backend/src/damai/client.rs) 建客户端的时候，早于任何请求：Linux 上 rustls 在这一步读系统的 CA 证书，一张都没有就建不起来（macOS 用钥匙串，不会这样）。`watch` 和界面用的 `event-json` 走同一个 `Client::new`，提示相同；`event-json` 的 `code` 是 `setup`。
 
-`THEFLASH_REQUEST_GAP_MS` 由[大麦访问层](damai-access.md#频率上限的范围)在建客户端之前校验。`event-json` 对这类错误返回 `error.code: "invalid-config"`；`invalid-input` 只用于演出链接或 ID 无效，两者分别退出 1 和 2。界面服务对 `invalid-config` 沿用默认的 HTTP 502 并显示消息，不把它归为链接输入错误（400）。
+`THEFLASH_REQUEST_GAP_MS` 由[大麦访问层](damai-access.md#频率上限的范围)在建客户端之前校验。`event-json` 对这类错误返回 `error.code: "invalid-config"`；`invalid-input` 只用于演出链接或 ID 无效，两者分别退出 1 和 2。
+
+界面服务按 code 定 HTTP 状态码（[`frontend/src/server.ts`](../../frontend/src/server.ts) 的 `statusFor`），页面无论哪一种都照常显示后端的 message：
+
+| code | HTTP | 为什么 |
+| --- | --- | --- |
+| `invalid-input` | 400 | 用户输入的链接或 ID 不对 |
+| `not-found` | 404 | 演出不存在或已下架 |
+| `risk-control`、`risk-stopped` | 403 | 大麦的风控拦住了，或本机熔断生效 |
+| `risk-state`、`invalid-config`、`setup` | 500 | 本机自己的状态、设置或缺少的软件包，一个请求都没发出去（#83） |
+| `network`、`parse`、其他 | 502 | 请求发出去了，大麦没回应或回应看不懂 |
 
 ## 验证
 
 - `make check`。
-- `cd backend && cargo test --test cli invalid_request_gap_configuration`：`event`、`event-json`、`watch`、`risk` 四个入口分别覆盖格式错误、范围外、整数溢出、空值、小数和非 UTF-8，断言提示、JSON code、退出码和零请求；范围两端及 300 毫秒下限由访问层的 `an_asked_for_gap_only_slows_requests_down` 守护。
+- `cd backend && cargo test --test cli request_gap`：`event`、`event-json`、`watch` 三个入口分别覆盖格式错误、范围外、整数溢出、空值、小数和非 UTF-8，断言提示、JSON code、退出码和零请求；同一批值下 `risk` 照常执行（[大麦访问层](damai-access.md#命令)）。范围两端及 300 毫秒下限由访问层的 `an_asked_for_gap_only_slows_requests_down` 守护。
 - [`backend/tests/cli.rs`](../../backend/tests/cli.rs) 用本地假服务器回放 [`backend/testdata/damai/`](../../backend/testdata/damai/) 里的真实响应，运行编译出的程序；不访问真实大麦。`THEFLASH_DAMAI_BASE_URL` 只给测试用，用来把请求指向假服务器。
 - 大麦有没有改版由 [`theflash inspect`](damai-inspect.md) 定期检查：它拿真实响应对照程序依赖的字段路径和状态码映射，变了就报出来并开 issue。**程序开始读一个新的大麦字段时，在同一个改动里把它加进 [`inspect/shape.rs`](../../backend/src/inspect/shape.rs)**，否则巡检不会守它。改版之后用 `theflash inspect record` 重新录 fixture，再用浏览器打开同一场演出核对场次和票档的显示。
 

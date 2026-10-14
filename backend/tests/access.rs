@@ -170,6 +170,61 @@ fn the_breaker_says_what_happened_and_only_resume_yes_clears_it() {
     assert_eq!(damai.hits().len(), 4, "{:?}", damai.hits());
 }
 
+// #83: a breaker shows up in the environment the unattended validation
+// runs in, which is the one that sets THEFLASH_REQUEST_GAP_MS (0009). The
+// risk commands only read and clear this machine's state, so a mistyped
+// value there must not hide a breaker that is in effect or keep the owner
+// from clearing it. The queries that do send requests still refuse, since
+// they are the ones the gap would pace.
+#[test]
+fn a_mistyped_request_gap_still_shows_the_breaker_and_clears_it() {
+    let home = Home::new("bad-gap");
+    let risky = risk_control();
+    let tripped = run(&home, &risky.base_url(), &["event", "1086791513717"]);
+    assert!(!tripped.status.success(), "{}", out(&tripped));
+    assert!(home.risk_stop_file().is_file(), "{}", out(&tripped));
+
+    let with_bad_gap = |args: &[&str]| {
+        let mut c = home.theflash(&risky.base_url());
+        c.args(args).env("THEFLASH_REQUEST_GAP_MS", "bad");
+        support::output_within(c, 30)
+    };
+
+    let shown = with_bad_gap(&["risk"]);
+    let text = out(&shown);
+    assert_eq!(shown.status.code(), Some(1), "{text}");
+    assert!(text.contains("大麦风控熔断生效中"), "{text}");
+    assert!(text.contains("/item.htm?id=1086791513717"), "{text}");
+    assert!(text.contains("_____tmd_____"), "{text}");
+    assert!(!text.contains("THEFLASH_REQUEST_GAP_MS"), "{text}");
+
+    let asked = with_bad_gap(&["risk", "resume"]);
+    assert_eq!(asked.status.code(), Some(2), "{}", out(&asked));
+    assert!(out(&asked).contains("没有解除"), "{}", out(&asked));
+    assert!(home.risk_stop_file().is_file(), "没加 --yes 就解除了");
+
+    let cleared = with_bad_gap(&["risk", "resume", "--yes"]);
+    assert!(cleared.status.success(), "{}", out(&cleared));
+    assert!(
+        out(&cleared).contains("已解除这次熔断"),
+        "{}",
+        out(&cleared)
+    );
+    assert!(!home.risk_stop_file().exists(), "解除后熔断状态还在");
+
+    // The commands that do send requests are still stopped by the
+    // mistyped gap (#51), and nothing asked damai.cn anything after the
+    // one request that tripped the breaker.
+    let query = with_bad_gap(&["event", "1086791513717"]);
+    assert_eq!(query.status.code(), Some(1), "{}", out(&query));
+    assert!(
+        out(&query).contains("THEFLASH_REQUEST_GAP_MS"),
+        "{}",
+        out(&query)
+    );
+    assert_eq!(risky.hits().len(), 1, "{:?}", risky.hits());
+}
+
 #[test]
 fn a_breaker_file_that_cannot_be_read_stops_queries_and_says_why() {
     for broken in ["", "{", "{\"at\": \"2026-10-14\"}", "not json at all"] {
