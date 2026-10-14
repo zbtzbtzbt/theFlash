@@ -208,13 +208,17 @@ impl Running {
                 .unwrap()
                 .success()
         );
+        self.wait_exit(0)
+    }
+
+    fn wait_exit(&mut self, code: i32) -> String {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             if let Some(status) = self.child.try_wait().unwrap() {
-                assert!(status.success());
+                assert_eq!(status.code(), Some(code));
                 break;
             }
-            assert!(Instant::now() < deadline, "watch did not stop");
+            assert!(Instant::now() < deadline, "watch did not exit");
             std::thread::sleep(Duration::from_millis(20));
         }
         self.reader.take().unwrap().join().unwrap();
@@ -237,6 +241,44 @@ impl Drop for Running {
             reader.join().unwrap();
         }
         let _ = std::fs::remove_dir_all(&self.home);
+    }
+}
+
+#[test]
+fn risk_control_push_finishes_before_the_watch_exits() {
+    for code in [200, 503] {
+        let page = support::fixture("risk_control.html");
+        let damai = Server::start(Box::new(move |_, _| (200, page.clone())));
+        let push = Server::start(Box::new(move |_, _| {
+            // Hold the response so receipt alone cannot stand in for completion.
+            // The rejected response must be reported before watch exits too.
+            std::thread::sleep(Duration::from_millis(200));
+            (code, include_str!("../testdata/ntfy/received.json").into())
+        }));
+        let mut run = Running::start_args(&damai, &push, Some(config()), 0o600, &["1086791513717"]);
+        // Let risk control end watch itself; never wait for delivery then send SIGINT.
+        let out = run.wait_exit(1);
+        assert!(out.contains("【提醒】触发风控，已停止盯票"));
+        assert_no_secrets(&out);
+        assert_eq!(damai.count(), 1, "risk control must stop Damai requests");
+        let requests = push.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1, "risk-control alert was not pushed once");
+        assert_eq!(requests[0].0, "POST / HTTP/1.1\r\n");
+        let payload: serde_json::Value = serde_json::from_str(&requests[0].2).unwrap();
+        assert_eq!(payload["title"], "触发风控，已停止盯票");
+        let body = payload["message"].as_str().unwrap();
+        assert!(body.contains("大麦触发了风控"));
+        for line in body.lines() {
+            assert!(
+                out.contains(&format!("  {line}")),
+                "desktop and phone differ"
+            );
+        }
+        assert_eq!(
+            out.contains("手机推送失败（服务器拒绝推送；topic/token：***）"),
+            code == 503,
+            "watch exited before the push result was reported"
+        );
     }
 }
 

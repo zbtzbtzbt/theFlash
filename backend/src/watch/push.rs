@@ -265,6 +265,32 @@ mod tests {
     }
 
     #[test]
+    fn config_rejects_unknown_fields_in_an_otherwise_valid_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "theflash-push-unknown-fields-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("push.json");
+        let valid = serde_json::json!({"channel": "ntfy", "topic": "fake-topic"});
+        std::fs::write(&path, valid.to_string()).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(load_file(&path).unwrap().is_some());
+        for field in ["tokne", "unexpected"] {
+            let mut invalid = valid.clone();
+            invalid[field] = "fake-value".into();
+            std::fs::write(&path, invalid.to_string()).unwrap();
+            assert!(
+                matches!(load_file(&path), Err("配置 JSON 无效或渠道不支持")),
+                "unknown configuration field {field} was silently accepted"
+            );
+        }
+        std::fs::write(&path, valid.to_string()).unwrap();
+        assert!(load_file(&path).unwrap().is_some());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn secrets_cannot_be_embedded_in_server_urls_and_remote_http_is_refused() {
         for server in [
             "http://ntfy.sh/",
