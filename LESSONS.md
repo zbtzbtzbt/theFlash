@@ -1,4 +1,4 @@
-<!-- reviewed-through: 524222e (2026-10-14 11:01 +0800) -->
+<!-- reviewed-through: d5c4798 (2026-10-14 11:05 +0800) -->
 # 已合并工作的教训
 
 本项目的代码由 agent 编写、审查、合并和发布。每天夜里有一个复盘 agent 检查当天的 commit：哪些改动后来又被返工、哪些不该合并、哪些验证得太薄。学到的东西记在这里。改代码之前先读这份文件。
@@ -69,6 +69,11 @@
 **CI job 显示 failure 时先看 annotation：账单/额度导致“没启动”不等于测试红，不要当代码回归去修。**
 - `fd68bd7`（#4）的 Test run [38503286512](https://github.com/zbtzbtzbt/theFlash/actions/runs/38503286512) 双平台 failure，annotation 为 account payments failed / spending limit；检查未运行。已开 issue 给 owner。
 - 怎么避免：work-tick / hygiene 判 main 红前读 job annotation 或 `gh run view --json jobs`；命中 billing 就停手报告 owner，不改业务代码。
+- Seen 1× (2026-10-14)。
+
+**GitHub Actions 因账单无法启动时，不要把“空 failure”当成已验证通过；合入须在 issue 写明“未跑远程 CI”，恢复后立刻补跑。**
+- `89d371e`（#14 dispatch）正文写明 Actions 全仓库空失败、未以红 CI 为否决；`d5c4798` 合入 LESSONS（PR #56）同样。合理权宜，但 #63 未关前 main 上连续合入都没有一次真正跑完的检查。
+- 怎么避免：billing 挡着时，合并评论固定写「远程 CI 未跑，#63」；#63 关闭后的第一轮 work-tick 必须对当时 HEAD 触发 Test 并确认双平台绿。
 - Seen 1× (2026-10-14)。
 
 **判断 main 红不红只看 Test 工作流；被设计拒绝的 Release run 不算 main 红。**
