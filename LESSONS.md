@@ -43,6 +43,10 @@
 
 ## 验证
 
+**守护测试失败时，先列出真正没过的用例，再给专用提示；不要一上来就归罪路径编码。**
+- Done right on 10-14: `9a5c72c`（#123）——checkout-path 摘要段先列 FAIL 名，再区分原目录失败 vs 副本路径问题。
+- Seen 1× (2026-10-14)。
+
 **列表 API 固定 `--limit 100` 且不翻页时，最旧的那条（巡检自己的 issue）会掉出第一页，导致每天重复新开。**
 - Done right on 10-14: `05fc4be`（#76/#141）——满页则加倍再问直到变短；一直满页则报错不开 issue。claim/dispatch/merge-gate 已 paginate，唯独 inspect 漏了。
 - 怎么避免：凡 `gh issue list` / 列表接口都要有“满页继续”或 `--paginate`；加“第 101 条才是目标”的 fake gh 测试。
