@@ -1,4 +1,4 @@
-<!-- reviewed-through: 91a9973 (2026-10-14 16:28 +0800) -->
+<!-- reviewed-through: b36c8e3 (2026-10-14 16:45 +0800) -->
 # 已合并工作的教训
 
 本项目的代码由 agent 编写、审查、合并和发布。每天夜里有一个复盘 agent 检查当天的 commit：哪些改动后来又被返工、哪些不该合并、哪些验证得太薄。学到的东西记在这里。改代码之前先读这份文件。
@@ -183,7 +183,8 @@
 **判断 main 红不红只看 Test 工作流；被设计拒绝的 Release run 不算 main 红。**
 - `eaf63f6`：版本升到 0.1.0-rc.2；tag/release [v0.1.0-rc.2](https://github.com/zbtzbtzbt/theFlash/releases/tag/v0.1.0-rc.2) 已出（两台 macOS + install.sh）。
 - Done right on 10-14: `3b1cc18`（#5）——Release gate 拒绝未跑完的 Test 时，不带 `--workflow` 的 `gh run list` 会把拒绝显示成 main 红，误导 work-tick。
-- Seen 1× (2026-10-14)。
+- Done right on 10-14: `b36c8e3`（#168）——攒批升到 0.1.0-rc.3，正文写明等该 commit 的 Test 绿再打 tag；hygiene 核对时 tag 尚未存在、Test [38537231602](https://github.com/zbtzbtzbt/theFlash/actions/runs/38537231602) 仍 in_progress（正确）。
+- Seen 2× (2026-10-14)。
 
 **main 红着不要往上叠新功能。**
 - `ddd0c5e` 合入后 [Test 38509196670](https://github.com/zbtzbtzbt/theFlash/actions/runs/38509196670) macOS 红：`test_inhibitor_start_failure…`。Done right on 10-14: `1d787d9`（#101）——假 `sleep` 用 `time.sleep(0.001)` 真正让出，避免忙 runner 上空转到上限；生产代码未改。其 [Test 38510851009](https://github.com/zbtzbtzbt/theFlash/actions/runs/38510851009) 双平台 success；issue 仍待验收。
@@ -214,9 +215,9 @@
 **没有写明「在哪个 head 上跑了什么」的独立审查记录，就不能合；squash 正文里必须有「合并闸门：审查者…」一段。**
 - #13：PR #12 在审查记录写完前已被合并（mergedBy 为 owner 账号，具体操作者未区分）。
 - Done right on 10-14: `f56b3c0` merge-gate ——CI 绿、独立审查、head 匹配才合。
-- **又见**：`02b5e52`（#157）、`c518bbd`（#154）、`b4840a1`（#158）、`f906cd7`（#162）、`72d1c28`（#156）、`c6d20ab`（#163）——均无「合并闸门」段。#159 未停绕闸源期间继续发生；#156 有评论但无正式审查记录/闸门段。
-- 怎么避免：合入只用 `scripts/merge-gate merge`；禁止 `gh pr merge` / 网页 Merge。查清并停掉在仅有 `待审查` 时直接 merge 的自动化。
-- Seen 6× (2026-10-14)。
+- **又见**：`02b5e52`（#157）、`c518bbd`（#154）、`b4840a1`（#158）、`f906cd7`（#162）、`72d1c28`（#156）、`c6d20ab`（#163）、`b36c8e3`（#168 rc.3）——均无闸门段。#168 虽有 Gemini「审查记录」评论，squash 仍无「合并闸门：审查者…」脚注（正文里的「合并闸门改进」是产品说明，不算）。#159 仍未停源。
+- 怎么避免：合入只用 `scripts/merge-gate merge`；禁止 `gh pr merge` / 网页 Merge。hygiene 查闸门段时勿被正文其它「合并闸门」字样误判。
+- Seen 7× (2026-10-14)。
 
 **写「通过」之前必须消化同 PR 上仍有效的「要修改」场景；同一 head 上任一审查者未解除的「要修改」必须挡合并。**
 - PR #127（合入 `3914732`）：Codex 在 `aa6a8cf` 上写了「要修改」，随后另一审查者的「通过」因闸门只认全 PR 最后一条而盖掉前者；缺陷进 main，只能另开 PR #150 / `a3e3f8d` 返工（#160）。
