@@ -120,6 +120,19 @@ pub fn level(labels: &[String]) -> Level {
     }
 }
 
+/// Every priority label on `labels` other than canonical `keep.label()`,
+/// with the exact spelling the issue carries so `gh issue edit --remove-label`
+/// removes lowercase `p2` as well as `P2`.
+pub fn labels_to_remove(labels: &[String], keep: Priority) -> Vec<String> {
+    let mut out = Vec::new();
+    for label in labels {
+        if Priority::parse(label).is_some() && label != keep.label() && !out.contains(label) {
+            out.push(label.clone());
+        }
+    }
+    out
+}
+
 /// The words that start a dependency line, with or without a bullet:
 /// `依赖：#4、#26`, `- 前置: #4`, `Depends on: #4`.
 const DEPENDS_KEYS: [&str; 4] = ["依赖", "前置", "depends on", "blocked by"];
@@ -129,17 +142,9 @@ const DEPENDS_KEYS: [&str; 4] = ["依赖", "前置", "depends on", "blocked by"]
 /// is somebody else's words, the same rule the lease format follows.
 pub fn depends_on(body: &str) -> Vec<u64> {
     let mut out = Vec::new();
-    let mut fenced = false;
-    for line in body.lines() {
-        let line = line.trim();
-        if line.starts_with("```") || line.starts_with("~~~") {
-            fenced = !fenced;
-            continue;
-        }
-        if fenced || line.starts_with('>') {
-            continue;
-        }
+    for line in lease::said(body) {
         let line = line
+            .trim()
             .trim_start_matches(['-', '*', '+'])
             .trim()
             .trim_start_matches("**")
@@ -376,6 +381,12 @@ pub fn decide(open: &[OpenIssue], queue: &Queue, target: u64, reason: Option<&st
              先做不受它影响的部分；裁决之后由 owner 或转述裁决的 agent 去掉标签"
         ));
     }
+    if has(issue, ACCEPTANCE_LABEL) {
+        return Verdict::Refuse(format!(
+            "#{target} 带着 {ACCEPTANCE_LABEL} 标签，实现已经合入、正在等独立验收，不用再认领。\
+             如果你不是实现者，按 prompts/acceptance.md 验收它；验收不通过再换成 {REJECTED_LABEL}"
+        ));
+    }
     let mine = match level(&issue.labels) {
         Level::Set(p) => p,
         Level::Unset => {
@@ -477,6 +488,97 @@ pub fn triage_comment(
     )
 }
 
+pub const TRIAGE_MARKER: &str = "优先级";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Triage {
+    pub url: String,
+    pub posted_at: DateTime<Utc>,
+    pub agent: String,
+    pub priority: Priority,
+    pub previous: String,
+}
+
+/// Reads a `## 优先级` comment out of `body`, ignoring fenced code blocks
+/// and quotes the same way [`lease::parse_claim`] does.
+pub fn parse_triage(body: &str, url: &str, posted_at: DateTime<Utc>) -> Option<Triage> {
+    let lines = lease::said(body);
+    if !lines
+        .iter()
+        .any(|l| lease::is_marker_line(l, TRIAGE_MARKER))
+    {
+        return None;
+    }
+    let agent = lease::field(&lines, &["agent", "定级者"]);
+    let raw = lease::field(&lines, &["优先级", "priority"]);
+    let code = raw.split(['（', '(', ' ']).next().unwrap_or_default();
+    let priority = Priority::parse(code)?;
+    if agent.is_empty() {
+        return None;
+    }
+    Some(Triage {
+        url: url.to_string(),
+        posted_at,
+        agent,
+        priority,
+        previous: lease::field(&lines, &["原来", "原优先级"]),
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TriageConfirmed {
+    Won,
+    Lost {
+        agent: String,
+        priority: Priority,
+        comment: String,
+    },
+    Unclear(String),
+}
+
+/// Whether the `## 优先级` comment at `posted` won the triage transition on
+/// `issue`. Two agents that triage the same issue at the same moment both
+/// read the same `原来` state and both post a `## 优先级` comment; GitHub's
+/// comment order `(posted_at, id)` settles the race so only the earliest
+/// comment in the window edits the labels.
+pub fn confirm_triage(
+    before_urls: &[String],
+    issue: &super::Issue,
+    posted: &str,
+) -> TriageConfirmed {
+    let mut comments: Vec<_> = issue.comments.iter().collect();
+    comments.sort_by_key(|c| (c.posted_at, c.id));
+    let triages: Vec<Triage> = comments
+        .into_iter()
+        .filter_map(|c| parse_triage(&c.body, &c.url, c.posted_at))
+        .collect();
+    let Some(mine_idx) = triages.iter().position(|t| t.url == posted) else {
+        return TriageConfirmed::Unclear(format!("读回来的评论里找不到刚发的定级评论（{posted}）"));
+    };
+    let mine = &triages[mine_idx];
+    for earlier in &triages[..mine_idx] {
+        if !before_urls.iter().any(|u| u == &earlier.url) {
+            return TriageConfirmed::Lost {
+                agent: earlier.agent.clone(),
+                priority: earlier.priority,
+                comment: earlier.url.clone(),
+            };
+        }
+    }
+    if let Some(prev) = mine_idx.checked_sub(1).and_then(|i| triages.get(i))
+        && !mine.previous.is_empty()
+        && prev.previous == mine.previous
+        && prev.priority != mine.priority
+    {
+        return TriageConfirmed::Lost {
+            agent: prev.agent.clone(),
+            priority: prev.priority,
+            comment: prev.url.clone(),
+        };
+    }
+    TriageConfirmed::Won
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -532,7 +634,28 @@ mod tests {
         assert_eq!(depends_on("Depends on: #3"), vec![3]);
         assert_eq!(depends_on("这个 issue 依赖 #4 的设计"), Vec::<u64>::new());
         assert_eq!(depends_on("> 依赖：#4"), Vec::<u64>::new());
+        assert_eq!(depends_on("   > 依赖：#4"), Vec::<u64>::new());
         assert_eq!(depends_on("```\n依赖：#4\n```\n"), Vec::<u64>::new());
+        assert_eq!(
+            depends_on("````markdown\n```\n依赖：#4\n```\n````\n"),
+            Vec::<u64>::new(),
+            "四反引号围栏里的三反引号示例不能提前关闭外层代码块"
+        );
+        assert_eq!(
+            depends_on("```\n~~~\n依赖：#4\n~~~\n```\n"),
+            Vec::<u64>::new(),
+            "反引号围栏不能被波浪号行关闭"
+        );
+        assert_eq!(
+            depends_on("```\n```rust\n依赖：#4\n```\n"),
+            Vec::<u64>::new(),
+            "带 info string 的围栏行不是结束围栏"
+        );
+        assert_eq!(
+            depends_on("````\n```\n依赖：#4\n```\n````\n依赖：#9\n"),
+            vec![9],
+            "四反引号围栏正常关闭之后，后面的真实依赖仍然算数"
+        );
     }
 
     #[test]
@@ -682,6 +805,7 @@ mod tests {
             open(3, &["P1", "P2"], ""),
             open(4, &["P1"], ""),
             open(5, &["P1"], "依赖：#4"),
+            open(6, &["P0", ACCEPTANCE_LABEL], ""),
         ];
         let q = queue(&issues, &Board::default(), None, at(NOW));
         for (n, want) in [
@@ -689,6 +813,7 @@ mod tests {
             (2, WAITING_LABEL),
             (3, "P1+P2"),
             (5, "依赖的 #4 还没关"),
+            (6, ACCEPTANCE_LABEL),
             (77, "不在打开的 issue 里"),
         ] {
             let Verdict::Refuse(why) = decide(&issues, &q, n, None) else {
@@ -711,6 +836,13 @@ mod tests {
                 Verdict::Refuse(_)
             ),
             "等裁决的不能靠理由绕过：那是 owner 的决定"
+        );
+        assert!(
+            matches!(
+                decide(&issues, &q, 6, Some("我想重做一遍")),
+                Verdict::Refuse(_)
+            ),
+            "待验收的已经做完合入，不能靠理由重新认领"
         );
     }
 

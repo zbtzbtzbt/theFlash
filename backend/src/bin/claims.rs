@@ -395,7 +395,8 @@ fn triage(options: &Options) -> ExitCode {
         return ExitCode::FAILURE;
     };
     let old = priority::level(&issue.labels);
-    if old == Level::Set(new) {
+    let remove = priority::labels_to_remove(&issue.labels, new);
+    if old == Level::Set(new) && remove.is_empty() {
         println!(
             "#{number} 已经是 {}（{}），没有改",
             new.label(),
@@ -404,11 +405,6 @@ fn triage(options: &Options) -> ExitCode {
         return ExitCode::SUCCESS;
     }
     let body = priority::triage_comment(options.agent(), new, &old, important, urgent, now);
-    let remove: Vec<&str> = Priority::ALL
-        .into_iter()
-        .filter(|p| *p != new && issue.labels.iter().any(|l| l == p.label()))
-        .map(Priority::label)
-        .collect();
     println!("要发的定级评论：\n{body}");
     println!(
         "要改的标签：加上 {}{}",
@@ -423,27 +419,87 @@ fn triage(options: &Options) -> ExitCode {
         println!("没有真的发评论、没有改标签（--dry-run 或 --replay）");
         return ExitCode::SUCCESS;
     }
-    if let Err(code) = comment(options, number, &body) {
-        return code;
-    }
-    match snapshot::edit_labels(options.repo(), number, &[new.label()], &remove) {
-        Ok(_) => {
-            println!("#{number} 现在是 {}", new.label());
-            ExitCode::SUCCESS
-        }
-        Err(e) => {
+    let before = match options.issue(number) {
+        Ok(i) => i,
+        Err(code) => return code,
+    };
+    let before_urls: Vec<String> = before.comments.iter().map(|c| c.url.clone()).collect();
+    let posted = match comment(options, number, &body) {
+        Ok(url) => url,
+        Err(code) => return code,
+    };
+    let after_comment = match options.issue(number) {
+        Ok(i) => i,
+        Err(code) => return code,
+    };
+    match priority::confirm_triage(&before_urls, &after_comment, &posted) {
+        priority::TriageConfirmed::Won => {}
+        priority::TriageConfirmed::Lost {
+            agent,
+            priority: won,
+            comment: winner_url,
+        } => {
             eprintln!(
-                "{e}\n定级评论已经发出去了，标签没改成：\
-                 `gh issue edit {number} --add-label {}{}` 补上",
-                new.label(),
-                remove
-                    .iter()
-                    .map(|l| format!(" --remove-label {l}"))
-                    .collect::<String>()
+                "拒绝 — #{number} 几乎同时被 {agent} 定成了 {}（{winner_url}），\
+                 那条评论更早，以它为准；我这条没有改标签",
+                won.label()
             );
-            ExitCode::from(2)
+            return ExitCode::FAILURE;
+        }
+        priority::TriageConfirmed::Unclear(why) => {
+            eprintln!("定级评论发出去了，但读回来确认时出错：{why}；没有改标签");
+            return ExitCode::from(2);
         }
     }
+    let mut remove = priority::labels_to_remove(&after_comment.labels, new);
+    for label in priority::labels_to_remove(&issue.labels, new) {
+        if !remove.contains(&label) {
+            remove.push(label);
+        }
+    }
+    let remove_refs: Vec<&str> = remove.iter().map(String::as_str).collect();
+    if let Err(e) = snapshot::edit_labels(options.repo(), number, &[new.label()], &remove_refs) {
+        eprintln!(
+            "{e}\n定级评论已经发出去了，标签没改成：\
+             `gh issue edit {number} --add-label {}{}` 补上",
+            new.label(),
+            remove
+                .iter()
+                .map(|l| format!(" --remove-label {l}"))
+                .collect::<String>()
+        );
+        return ExitCode::from(2);
+    }
+    let mut verified = match options.issue(number) {
+        Ok(i) => i,
+        Err(code) => return code,
+    };
+    let leftover = priority::labels_to_remove(&verified.labels, new);
+    let has_new = verified.labels.iter().any(|l| l == new.label());
+    if !has_new || !leftover.is_empty() {
+        let add_slice: &[&str] = if has_new { &[] } else { &[new.label()] };
+        let leftover_refs: Vec<&str> = leftover.iter().map(String::as_str).collect();
+        if let Err(e) = snapshot::edit_labels(options.repo(), number, add_slice, &leftover_refs) {
+            eprintln!("{e}\n补齐 #{number} 的优先级标签失败");
+            return ExitCode::from(2);
+        }
+        verified = match options.issue(number) {
+            Ok(i) => i,
+            Err(code) => return code,
+        };
+    }
+    if priority::level(&verified.labels) != Level::Set(new)
+        || !priority::labels_to_remove(&verified.labels, new).is_empty()
+    {
+        eprintln!(
+            "#{number} 改完标签之后读回来是 {}，不是单一的 {}：请去 issue 上核对标签",
+            priority::level(&verified.labels).describe(),
+            new.label()
+        );
+        return ExitCode::from(2);
+    }
+    println!("#{number} 现在是 {}", new.label());
+    ExitCode::SUCCESS
 }
 
 /// Every claim in progress. Exit code 0 even when there are none: asking
