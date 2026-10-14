@@ -46,6 +46,14 @@ theFlash 是大麦网（damai.cn）的抢票程序，一个 AI Native 项目：�
 7. **提交**：一个 commit 只做一件事，格式见下。提交后 `git show --stat HEAD` 必须只列出你的文件。
 8. **开 PR 并盯 CI**：推到自己的分支，`gh pr create` 提 PR，等 CI。不直接推 main（只有发版 tag 例外，见 [0007](docs/decisions/0007-merge-gate.md)）。CI 红了，修它就是你当下的任务。
 9. **交给审查，再交给验收**：CI 绿了以后在 issue 上汇报怎么运行、每条验收标准的证据、没做的部分，附 PR 链接，然后给 PR 加 `待审查` 标签。不要合并自己的 PR，不要给自己的 issue 加 `待验收`，不要关闭 issue。另一个 agent 审查并合并（见下面的[审查和合并](#审查和合并)），合并后由审查者加 `待验收`；再由第三个 agent 按 [prompts/acceptance.md](prompts/acceptance.md) 验收：通过就由它关闭；不通过它会把标签换成 `验收未通过` 并写明问题，由你或下一个接手的 agent 修好后重新加上 `待验收`。
+10. **收尾**：PR 合入、issue 验收通过后，删掉自己的 worktree，以及为这个任务建的其他目录。会话等不到验收就要结束的，在交出去时就删：分支已经推到远程，返工时重新 `git worktree add` 就行。
+    ```sh
+    cd ../theFlash                                  # 先离开要删的目录
+    git -C ../theFlash-<任务名> status --short       # 确认没有还要的改动
+    git worktree remove --force ../theFlash-<任务名>
+    git worktree prune
+    ```
+    worktree 里的临时文件（`.task-tmp/`、`.review-evidence/`、临时 HOME）随它一起删掉，要留作证据的先贴到 issue 或 PR 上。同一个任务开过的其他目录（例如 rebase 前的旧副本 `../theFlash-<任务名>-<旧 sha>`）也一起删。只删自己建的：别人的 worktree 看起来再闲置，也可能正有会话在用（#58 清理时，65 个里有 20 个在最近 40 分钟内还有改动）。
 
 ## 审查和合并
 
@@ -57,6 +65,7 @@ theFlash 是大麦网（damai.cn）的抢票程序，一个 AI Native 项目：�
 2. 在 PR 上写一条审查记录评论，格式和字段见 [合并闸门](docs/subsystems/merge-gate.md#审查记录的格式)：被审查的 SHA、合到的 main、审查者、结论、跑了什么。记录写在合并之前，合并后补的记录不算。
 3. 合并：`scripts/merge-gate merge --pr <号>`（或 `scripts/merge-gate queue` 把所有能合的依次合入）。它会重新核对一遍，然后用 `--match-head-commit` 合并被审查的那个提交。被它拒绝时，拒绝信息里写了是哪一条不满足。
 4. 合并后给对应 issue 加 `待验收`。
+5. 合并了或打回了，就按[会话流程第 10 步](#一次会话的流程)删掉自己的审查 worktree。下一轮再审时从最新 main 重新建。
 
 `scripts/merge-gate check --pr <号>` 只核对、不合并，实现者自己也可以跑，看看还差什么。
 

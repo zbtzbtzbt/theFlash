@@ -95,3 +95,4 @@ gh pr list --state merged --search "merged:>=<水位线日期>" --json number,ti
 2. 提交：`lessons: <日期> 复盘 — <一句话写最主要的发现>`。正文列出新增、计次、升级了哪些教训。
 3. `git show --stat HEAD` 只包含 LESSONS.md 和 docs/code-standards.md（守护测试在另一个 commit 里）。
 4. push。
+5. 合入后删掉 `../theFlash-review`，命令见 [AGENTS.md 会话流程第 10 步](../AGENTS.md#一次会话的流程)。
