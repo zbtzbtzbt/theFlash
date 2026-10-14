@@ -1,5 +1,5 @@
 # 这两张索引表由 scripts/docs_index.py 生成，并行 PR 各加一行时不该停在冲突上：
-# union 合并两边的行都保留，顺序万一不对由 make check 里的 --check 拦住，跑一次
-# `make docs-index` 就好（#45，决定记录 0015）。
+# union 合并两边的行都保留，顺序万一不对、或者旧的那批落到了生成区外（#80），由
+# make check 里的 --check 拦住，跑一次 `make docs-index` 就好（#45，决定记录 0015）。
 docs/decisions/README.md merge=union
 docs/subsystems/README.md merge=union
