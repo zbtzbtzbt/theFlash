@@ -970,6 +970,39 @@ fn a_candidate_that_could_not_be_written_is_said_with_the_rest_of_the_report() {
     assert_eq!(out.status.code(), Some(1), "{text}");
 }
 
+/// A candidate the redaction rule refuses whole is a different thing from
+/// one this machine could not write: the refusal is the owner's rule
+/// working, and the bytes were never meant to stay here, so the report
+/// names the response and the rule rather than telling whoever reads it
+/// to go look at a path or a disk (#78). The run still ends in 1, because
+/// the change that made it keep a candidate is a finding on its own.
+#[test]
+fn a_candidate_the_redaction_rule_refuses_is_reported_as_the_rule_not_as_a_disk() {
+    let home = Home::new("candidate-refused");
+    let dir = home.path().join("candidates");
+    // Built from pieces so this file does not carry what repo_guard looks
+    // for.
+    let header = ["Set-", "Cookie", ":"].concat();
+    let routes = changed(unchanged_routes(), "dataId=286937788", |body| {
+        let changed = body.replace("\"frontEndStatus\":\"2\"", "\"frontEndStatus\":\"777\"");
+        format!("{header} sid=1\n{changed}")
+    });
+    let damai = support::MockDamai::start_bodies(routes);
+    let out = run(&home, &damai, &["--candidates", dir.to_str().unwrap()]);
+    let text = stdout(&out);
+    let refused = dir.join("sku_1086791513717_286937788.jsonp");
+    assert!(
+        text.contains(&refused.display().to_string()) && text.contains("Cookie"),
+        "没说是哪一份响应、按哪条规则丢掉的：{text}"
+    );
+    assert!(!refused.exists(), "带 Set-Cookie 的响应不该被保存：{text}");
+    assert!(
+        !text.contains("不是大麦改版"),
+        "脱敏规则拒绝不是本机的磁盘问题，不该说成结果没落盘：{text}"
+    );
+    assert_eq!(out.status.code(), Some(1), "{text}");
+}
+
 /// `theflash inspect record` is run for the files it writes. One it could
 /// not write is the command failing, however many of the others landed:
 /// it used to say so on stderr and exit 0, so a caller that checks the
@@ -1212,6 +1245,148 @@ fn record_takes_personal_data_out_and_refuses_what_it_cannot_clean() {
         stderr.contains("Cookie") && stderr.contains("没有保存"),
         "没说清为什么没保存：{stderr}"
     );
+    // The refusal is the rule working, but the fixture the command was
+    // run for is still not there, so the command did not succeed (#78).
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "票档 fixture 被拒绝，命令却算成功：{stderr}"
+    );
+}
+
+/// What one `theflash inspect record` run looks like from outside: what it
+/// was served, what the output directory already had in it, and what the
+/// caller may conclude from the exit code, stderr and the files.
+struct RecordCase {
+    what: &'static str,
+    routes: Vec<(String, String)>,
+    /// Makes the output directory stand in the way of a fixture, the way
+    /// a half-cleaned testdata directory does.
+    occupy: Vec<&'static str>,
+    code: i32,
+    /// Fragments the command has to say about this run, all of them in
+    /// the same message.
+    says: Vec<String>,
+    kept: Vec<&'static str>,
+    missing: Vec<&'static str>,
+}
+
+/// `theflash inspect record` is run for the files it writes down, so a
+/// response it fetched and did not write down is the command failing —
+/// whether the redaction rule refused it whole (the rule working as the
+/// owner decided) or this machine could not write it (a path or a disk).
+/// Either way the caller is told which responses are on disk and which
+/// are missing, instead of a line on stderr under exit 0 (#78): the
+/// fixtures are what the next `make check` replays, and fetching them
+/// again costs another request from the one address every agent shares.
+#[test]
+fn record_says_what_it_kept_and_what_is_missing_whatever_stopped_a_fixture() {
+    // Built from pieces so this file does not carry what repo_guard looks
+    // for.
+    let header = ["Set-", "Cookie", ":"].concat();
+    let plant = |routes: Vec<(String, String)>, target: &str| {
+        let header = header.clone();
+        changed(routes, target, move |body| {
+            format!("{header} sid=1\n{body}")
+        })
+    };
+    let page = "item_probe.html";
+    let tiers = "sku_probe_286937788.jsonp";
+    let cases = vec![
+        RecordCase {
+            what: "两份都写下来了",
+            routes: unchanged_routes(),
+            occupy: Vec::new(),
+            code: 0,
+            says: Vec::new(),
+            kept: vec![page, tiers],
+            missing: Vec::new(),
+        },
+        RecordCase {
+            what: "票档被脱敏规则整份拒绝",
+            routes: plant(unchanged_routes(), "dataId=286937788"),
+            occupy: Vec::new(),
+            code: 1,
+            says: vec![
+                tiers.to_string(),
+                "Cookie".to_string(),
+                "没有保存".to_string(),
+                page.to_string(),
+            ],
+            kept: vec![page],
+            missing: vec![tiers],
+        },
+        RecordCase {
+            what: "票档写不进去",
+            routes: unchanged_routes(),
+            occupy: vec![tiers],
+            code: 1,
+            says: vec![tiers.to_string(), "写不进去".to_string(), page.to_string()],
+            kept: vec![page],
+            missing: Vec::new(),
+        },
+        RecordCase {
+            what: "一份被拒绝、一份写不进去，什么都没留下",
+            routes: plant(unchanged_routes(), "dataId=286937788"),
+            occupy: vec![page],
+            code: 1,
+            says: vec![
+                page.to_string(),
+                "写不进去".to_string(),
+                tiers.to_string(),
+                "Cookie".to_string(),
+                "这次一个文件都没写下来".to_string(),
+            ],
+            kept: Vec::new(),
+            missing: vec![tiers],
+        },
+    ];
+    for case in cases {
+        let home = Home::new("record-outcome");
+        let dir = home.path().join("testdata");
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in &case.occupy {
+            std::fs::create_dir_all(dir.join(name)).unwrap();
+        }
+        let damai = support::MockDamai::start_bodies(case.routes);
+        let mut cmd = home.theflash(&damai.base_url());
+        cmd.args([
+            "inspect",
+            "record",
+            "1086791513717",
+            "--as",
+            "probe",
+            "--dir",
+            dir.to_str().unwrap(),
+            "--sessions",
+            "1",
+            "--gap",
+            "0",
+        ]);
+        let out = support::output_within(cmd, 60);
+        let said = format!("{}{}", stdout(&out), String::from_utf8_lossy(&out.stderr));
+        let what = case.what;
+        assert_eq!(out.status.code(), Some(case.code), "{what}：{said}");
+        for fragment in &case.says {
+            assert!(
+                said.contains(fragment.as_str()),
+                "{what}：没说 {fragment}：{said}"
+            );
+        }
+        for name in &case.kept {
+            assert!(dir.join(name).is_file(), "{what}：{name} 没写下来：{said}");
+            assert!(said.contains(name), "{what}：没说 {name} 留下来了：{said}");
+        }
+        for name in &case.missing {
+            assert!(
+                !dir.join(name).exists(),
+                "{what}：{name} 不该被保存：{said}"
+            );
+        }
+        if case.code == 0 {
+            assert!(!said.contains("没有保存"), "{what}：{said}");
+        }
+    }
 }
 
 /// Everything that stops damai access ends the whole inspection, not just

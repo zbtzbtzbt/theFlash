@@ -509,25 +509,21 @@ pub async fn run(client: &Client, opts: &Options) -> Result<Report, Error> {
         if !event.is_clean()
             && let Some(dir) = &opts.candidates_dir
         {
-            if let Err(why) = write_candidate(
+            keep_candidate(
                 dir,
                 &format!("item_{id}.html"),
                 &page.body,
                 &mut event,
-                &mut report.notes,
-            ) {
-                report.unsaved.push(candidate_lost(why));
-            }
-            if let Some((perform_id, body)) = &tier_body
-                && let Err(why) = write_candidate(
+                &mut report,
+            );
+            if let Some((perform_id, body)) = &tier_body {
+                keep_candidate(
                     dir,
                     &format!("sku_{id}_{perform_id}.jsonp"),
                     body,
                     &mut event,
-                    &mut report.notes,
-                )
-            {
-                report.unsaved.push(candidate_lost(why));
+                    &mut report,
+                );
             }
         }
         report.events.push(event);
@@ -550,15 +546,14 @@ pub async fn run(client: &Client, opts: &Options) -> Result<Report, Error> {
         // change most needs to replay, so it is kept too.
         if let Some(body) = &failed.body
             && let Some(dir) = &opts.candidates_dir
-            && let Err(why) = write_candidate(
+        {
+            keep_candidate(
                 dir,
                 &format!("item_{}.html", failed.item_id),
                 body,
                 &mut event,
-                &mut report.notes,
-            )
-        {
-            report.unsaved.push(candidate_lost(why));
+                &mut report,
+            );
         }
         report.events.push(event);
     }
@@ -802,31 +797,69 @@ fn candidate_lost(why: String) -> String {
     )
 }
 
+/// Why a response that was fetched is not on disk. The two are told
+/// apart because an inspection reports them differently — the rule
+/// working is not a disk problem — but neither is a file whoever fixes
+/// the change can replay, so `theflash inspect record` fails on both
+/// (#78).
+enum NotWritten {
+    /// The redaction rule refusing a response whole, which is that rule
+    /// working as the owner decided (#11 of 0011).
+    Refused(String),
+    /// This machine failing to keep a response it has already fetched,
+    /// which is a path or a disk, not damai.cn (#77).
+    Failed(String),
+}
+
+impl NotWritten {
+    /// What to print either way: what is missing, and why.
+    fn why(&self) -> &str {
+        match self {
+            NotWritten::Refused(why) | NotWritten::Failed(why) => why,
+        }
+    }
+}
+
+/// Keeps one candidate response for an inspection, and puts what stopped
+/// it where the report says it: a refusal is the redaction rule working,
+/// so it is a note, while a response this machine could not write is a
+/// result that did not reach the disk and fails the run (#77).
+fn keep_candidate(
+    dir: &Path,
+    name: &str,
+    body: &str,
+    event: &mut EventReport,
+    report: &mut Report,
+) {
+    match write_candidate(dir, name, body, event) {
+        Ok(()) => {}
+        Err(NotWritten::Refused(why)) => report.notes.push(why),
+        Err(NotWritten::Failed(why)) => report.unsaved.push(candidate_lost(why)),
+    }
+}
+
 /// Writes one response where whoever fixes the change replays it from.
-/// `Err` is this machine failing to keep a response it has already
-/// fetched, which is not something a run can shrug off (#77); a response
-/// the redaction rule refuses whole is that rule working as the owner
-/// decided, and goes in `notes`.
 fn write_candidate(
     dir: &Path,
     name: &str,
     body: &str,
     event: &mut EventReport,
-    notes: &mut Vec<String>,
-) -> Result<(), String> {
+) -> Result<(), NotWritten> {
     let redacted = redact::redact(body);
     let left = redact::sensitive(&redacted);
+    let path = dir.join(name);
     if !left.is_empty() {
-        notes.push(format!(
-            "{name} 没有保存：脱敏之后第 {} 行还命中“{}”，按规则这份响应整份丢掉",
+        return Err(NotWritten::Refused(format!(
+            "{} 没有保存：脱敏之后第 {} 行还命中“{}”，按规则这份响应整份丢掉",
+            path.display(),
             left[0].line,
             left[0].rule.name()
-        ));
-        return Ok(());
+        )));
     }
-    std::fs::create_dir_all(dir).map_err(|e| format!("{} 建不出来：{e}", dir.display()))?;
-    let path = dir.join(name);
-    std::fs::write(&path, redacted).map_err(|e| format!("{} 写不进去：{e}", path.display()))?;
+    std::fs::create_dir_all(dir)
+        .map_err(|e| NotWritten::Failed(format!("{} 建不出来：{e}", dir.display())))?;
+    std::fs::write(&path, redacted)
+        .map_err(|e| NotWritten::Failed(format!("{} 写不进去：{e}", path.display())))?;
     event.candidates.push(path);
     Ok(())
 }
@@ -908,10 +941,10 @@ pub async fn record(
 ) -> Result<Vec<PathBuf>, Error> {
     let mut pacer = Pacer { gap, last: None };
     let mut written = Vec::new();
-    let mut notes = Vec::new();
-    // Responses this machine fetched and then could not write down. The
-    // point of the command is the files, so it fails rather than printing
-    // the ones that did land and exiting 0 (#77).
+    // Responses this machine fetched and then did not write down, refused
+    // and failed alike. The point of the command is the files, so it
+    // fails rather than printing the ones that did land and exiting 0
+    // (#77, #78).
     let mut lost: Vec<String> = Vec::new();
     let mut event = EventReport {
         item_id: 0,
@@ -929,26 +962,18 @@ pub async fn record(
         Target::Home => {
             pacer.wait().await;
             let html = client.home_page().await?;
-            if let Err(why) =
-                write_candidate(dir, &format!("{name}.html"), &html, &mut event, &mut notes)
-            {
-                lost.push(why);
+            if let Err(why) = write_candidate(dir, &format!("{name}.html"), &html, &mut event) {
+                lost.push(why.why().to_string());
             }
             written.append(&mut event.candidates);
-            return finish(written, notes, lost);
+            return finish(written, lost);
         }
         Target::Item(id) => id,
     };
     pacer.wait().await;
     let html = client.item_page(item_id).await?;
-    if let Err(why) = write_candidate(
-        dir,
-        &format!("item_{name}.html"),
-        &html,
-        &mut event,
-        &mut notes,
-    ) {
-        lost.push(why);
+    if let Err(why) = write_candidate(dir, &format!("item_{name}.html"), &html, &mut event) {
+        lost.push(why.why().to_string());
     }
     let json = item_page_json(&html)
         .map_err(|reason| Error::Parse {
@@ -966,28 +991,20 @@ pub async fn record(
             &format!("sku_{name}_{perform_id}.jsonp"),
             &body,
             &mut event,
-            &mut notes,
         ) {
-            lost.push(why);
+            lost.push(why.why().to_string());
         }
     }
     written.append(&mut event.candidates);
-    finish(written, notes, lost)
+    finish(written, lost)
 }
 
 /// What `record` has to say, and whether it did what it was asked. A
-/// response it fetched and could not write down is the command failing:
+/// response it fetched and did not write down is the command failing:
 /// the fixture it was run for is not there, and saying so on stderr while
-/// exiting 0 left whoever called it believing it was (#77). What did get
-/// written is named too, so a half-finished run can be cleaned up.
-fn finish(
-    written: Vec<PathBuf>,
-    notes: Vec<String>,
-    lost: Vec<String>,
-) -> Result<Vec<PathBuf>, Error> {
-    for note in &notes {
-        eprintln!("{note}");
-    }
+/// exiting 0 left whoever called it believing it was (#77, #78). What did
+/// get written is named too, so a half-finished run can be cleaned up.
+fn finish(written: Vec<PathBuf>, lost: Vec<String>) -> Result<Vec<PathBuf>, Error> {
     if lost.is_empty() {
         return Ok(written);
     }
