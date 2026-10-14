@@ -142,8 +142,6 @@ pub fn redact(text: &str) -> String {
     out
 }
 
-#[derive(Debug, Clone, Copy)]
-
 /// damai.cn's own text as something theFlash prints may carry it. Values
 /// [`redact`] can replace are replaced; a line that still trips a rule
 /// afterwards is dropped and named instead, because a login header has no
@@ -180,6 +178,7 @@ pub fn for_report(text: &str) -> String {
         .collect()
 }
 
+#[derive(Debug, Clone, Copy)]
 enum Replacement {
     /// A cookie value, which has no length worth keeping.
     Redacted,
