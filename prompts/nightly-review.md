@@ -73,7 +73,34 @@ gh pr list --state merged --search "merged:>=<水位线日期>" --json number,ti
 - 代码和一条“采用”状态的决定相矛盾。
 - 一条决定被推翻，但新记录没有给出旧记录当时不知道的证据；或者同一件事在几天内来回改。
 
-## 3. 写进 LESSONS.md
+## 3. 看流水线有没有在流动
+
+上一步看的是 commit 做得好不好，这一步看活卡在哪一站。各站和状态见[协作流水线](../docs/subsystems/pipeline.md)。
+
+```sh
+# 每一站积压了什么、最老的一件等了多久
+gh pr list --state open --json number,title,labels,createdAt,updatedAt
+gh issue list --state open --limit 200 --json number,title,labels,createdAt,updatedAt
+# 返工圈数：PR 上的审查记录和“要修改”来回了几轮，issue 验收没通过几次
+gh pr list --state all --search "updated:>=<水位线日期>" --json number,comments,reviews
+# 队列的样子：没定级的、被依赖挡着的、等裁决的
+scripts/claims queue --json
+```
+
+| 看什么 | 发现了怎么办 |
+| --- | --- |
+| `待审查` 的 PR、`待验收` 的 issue 等了超过一天 | 写进 LESSONS（是哪一站缺人）；调度程序没派的，查它为什么跳过（`scripts/dispatch plan`） |
+| 同一个 PR 在 `要修改` 和 `待审查` 之间来回两轮以上，或者同一个 issue 验收没通过两次以上 | 找根因在哪一站：issue 没写清验收标准、实现没复现原始场景、审查没跑检查。写进 LESSONS |
+| main 上有提交的 issue 还开着、却没有 `待验收` | 合并后漏了交接。实现者汇报过的就补上标签并说明是哪个提交；记一条教训 |
+| 没定级的 issue | 定级（`scripts/claims triage`）。新 issue 开了一天还没定级，说明开 issue 的人没定、工作循环也没先定级，记一条教训 |
+| 同时超过三个 P0；大部分 issue 挤在 P1 | 定级失准：逐个看两个轴的理由，不成立的改级（留理由） |
+| P2、P3 的 issue 后来出了事故，或者 P0 其实一直没人急 | 定级失准：记一条教训，写清当时的理由错在哪 |
+| 同一件事被开了几个 issue | 留最早的，其余标重复并关掉（not planned，评论指向留下的那个）；记一条教训 |
+| 认领评论里的 `不按顺序` 理由 | 理由站不住的（例如“顺手”），记一条教训 |
+
+卡住的活本身不在复盘里修：给它开 issue 或在原 issue 上说明，复盘只改文档。
+
+## 4. 写进 LESSONS.md
 
 对每个发现：
 
@@ -81,15 +108,15 @@ gh pr list --state merged --search "merged:>=<水位线日期>" --json number,ti
 2. 没有：在合适的分类下加一条新教训，格式见 LESSONS.md 的“写法”。规则写成一句可执行的话，证据必须是真实的 sha、issue 号或 CI run，不能编造。
 3. 做得好的也记一笔：“Done right on MM-DD: <sha> ……”。
 
-在文件开头（标题和说明之后）加一段当天的概况：多少个 commit、多少次发版、多少个返工，以及最主要的问题模式。
+在文件开头（标题和说明之后）加一段当天的概况：多少个 commit、多少次发版、多少个返工、每一站积压了多少，以及最主要的问题模式。
 
-## 4. 升级
+## 5. 升级
 
 - 在 3 个或更多不同日子出现的教训，升级进 `docs/code-standards.md`：写进对应的表格或验收标准，附上证据。LESSONS.md 里把它移到“已升级进 code standards”一节，只留一句话和日期。
 - 升级时判断：这条规则能不能机械判断？能，就在另一个 commit 里写成 CI 步骤或守护测试（例如扫描源码禁止某个调用、要求某段注释），并确认它在违规代码上会失败。CI 步骤旁边的注释写明是哪次事故促成的。
 - 重复或已经被代码强制的教训可以合并、删减。LESSONS.md 保持在 30KB 以内。
 
-## 5. 收尾
+## 6. 收尾
 
 1. 把第一行的水位线改成这次复盘看到的最后一个 commit：`<!-- reviewed-through: <sha> (<日期 时间 时区>) -->`。
 2. 提交：`lessons: <日期> 复盘 — <一句话写最主要的发现>`。正文列出新增、计次、升级了哪些教训。

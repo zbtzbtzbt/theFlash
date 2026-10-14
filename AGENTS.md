@@ -11,7 +11,7 @@ theFlash 是大麦网（damai.cn）的抢票程序，一个 AI Native 项目：�
 - 技术选型、模块划分、接口设计、依赖引入都由 agent 决定。不要停下来问人“用 A 还是 B”；比较之后选一个，写成一条[架构决定记录](docs/decisions/README.md)，然后继续。
 - 动手前先读 `docs/decisions/` 里已有的决定。要推翻一条已有的决定，必须有它当时不知道的新证据，并写一条新的记录取代它。不要因为个人偏好来回改。
 - 子系统稳定下来后，在 [docs/subsystems/](docs/subsystems/README.md) 里写它的设计参考，后来的 agent 靠它理解系统，而不是靠问人。
-- 只有涉及花钱、真实账号、法律风险或用户可见的产品取舍时，才需要人裁决。这时开一个 issue，写清选项、各自的后果和你的建议，在等裁决期间先做不受影响的部分。
+- 只有涉及花钱、真实账号、法律风险或用户可见的产品取舍时，才需要人裁决。这时开一个 issue，写清选项、各自的后果和你的建议，加上 `等裁决` 标签（owner 按它看自己欠着哪些裁决），在等裁决期间先做不受影响的部分。
 
 ## 仓库结构和命令
 
@@ -20,7 +20,7 @@ theFlash 是大麦网（damai.cn）的抢票程序，一个 AI Native 项目：�
 | `backend/` | Rust 后端（高性能部分）。工具链由根目录的 `rust-toolchain.toml` 指定。 |
 | `frontend/` | TypeScript 前端。Biome 负责格式和 lint，Vitest 负责测试，Node 版本见 `.node-version`。 |
 | `scripts/check.sh` | 合并或发版前必须通过的全部检查。`make check` 和 CI 跑的都是它。 |
-| `scripts/claims` | 认领：谁在做哪个 issue、改哪些模块、认领过期没有。见 [认领租约](docs/subsystems/claim-lease.md)。 |
+| `scripts/claims` | 排队和认领：下一个该做哪个 issue（`queue`）、定级（`triage`）、谁在做哪个 issue、改哪些模块、认领过期没有。见 [Issue 优先级](docs/subsystems/issue-priority.md)和[认领租约](docs/subsystems/claim-lease.md)。 |
 | `.github/workflows/test.yml` | CI：在 Linux 和 macOS 上跑 `scripts/check.sh`。 |
 
 只支持 macOS 和 Linux，不支持 Windows。不要为 Windows 写兼容代码、分支或 CI。
@@ -33,20 +33,23 @@ theFlash 是大麦网（damai.cn）的抢票程序，一个 AI Native 项目：�
 
 1. [LESSONS.md](LESSONS.md)：最近合并的工作哪里做错了，以及本可以拦住它的规则。
 2. [docs/code-standards.md](docs/code-standards.md)：改动要满足的规则和验收标准。
-3. [docs/decisions/](docs/decisions/README.md)：已经做过的架构决定和理由。
-4. 要改的子系统的设计参考：[docs/subsystems/README.md](docs/subsystems/README.md)。改之前先读，再对照它链接的源码。
+3. [协作流水线](docs/subsystems/pipeline.md)：一个 issue 经过哪几站、每一站谁负责、这一轮先做什么。
+4. [docs/decisions/](docs/decisions/README.md)：已经做过的架构决定和理由。
+5. 要改的子系统的设计参考：[docs/subsystems/README.md](docs/subsystems/README.md)。改之前先读，再对照它链接的源码。
 
 ## 一次会话的流程
 
+先决定这一轮做什么：按[流水线的顺序](docs/subsystems/pipeline.md#这一轮先做什么)找第一件能做的事，先收尾再开始（main 红、P0、发版、自己的返工、审查、验收，然后才是新 issue）。下面是做一个 issue 的步骤；审查和验收各有自己的步骤（[审查和合并](#审查和合并)、[prompts/acceptance.md](prompts/acceptance.md)）。
+
 1. **自己的 worktree**：`git fetch && git worktree add --detach ../theFlash-<任务名> origin/main`。两个会话不能共用一个 checkout，否则会把对方暂存的文件提交到自己的标题下。
-2. **认领**：先 `scripts/claims list` 看谁在做什么、改哪些模块、有没有已经过期的认领。要改的模块和进行中的认领重叠时，排在它后面，或者在两个 issue 上写明怎么分工。然后认领：
+2. **挑和认领**：先 `scripts/claims queue --agent <你>` 看现在能开工的 issue，按 P0～P3 排；排在最前面的没定级的 issue，先用 `scripts/claims triage` 定级（标准见 [Issue 优先级](docs/subsystems/issue-priority.md)）。挑“下一个”，或者同一档里你能做、模块不冲突的那个；要跳过更高一档的，认领时用 `--out-of-order <为什么>` 写明。再 `scripts/claims list` 看谁在做什么、改哪些模块、有没有已经过期的认领。要改的模块和进行中的认领重叠时，排在它后面，或者在两个 issue 上写明怎么分工。然后认领：
 
    ```sh
    scripts/claims claim --issue <号> --agent <你是哪个 agent> \
        --modules <你要改的路径,逗号隔开> --branch <你的分支> --due <预计完成时间>
    ```
 
-   它加上 `认领中` 标签并发一条[租约评论](docs/subsystems/claim-lease.md)（哪个 agent、改哪些模块、预计完成）。没有 issue 就新建一个。再看一眼 `git log origin/main`，确认没人已经修了。带 `指派:<agent>` 标签的 issue 只由那个 agent 认领。认领期间至少每 30 分钟 `scripts/claims heartbeat --issue <号> --agent <你> --note <进度>` 或者推一次分支；超过 2 小时没有任何更新，这条认领就算过期，别的 agent 可以 `scripts/claims reclaim` 收回。看到已经过期的认领，先收回（它会在 issue 上说明）再认领，不要直接盖掉。
+   它加上 `认领中` 标签并发一条[租约评论](docs/subsystems/claim-lease.md)（哪个 agent、改哪些模块、预计完成）。没有 issue 就新建一个：先搜有没有重复，按[流水线里的写法](docs/subsystems/pipeline.md#issue-怎么写)写，开完就定级。手里有 `要修改` 的 PR 或 `验收未通过` 的 issue 时，先做完它们，不认领新的。再看一眼 `git log origin/main`，确认没人已经修了。带 `指派:<agent>` 标签的 issue 只由那个 agent 认领。认领期间至少每 30 分钟 `scripts/claims heartbeat --issue <号> --agent <你> --note <进度>` 或者推一次分支；超过 2 小时没有任何更新，这条认领就算过期，别的 agent 可以 `scripts/claims reclaim` 收回。看到已经过期的认领，先收回（它会在 issue 上说明）再认领，不要直接盖掉。
 3. **复现**：按报告人的原始场景复现，用他们的输入、平台和界面。fixture 用他们的原始字节，不要自己编一个相似的。
 4. **先写失败的测试**：写一个在当前代码上失败的测试，记下失败信息。
 5. **修复，并覆盖同类**：grep 同样的模式，同类位置在同一个改动里一起修。
