@@ -433,35 +433,38 @@ fn candidates(
                 known,
                 why: format!("#{} 等另一个厂商验收", issue.number),
             });
-        } else if !BUSY_LABELS.iter().any(|l| has(l)) {
-            let w = Wanted {
-                role: Role::Implement,
-                issue: Some(issue.number),
-                pull: None,
-                event: None,
-                known,
-                why: format!("#{} 还没人认领：{}", issue.number, issue.title),
+        } else if has(CLAIM_LABEL) && !claim_lease_is_live(issue, now) {
+            // An expired or handed-back `认领中` is ready again in
+            // `claims queue`; dispatch must not leave it permanently
+            // outside the implement order (#103).
+            let why = if issue.lease_alive_at.is_some() {
+                format!(
+                    "#{} 认领已经过期，先 reclaim 再做：{}",
+                    issue.number, issue.title
+                )
+            } else {
+                format!(
+                    "#{} 认领标签还在但租约已结束，可以认领：{}",
+                    issue.number, issue.title
+                )
             };
-            match priority::level(&issue.labels) {
-                Level::Unset => deferred_implement.push((w, Skip::Untriaged)),
-                Level::Several(_) => deferred_implement.push((
-                    w,
-                    Skip::ConflictingPriority(priority::level(&issue.labels).describe()),
-                )),
-                Level::Set(p) => {
-                    let blocking: Vec<u64> = priority::depends_on(&issue.body)
-                        .into_iter()
-                        .filter(|n| {
-                            *n != issue.number && snapshot.issues.iter().any(|o| o.number == *n)
-                        })
-                        .collect();
-                    if !blocking.is_empty() {
-                        deferred_implement.push((w, Skip::Blocked(blocking)));
-                    } else {
-                        fresh.push((p, issue.number, w));
-                    }
-                }
-            }
+            offer_implement(
+                issue,
+                snapshot,
+                known,
+                why,
+                &mut fresh,
+                &mut deferred_implement,
+            );
+        } else if !BUSY_LABELS.iter().any(|l| has(l)) {
+            offer_implement(
+                issue,
+                snapshot,
+                known,
+                format!("#{} 还没人认领：{}", issue.number, issue.title),
+                &mut fresh,
+                &mut deferred_implement,
+            );
         }
     }
     // `implement` follows the exact `claims queue` order: P0 to P3, and
@@ -675,16 +678,81 @@ fn vendor_of(signature: Option<&str>, config: &Config) -> Option<String> {
         .find(|v| signature == *v || signature.starts_with(v.as_str()))
 }
 
-/// The vendor an `指派:<agent>` label names.
+/// The vendor an `指派:<agent>` label names. Returns the assignee even when
+/// that vendor has no command line in this config: `build` then skips with
+/// `NoAgent` instead of treating the issue as unassigned and handing it to
+/// `least_busy` (#103).
 fn assigned_vendor(labels: &[String], config: &Config) -> Option<String> {
     for label in labels {
-        if let Some(name) = label.strip_prefix("指派:").or(label.strip_prefix("指派："))
-            && let Some(vendor) = vendor_of(Some(name.trim()), config)
+        if let Some(name) = label
+            .strip_prefix("指派:")
+            .or_else(|| label.strip_prefix("指派："))
         {
-            return Some(vendor);
+            let name = name.trim();
+            if name.is_empty() {
+                continue;
+            }
+            return Some(vendor_of(Some(name), config).unwrap_or_else(|| {
+                name.to_lowercase()
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+                    .collect()
+            }));
         }
     }
     None
+}
+
+/// Puts one `implement` candidate into the priority-ordered fresh list, or
+/// into the deferred skips when it is untriaged, conflicted, or blocked.
+fn offer_implement(
+    issue: &snapshot::Issue,
+    snapshot: &Snapshot,
+    known: Option<String>,
+    why: String,
+    fresh: &mut Vec<(crate::claim::priority::Priority, u64, Wanted)>,
+    deferred_implement: &mut Vec<(Wanted, Skip)>,
+) {
+    let w = Wanted {
+        role: Role::Implement,
+        issue: Some(issue.number),
+        pull: None,
+        event: None,
+        known,
+        why,
+    };
+    match priority::level(&issue.labels) {
+        Level::Unset => deferred_implement.push((w, Skip::Untriaged)),
+        Level::Several(_) => deferred_implement.push((
+            w,
+            Skip::ConflictingPriority(priority::level(&issue.labels).describe()),
+        )),
+        Level::Set(p) => {
+            let blocking: Vec<u64> = priority::depends_on(&issue.body)
+                .into_iter()
+                .filter(|n| *n != issue.number && snapshot.issues.iter().any(|o| o.number == *n))
+                .collect();
+            if !blocking.is_empty() {
+                deferred_implement.push((w, Skip::Blocked(blocking)));
+            } else {
+                fresh.push((p, issue.number, w));
+            }
+        }
+    }
+}
+
+/// Whether a `认领中` issue still has a live lease. Silence past the claim
+/// expiry matches `claims queue` treating the issue as ready after reclaim
+/// (#103). Unknown comments stay busy; a loaded comment list with no
+/// claim/heartbeat looks like a handed-back leftover and is free.
+fn claim_lease_is_live(issue: &snapshot::Issue, now: DateTime<Utc>) -> bool {
+    if issue.lease_unknown {
+        return true;
+    }
+    match issue.lease_alive_at {
+        Some(at) => (now - at).num_minutes() < crate::claim::lease::EXPIRES_AFTER_MINUTES,
+        None => false,
+    }
 }
 
 /// Whether the settings allow the dispatcher to touch this piece of work.

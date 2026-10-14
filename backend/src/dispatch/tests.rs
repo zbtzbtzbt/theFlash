@@ -63,6 +63,8 @@ fn issue(number: u64, labels: &[&str], agent: Option<&str>) -> Issue {
         body: String::new(),
         agent: agent.map(|s| s.to_string()),
         last_comment_at: None,
+        lease_alive_at: None,
+        lease_unknown: false,
     }
 }
 
@@ -74,6 +76,8 @@ fn raw_issue(number: u64, labels: &[&str], body: &str) -> Issue {
         body: body.to_string(),
         agent: None,
         last_comment_at: None,
+        lease_alive_at: None,
+        lease_unknown: false,
     }
 }
 
@@ -151,12 +155,16 @@ fn skipped(plan: &Plan, id: &str) -> String {
 
 #[test]
 fn each_event_goes_to_the_role_that_handles_it() {
+    let mut claimed = issue(53, &["认领中"], Some("claude"));
+    // A live lease: holder known and last seen recently. Without
+    // lease_alive_at the label alone is not enough once expiry is read.
+    claimed.lease_alive_at = Some(at("2026-10-14T03:30:00+08:00"));
     let snapshot = Snapshot {
         issues: vec![
             issue(50, &[], None),
             issue(51, &["待验收"], Some("claude")),
             issue(52, &["验收未通过"], Some("codex")),
-            issue(53, &["认领中"], Some("claude")),
+            claimed,
         ],
         pulls: vec![
             pull(60, &["待审查"], Some("codebuddy"), None),
@@ -1212,4 +1220,117 @@ fn implement_follows_priority_queue_and_skips_waiting_blocked_and_untriaged() {
     assert!(skipped(&plan, "implement-15-a1").contains("#11"));
     assert!(skipped(&plan, "implement-16-a1").contains("还没定优先级"));
     assert!(skipped(&plan, "implement-17-a1").contains("P1+P3"));
+}
+
+#[test]
+fn a_pull_request_labelled_waiting_is_not_reviewed_even_without_a_linked_issue() {
+    // The pull itself carries `等裁决`; there is no linked issue. Deleting
+    // the pull-label check in candidates() must make this test fail (#103).
+    let snapshot = Snapshot {
+        issues: Vec::new(),
+        pulls: vec![pull(90, &["待审查", "等裁决"], Some("claude"), None)],
+        main_checks: MainChecks::Green,
+        main_run: None,
+    };
+    let plan = decide(
+        &snapshot,
+        &State::default(),
+        &config(),
+        at("2026-10-14T04:00:00+08:00"),
+    );
+    assert!(
+        plan.start.is_empty(),
+        "PR 自身带等裁决时不应派审查：{:?}",
+        plan.start
+    );
+}
+
+#[test]
+fn an_assignee_whose_vendor_is_not_configured_is_not_handed_to_least_busy() {
+    // #53 is 指派:claude but this machine only has codex. claims queue
+    // would offer #58; dispatch must not start #53 on codex (#103).
+    let snapshot = Snapshot {
+        issues: vec![
+            raw_issue(53, &["P1", "指派:claude"], ""),
+            raw_issue(58, &["P1"], ""),
+        ],
+        pulls: Vec::new(),
+        main_checks: MainChecks::Green,
+        main_run: None,
+    };
+    let mut agents = BTreeMap::new();
+    agents.insert(
+        "codex".to_string(),
+        Agent {
+            command: vec!["true".to_string()],
+            prompt: PromptStyle::Argv,
+        },
+    );
+    let cfg = Config {
+        agents,
+        vendor_order: vec!["codex".to_string()],
+        max_sessions: 1,
+        cloud_roles: Vec::new(),
+        ..Config::default()
+    };
+    let plan = decide(
+        &snapshot,
+        &State::default(),
+        &cfg,
+        at("2026-10-14T11:12:00+08:00"),
+    );
+    assert!(
+        plan.start.iter().all(|t| t.issue != Some(53)),
+        "未配置的指派不能派给 least_busy：{:?}",
+        plan.start
+    );
+    assert_eq!(
+        plan.start.iter().map(|t| t.issue).collect::<Vec<_>>(),
+        vec![Some(58)],
+        "{:?}",
+        plan.start
+    );
+    assert!(
+        skipped(&plan, "implement-53-a1").contains("claude"),
+        "{}",
+        skipped(&plan, "implement-53-a1")
+    );
+}
+
+#[test]
+fn an_expired_claim_is_offered_for_implement_like_claims_queue() {
+    // #14 still has 认领中, but its claim has been silent past expiry.
+    // claims queue offers it (with a reclaim note); dispatch must too (#103).
+    let mut fourteen = raw_issue(14, &["P1", "认领中"], "");
+    fourteen.agent = Some("Claude".to_string());
+    fourteen.lease_alive_at = Some(at("2026-10-13T19:46:51Z"));
+    let snapshot = Snapshot {
+        issues: vec![fourteen, raw_issue(58, &["P1"], "")],
+        pulls: Vec::new(),
+        main_checks: MainChecks::Green,
+        main_run: None,
+    };
+    let plan = decide(
+        &snapshot,
+        &State::default(),
+        &config(),
+        at("2026-10-14T15:00:00+08:00"),
+    );
+    let implements: Vec<u64> = plan
+        .start
+        .iter()
+        .filter(|t| t.role == Role::Implement)
+        .filter_map(|t| t.issue)
+        .collect();
+    assert_eq!(
+        implements.first().copied(),
+        Some(14),
+        "过期认领应回到 implement 队列最前：{implements:?} / {:?}",
+        plan.start
+    );
+    assert!(
+        plan.start[0].why.contains("过期"),
+        "{}",
+        plan.start[0].why
+    );
 }
